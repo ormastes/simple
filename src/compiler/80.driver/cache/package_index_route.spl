@@ -2,28 +2,37 @@
 
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
-    PackageModuleIndexGenerationV1,
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
     package_module_index_read_current_v1,
     package_module_index_find_v1,
     package_module_index_invalidate_v1
-}
-use compiler.common.cache.phase_compatibility_path_io.{
-    phase_compatibility_existing_artifact_io_v1
 }
 use compiler.driver.cache.package_scc_scheduler.{
     package_scc_consume_index_schedule_v1
 }
 use compiler.driver.cache.package_archive_cache.{
-    PackageArchiveAuthorityV1, package_archive_load_v1
+    PackageArchiveAuthorityV1, PackageArchiveLoadV1,
+    package_archive_aggregate_entry_v1, package_archive_load_v1
 }
+use compiler.driver.cache.dirty_module_record.{
+    DirtyModuleRecordV1, dirty_module_record_admit_v1,
+    dirty_module_records_sort_validate_v1
+}
+
+struct PackageArchiveAdmissionV1:
+    package_identity: text
+    module_identities: [text]
+    module_entries: [PackageModuleIndexEntryV1]
+    archive_path: text
+    load: PackageArchiveLoadV1
 
 struct PackageIndexRouteV1:
     valid: bool
     reason: text
     source_paths: [text]
+    dirty_modules: [DirtyModuleRecordV1]
     package_schedule: [text]
-    interface_archive_paths: [text]
-    action_archive_paths: [text]
+    archive_admissions: [PackageArchiveAdmissionV1]
 
 fn package_index_route_sorted_unique_v1(values: [text]) -> [text]:
     var result: [text] = []
@@ -158,66 +167,112 @@ fn package_index_route_current_v1(
         generation.scv_tree_id, generation.inventory_digest)
     # Missing archives dirty only their SCC. Corrupt or mismatched archives
     # fail closed and are never replaced by a global source scan.
+    var ordered_packages: [text] = []
     for module_identity in ordered_modules:
-        val entry = package_module_index_find_v1(generation, module_identity)
-        if entry == nil:
+        val module_entry = package_module_index_find_v1(generation, module_identity)
+        if module_entry == nil:
             return PackageIndexRouteV1(false, "indexed-module-missing", [], [], [], [])
-        if dirty_packages.contains(entry!.package_identity):
+        if not ordered_packages.contains(module_entry!.package_identity):
+            ordered_packages.push(module_entry!.package_identity)
+    for package_identity in ordered_packages:
+        if dirty_packages.contains(package_identity):
             continue
+        var package_entries: [PackageModuleIndexEntryV1] = []
         var dependency_digests: [text] = []
-        for imported in entry!.direct_imports:
-            val dependency = package_module_index_find_v1(generation, imported)
-            if dependency == nil:
-                return PackageIndexRouteV1(false, "archive-dependency-missing", [], [], [], [])
-            dependency_digests = dependency_digests.push(
-                dependency!.smf_metadata_digest)
+        for candidate in generation.entries:
+            if (candidate.package_identity == package_identity and
+                    selected_modules.contains(candidate.module_identity)):
+                package_entries.push(candidate)
+                for imported in candidate.direct_imports:
+                    val dependency = package_module_index_find_v1(
+                        generation, imported)
+                    if dependency == nil:
+                        return PackageIndexRouteV1(
+                            false, "archive-dependency-missing", [], [], [], [])
+                    if not dependency_digests.contains(
+                            dependency!.smf_metadata_digest):
+                        dependency_digests.push(dependency!.smf_metadata_digest)
+        val aggregate = package_archive_aggregate_entry_v1(package_entries)
+        if aggregate == nil:
+            return PackageIndexRouteV1(
+                false, "package-aggregate-invalid", [], [], [], [])
         val archive = package_archive_load_v1(
-            cache_root, entry!, authority, dependency_digests)
+            cache_root, aggregate!, authority, dependency_digests)
         if not archive.valid:
             if not archive.source_required:
                 return PackageIndexRouteV1(
                     false, archive.reason, [], [], [], [])
             for candidate in generation.entries:
-                if candidate.scc_identity == entry!.scc_identity and
+                if candidate.scc_identity == aggregate!.scc_identity and
                         not dirty_packages.contains(candidate.package_identity):
                     dirty_packages = dirty_packages.push(candidate.package_identity)
             dirty_packages = package_index_route_sorted_unique_v1(dirty_packages)
 
     var source_paths: [text] = []
-    var interface_archive_paths: [text] = []
-    var action_archive_paths: [text] = []
+    var dirty_modules: [DirtyModuleRecordV1] = []
+    var archive_admissions: [PackageArchiveAdmissionV1] = []
+    var routed_module_count = 0
     for module_identity in ordered_modules:
         val entry = package_module_index_find_v1(generation, module_identity)
         if entry == nil or entry!.source_identity == "":
             return PackageIndexRouteV1(false, "indexed-source-missing", [], [], [], [])
         if dirty_packages.contains(entry!.package_identity):
-            val source_admission = phase_compatibility_existing_artifact_io_v1(
-                snapshot_root, entry!.source_identity)
-            if not source_admission.valid:
+            val dirty = dirty_module_record_admit_v1(
+                generation, entry!, snapshot_root, expected_revision,
+                expected_tree, expected_inventory, expected_producer,
+                expected_root_generation, expected_variant_digest)
+            if dirty.is_err():
                 return PackageIndexRouteV1(
-                    false, "indexed-source-{source_admission.reason}", [], [], [], [])
-            source_paths = source_paths.push(source_admission.canonical_path)
+                    false, "dirty-module-admission-failed", [], [], [], [])
+            dirty_modules = dirty_modules.push(dirty.unwrap())
+            source_paths = source_paths.push(dirty_modules[dirty_modules.len() - 1].source_identity)
+            routed_module_count = routed_module_count + 1
             continue
+        var already_routed = false
+        for admitted in archive_admissions:
+            if admitted.package_identity == entry!.package_identity:
+                already_routed = true
+                break
+        if already_routed:
+            continue
+        var package_entries: [PackageModuleIndexEntryV1] = []
+        var module_identities: [text] = []
         var dependency_digests: [text] = []
-        for imported in entry!.direct_imports:
-            val dependency = package_module_index_find_v1(generation, imported)
-            if dependency == nil:
-                return PackageIndexRouteV1(false, "archive-dependency-missing", [], [], [], [])
-            dependency_digests = dependency_digests.push(
-                dependency!.smf_metadata_digest)
+        for candidate in generation.entries:
+            if (candidate.package_identity == entry!.package_identity and
+                    selected_modules.contains(candidate.module_identity)):
+                package_entries.push(candidate)
+                module_identities.push(candidate.module_identity)
+                for imported in candidate.direct_imports:
+                    val dependency = package_module_index_find_v1(
+                        generation, imported)
+                    if dependency == nil:
+                        return PackageIndexRouteV1(
+                            false, "archive-dependency-missing", [], [], [], [])
+                    if not dependency_digests.contains(
+                            dependency!.smf_metadata_digest):
+                        dependency_digests.push(dependency!.smf_metadata_digest)
+        val aggregate = package_archive_aggregate_entry_v1(package_entries)
+        if aggregate == nil:
+            return PackageIndexRouteV1(
+                false, "package-aggregate-invalid", [], [], [], [])
         val archive = package_archive_load_v1(
-            cache_root, entry!, authority, dependency_digests)
+            cache_root, aggregate!, authority, dependency_digests)
         if not archive.valid:
             return PackageIndexRouteV1(false, archive.reason, [], [], [], [])
-        interface_archive_paths = interface_archive_paths.push(
-            archive.interface_path)
-        action_archive_paths = action_archive_paths.push(archive.action_path)
-    if (source_paths.len() + interface_archive_paths.len() !=
-            selected_modules.len() or
-            interface_archive_paths.len() != action_archive_paths.len()):
+        archive_admissions = archive_admissions.push(PackageArchiveAdmissionV1(
+            entry!.package_identity, module_identities.sorted(), package_entries,
+            archive.archive_path, archive))
+        routed_module_count = routed_module_count + module_identities.len()
+    if routed_module_count != selected_modules.len():
         return PackageIndexRouteV1(false, "package-route-closure-mismatch", [], [], [], [])
+    val canonical_dirty = dirty_module_records_sort_validate_v1(dirty_modules)
+    if canonical_dirty.is_err():
+        return PackageIndexRouteV1(
+            false, "dirty-module-record-set-invalid", [], [], [], [])
     PackageIndexRouteV1(
-        true, "ok", source_paths, schedule,
-        interface_archive_paths, action_archive_paths)
+        true, "ok", source_paths, canonical_dirty.unwrap(), schedule,
+        archive_admissions)
 
-export PackageIndexRouteV1, package_index_route_current_v1
+export PackageArchiveAdmissionV1, PackageIndexRouteV1
+export package_index_route_current_v1

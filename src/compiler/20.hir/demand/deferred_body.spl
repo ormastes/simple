@@ -1,0 +1,114 @@
+use std.common.crypto.sha256.{sha256_text}
+
+enum HirDemandDependencyKindV1:
+    operation
+    body
+    generic_shape
+    provider
+
+struct HirDemandDependencyV1:
+    identity: text
+    kind: HirDemandDependencyKindV1
+    required_operation: text
+
+struct HirDemandReadV1:
+    owner_identity: text
+    dependency_identity: text
+    facet: text
+    digest: text
+
+struct DeferredHirBodyV1:
+    identity: text
+    owner_symbol: text
+    snapshot_revision: text
+    semantic_digest: text
+    materialized: bool
+    operations: [text]
+    dependencies: [HirDemandDependencyV1]
+    recorded_reads: [HirDemandReadV1]
+
+fn hir_demand_identity_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r") and
+        not value.contains("|")
+
+fn hir_demand_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn hir_demand_sorted_unique_text_v1(values: [text]) -> [text]?:
+    var pending = values
+    var result: [text] = []
+    while pending.len() > 0:
+        var selected = 0
+        var index = 1
+        while index < pending.len():
+            if pending[index] < pending[selected]:
+                selected = index
+            index = index + 1
+        val value = pending[selected]
+        pending.remove(selected)
+        if not hir_demand_identity_valid_v1(value):
+            return nil
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result.push(value)
+    Some(result)
+
+fn deferred_hir_body_validate_v1(
+    body: DeferredHirBodyV1, snapshot_revision: text
+) -> text:
+    if (not hir_demand_identity_valid_v1(snapshot_revision) or
+            body.snapshot_revision != snapshot_revision):
+        return "snapshot-mismatch:{body.identity}"
+    if (not hir_demand_identity_valid_v1(body.identity) or
+            not hir_demand_identity_valid_v1(body.owner_symbol) or
+            not hir_demand_digest_valid_v1(body.semantic_digest)):
+        return "body-identity-invalid:{body.identity}"
+    if hir_demand_sorted_unique_text_v1(body.operations) == nil:
+        return "operation-invalid:{body.identity}"
+    var dependency_keys: [text] = []
+    for dependency in body.dependencies:
+        if not hir_demand_identity_valid_v1(dependency.identity):
+            return "dependency-invalid:{body.identity}"
+        if (dependency.required_operation != "" and
+                not hir_demand_identity_valid_v1(dependency.required_operation)):
+            return "dependency-operation-invalid:{body.identity}"
+        val key = "{dependency.kind}:{dependency.identity}:{dependency.required_operation}"
+        if dependency_keys.contains(key):
+            return "dependency-duplicate:{body.identity}:{dependency.identity}"
+        dependency_keys.push(key)
+    var read_keys: [text] = []
+    for read in body.recorded_reads:
+        if (read.owner_identity != body.identity or
+                not hir_demand_identity_valid_v1(read.dependency_identity) or
+                not hir_demand_identity_valid_v1(read.facet) or
+                not hir_demand_digest_valid_v1(read.digest)):
+            return "read-invalid:{body.identity}"
+        val key = "{read.dependency_identity}:{read.facet}"
+        if read_keys.contains(key):
+            return "read-duplicate:{body.identity}:{key}"
+        read_keys.push(key)
+    "ok"
+
+fn deferred_hir_body_identity_v1(body: DeferredHirBodyV1) -> text:
+    var encoded = "simple/deferred-hir-body/v1|{body.snapshot_revision}|" +
+        "{body.identity}|{body.owner_symbol}|{body.semantic_digest}|{body.materialized}"
+    val operations = hir_demand_sorted_unique_text_v1(body.operations)
+    if operations == nil:
+        return ""
+    for operation in operations!:
+        encoded = encoded + "|op:{operation}"
+    for dependency in body.dependencies:
+        encoded = encoded + "|dep:{dependency.kind}:{dependency.identity}:" +
+            dependency.required_operation
+    for read in body.recorded_reads:
+        encoded = encoded + "|read:{read.dependency_identity}:{read.facet}:{read.digest}"
+    sha256_text(encoded)
+
+export HirDemandDependencyKindV1, HirDemandDependencyV1, HirDemandReadV1
+export DeferredHirBodyV1, deferred_hir_body_validate_v1
+export deferred_hir_body_identity_v1, hir_demand_identity_valid_v1
+export hir_demand_digest_valid_v1, hir_demand_sorted_unique_text_v1

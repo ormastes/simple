@@ -1,0 +1,153 @@
+# @tag: system, runtime, provider, architecture, parity, rollback
+# @evidence-display: links
+
+use std.io_runtime.{file_exists, file_read}
+use std.spec.*
+
+val ADMISSION = "src/compiler/99.loader/provider_admission/admission.spl"
+val STATE = "src/compiler/99.loader/provider_admission/state.spl"
+val ENTRYPOINT = "src/compiler/99.loader/runtime/package_image_entrypoint.spl"
+val REQUIREMENTS = "doc/02_requirements/feature/runtime_optional_provider_binary_size_optimization.md"
+val EVIDENCE_ROOT = "build/evidence/runtime/provider-matrix"
+
+fn require_receipt(target: text):
+    val path = EVIDENCE_ROOT + "/" + target + ".env"
+    if not file_exists(path):
+        pending("Native provider-matrix receipt unavailable for " + target)
+    val receipt = file_read(path)
+    expect(receipt).to_contain("schema=provider-matrix-v1")
+    expect(receipt).to_contain("target=" + target)
+    expect(receipt).to_contain("feature_parity=pass")
+    expect(receipt).to_contain("error_parity=pass")
+    expect(receipt).to_contain("absence=pass")
+    expect(receipt).to_contain("corruption=pass")
+    expect(receipt).to_contain("concurrency=pass")
+    expect(receipt).to_contain("crash_recovery=pass")
+    expect(receipt).to_contain("rollback=pass")
+    expect(receipt).to_contain("metadata_only_admission=pass")
+    expect(receipt).to_contain("hidden_provider_loads=0")
+    expect(receipt).to_contain("binary_sha256=")
+    expect(receipt).to_contain("provider_set_sha256=")
+
+fn require_family_receipt(family: text):
+    val path = EVIDENCE_ROOT + "/family-" + family + ".env"
+    if not file_exists(path):
+        pending("Provider-family parity receipt unavailable for " + family)
+    val receipt = file_read(path)
+    expect(receipt).to_contain("schema=provider-family-parity-v1")
+    expect(receipt).to_contain("family=" + family)
+    expect(receipt).to_contain("feature_parity=pass")
+    expect(receipt).to_contain("error_parity=pass")
+    expect(receipt).to_contain("effect_count=1")
+    expect(receipt).to_contain("rollback=pass")
+
+describe "BS6 optional-provider qualification matrix":
+    """This is the canonical BS6 feature and architecture matrix. Portable
+    source-contract rows execute on every host. Native rows consume hash-bound
+    receipts and remain pending when the corresponding runtime is unavailable;
+    absence of evidence never becomes PASS.
+    """
+
+    describe "REQ-001 and NFR-005: metadata-only admission":
+        it "should admit metadata before constructing loader effects":
+            step("Inspect the production provider entrypoint")
+            val entrypoint = file_read(ENTRYPOINT)
+            expect(entrypoint).to_contain("provider_admit_metadata_v1")
+            expect(entrypoint).to_contain("package_image_loader_adapt_v1")
+            expect(entrypoint).to_contain("provider_execution_ticket_v1")
+
+        it "should keep admission free of hidden dynamic loading":
+            step("Inspect the metadata admission owner")
+            val admission = file_read(ADMISSION)
+            expect(admission.contains("dlopen")).to_be(false)
+            expect(admission.contains("LoadLibrary")).to_be(false)
+            expect(admission.contains("process_run")).to_be(false)
+            expect(admission.contains("provider_execution_ticket_v1(")).to_be(false)
+
+        it "should require zero provider loads for no-import hello":
+            step("Read the selected no-import provider requirement")
+            val requirements = file_read(REQUIREMENTS)
+            expect(requirements).to_contain("loads zero optional provider DSOs")
+            expect(requirements).to_contain("zero optional-provider initializations")
+
+    describe "REQ-002 and REQ-012: typed fail-closed admission":
+        it "should reject absent corrupt incompatible ABI and dependency authority":
+            step("Inspect typed provider admission errors")
+            val state = file_read(STATE)
+            expect(state).to_contain("invalid_package_image")
+            expect(state).to_contain("invalid_archive_capability")
+            expect(state).to_contain("abi_mismatch")
+            expect(state).to_contain("dependency_mismatch")
+            expect(state).to_contain("cached_rejection")
+
+        it "should validate package image capability ABI and dependencies before publication":
+            step("Inspect fail-closed metadata validation")
+            val admission = file_read(ADMISSION)
+            expect(admission).to_contain("package_image_validate_v1")
+            expect(admission).to_contain("invalid_archive_capability")
+            expect(admission).to_contain("package_identity_mismatch")
+            expect(admission).to_contain("abi_mismatch")
+            expect(admission).to_contain("dependency_mismatch")
+
+    describe "REQ-004 through REQ-006: parity concurrency crash and rollback":
+        it "should single-flight concurrent metadata admission":
+            step("Inspect the provider admission state machine")
+            val state = file_read(STATE)
+            expect(state).to_contain("compare_exchange")
+            expect(state).to_contain("ProviderAdmissionStateV1.admitting")
+            expect(state).to_contain("ProviderAdmissionStateV1.admitted")
+            expect(state).to_contain("ProviderAdmissionStateV1.rejected")
+
+        it "should execute only one effect owner in dual mode":
+            step("Inspect the dual-provider effect policy")
+            val admission = file_read(ADMISSION)
+            val state = file_read(STATE)
+            expect(admission).to_contain("shadow_metadata_only")
+            expect(state).to_contain("effect_owner_identity")
+            expect(state).to_contain("ProviderExecutionTicketV1")
+
+        it "should qualify file and archive providers":
+            require_family_receipt("file-archive")
+
+        it "should qualify network and web providers":
+            require_family_receipt("network-web")
+
+        it "should qualify crypto providers":
+            require_family_receipt("crypto")
+
+        it "should qualify database providers":
+            require_family_receipt("database")
+
+        it "should qualify compression and XML providers":
+            require_family_receipt("compression-xml")
+
+        it "should qualify TUI UI and audio providers":
+            require_family_receipt("tui-ui-audio")
+
+        it "should qualify GPU providers":
+            require_family_receipt("gpu")
+
+    describe "REQ-011: supported architecture matrix":
+        it "should qualify Linux x86_64":
+            require_receipt("x86_64-unknown-linux-gnu")
+
+        it "should qualify Linux aarch64":
+            require_receipt("aarch64-unknown-linux-gnu")
+
+        it "should qualify macOS arm64":
+            require_receipt("aarch64-apple-darwin-macho")
+
+        it "should qualify macOS x86_64":
+            require_receipt("x86_64-apple-darwin-macho")
+
+        it "should qualify Windows x86_64":
+            require_receipt("x86_64-pc-windows-msvc")
+
+    describe "NFR-006: isolation under failure":
+        it "should bind every native row to corruption crash rollback and zero hidden load evidence":
+            step("Inspect the canonical receipt assertions")
+            val source = file_read("test/03_system/runtime/provider/optional_provider_qualification_matrix_spec.spl")
+            expect(source).to_contain("corruption=pass")
+            expect(source).to_contain("crash_recovery=pass")
+            expect(source).to_contain("rollback=pass")
+            expect(source).to_contain("hidden_provider_loads=0")

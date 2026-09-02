@@ -1,0 +1,53 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+audit="$root/scripts/audit/compiler-interpreter-loader-layering.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-il3.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+make_fixture() {
+    fixture=$1
+    mkdir -p "$fixture/src/compiler/95.interp/load_facade"
+    mkdir -p "$fixture/src/compiler/99.loader/shared_contract"
+    printf '%s\n' 'fn interpreter_boundary_ok() -> bool: return true' > "$fixture/src/compiler/95.interp/load_facade/facade.spl"
+    printf '%s\n' 'fn loader_boundary_ok() -> bool: return true' > "$fixture/src/compiler/99.loader/shared_contract/contract.spl"
+}
+
+expect_rejected() {
+    name=$1
+    fixture="$tmp/$name"
+    make_fixture "$fixture"
+    shift
+    "$@" "$fixture"
+    if "$audit" "$fixture" >/dev/null 2>&1; then
+        echo "FAIL: mutation admitted: $name" >&2
+        exit 1
+    fi
+}
+
+mutate_sibling_private() {
+    printf '%s\n' 'use compiler.loader.loader.object_mapper.{map_object}' > "$1/src/compiler/95.interp/bad.spl"
+}
+
+mutate_duplicate_smf() {
+    printf '%s\n' 'struct SmfHeader:' '    version: i64' > "$1/src/compiler/99.loader/bad.spl"
+}
+
+mutate_state_escape() {
+    printf '%s\n' 'use compiler.interp.interpreter.mod.{InterpreterState}' > "$1/src/compiler/99.loader/bad.spl"
+}
+
+mutate_live_tree() {
+    printf '%s\n' 'fn fallback():' '    dir_list("src")' > "$1/src/compiler/95.interp/bad.spl"
+}
+
+clean="$tmp/clean"
+make_fixture "$clean"
+"$audit" "$clean" >/dev/null
+expect_rejected sibling-private mutate_sibling_private
+expect_rejected duplicate-smf mutate_duplicate_smf
+expect_rejected state-escape mutate_state_escape
+expect_rejected live-tree mutate_live_tree
+
+echo "PASS: IL3 loader boundary mutations rejected"

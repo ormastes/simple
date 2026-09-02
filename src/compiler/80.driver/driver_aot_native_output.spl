@@ -48,6 +48,17 @@ use compiler.driver.cache.reverse_reference_receipt.{
 use compiler.driver.cache.phase_compatibility_admission.{
     driver_admit_phase2_compatibility_manifest_v1
 }
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
+use compiler.driver.action_graph.scc_compile_outputs.{
+    SccCompileOutputsV1, SccModuleCompileOutputV1
+}
+use compiler.driver.action_graph.scc_publication_ownership.{
+    scc_publication_complete_object_v1
+}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_compile_complete_scc_outputs_v1
+}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_fact_digest_v1
 }
@@ -73,6 +84,48 @@ use compiler.common.cache.phase_compatibility_path_io.{
 }
 use compiler.mir.mir_data.{MirModule}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+
+fn driver_publish_demand_scc_outputs_v1(ctx: CompileContext) -> bool:
+    if ctx.demand_scc_publication == nil:
+        return true
+    if (ctx.demand_compile_execution == nil or
+            ctx.demand_mir_admission == nil or
+            ctx.demand_dirty_modules.len() == 0):
+        return false
+    val dirty_authority = ctx.demand_dirty_modules[0]
+    val authority = PackageArchiveAuthorityV1(
+        dirty_authority.producer_compatibility_id,
+        dirty_authority.package_index_generation,
+        dirty_authority.configuration_variant,
+        dirty_authority.scv_revision,
+        dirty_authority.scv_tree_digest,
+        dirty_authority.scv_inventory_digest)
+    var ownership = ctx.demand_scc_publication!
+    var scc_identities: [text] = []
+    for output in ownership.modules:
+        if not scc_identities.contains(output.entry.scc_identity):
+            scc_identities = scc_identities.push(output.entry.scc_identity)
+    var execution = ctx.demand_compile_execution!
+    for scc_identity in scc_identities.sorted():
+        var scheduled: [text] = []
+        var modules: [SccModuleCompileOutputV1] = []
+        for output in ownership.modules:
+            if output.entry.scc_identity == scc_identity:
+                scheduled = scheduled.push(output.entry.module_identity)
+                modules = modules.push(output)
+        if modules.len() == 0:
+            return false
+        val baseline_identity = modules[0].baseline_artifact_identity
+        val baseline_digest = modules[0].baseline_artifact_digest
+        if not demand_compile_complete_scc_outputs_v1(
+                &mut execution, machine_cache_root(), authority,
+                ctx.demand_mir_admission!,
+                SccCompileOutputsV1(
+                    scc_identity, scheduled.sorted(), modules),
+                baseline_identity, baseline_digest):
+            return false
+    ctx.demand_compile_execution = Some(execution)
+    true
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity,
     native_module_cache_shadow_mismatch_v1,
@@ -1550,6 +1603,13 @@ impl CompilerDriver:
                 if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if ctx.demand_scc_publication != nil:
+                        var publication = ctx.demand_scc_publication!
+                        if not scc_publication_complete_object_v1(
+                                &mut publication, name, obj_path):
+                            return CompileResult.CodegenError(
+                                "SCC publication output ownership mismatch: {name}")
+                        ctx.demand_scc_publication = Some(publication)
                     # Record the entry on THIS build_cache, not only inside
                     # driver_native_collect_capsule_result_v1: that checkpoint
                     # receives the cache as a call argument and its update never
@@ -1613,6 +1673,10 @@ impl CompilerDriver:
         val outcome_verdict = driver_native_report_module_outcomes_v1(module_outcomes)
         if outcome_verdict != "":
             return CompileResult.CodegenError(outcome_verdict)
+
+        if not driver_publish_demand_scc_outputs_v1(ctx):
+            return CompileResult.CodegenError(
+                "demand-driven SCC publication failed closed")
 
         log_build_progress("native_compile", "modules", total_modules,
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
