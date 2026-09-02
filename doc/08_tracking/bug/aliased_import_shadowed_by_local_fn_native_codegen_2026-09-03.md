@@ -118,3 +118,45 @@ Either:
 The 6-line fixture above, asserted at the OBJECT level (a relocation to the imported symbol must
 be present) — not just by running it, since the failure mode is a stack overflow that a runner
 may report as an opaque non-zero exit.
+
+## Root cause, located in the Rust seed (2026-09-03)
+
+The alias's OWNING MODULE is dropped in HIR lowering; the surviving bare name is then
+captured by the local-module table during mangling. The correct mapping exists but is
+unreachable — this is dead data, not missing data.
+
+| step | file:line | what happens |
+|---|---|---|
+| alias recorded, module LOST | `src/compiler_rust/compiler/src/hir/lower/import_loader.rs:323` | `register_function_alias(alias, original)` — stores `aliased_probe -> "probe"`, no owner |
+| alias recorded, module KEPT | `src/compiler_rust/compiler/src/pipeline/native_project/imports.rs:1200-1204` | `use_map["aliased_probe"] = "other__probe"`, keyed by the ALIAS |
+| alias rewritten to bare name | `.../hir/lower/expr/mod.rs:465-481` `named_callable_value_type` | resolves alias to bare `"probe"`, then searches `self.module.functions` FIRST and finds the LOCAL `main::probe` |
+| alias key erased | `.../hir/lower/expr/mod.rs:341-346` | emits `Global("probe")` — the alias name is gone from MIR |
+| binds to local | `.../pipeline/native_project/mangle.rs:388-398` | `local_mangled.get("probe")` hits `main__probe`; the `use_map` lookup two lines below is never reached |
+
+The owner-preserving mechanism (`import_alias_bindings`, `lowerer.rs:725-812`, consulted at
+`expr/mod.rs:297` BEFORE the lossy branch) is populated only by
+`collect_flattened_import_aliases`, called solely from `module_pass.rs:1405/2088` — the
+flattened/interpreter lowering. It is **empty on the native path**, which is exactly why
+`simple run` is correct and `native-build` is not.
+
+The fix cannot live in `mangle.rs`: once the name is bare `probe`, a genuine local call and an
+aliased import are indistinguishable, and `local_mangled`-first is correct for local calls.
+
+### Candidate fixes
+
+- **(b), lower risk — preferred.** Populate `import_alias_bindings` on the native path
+  (call `collect_flattened_import_aliases`, or record owner+name at `import_loader.rs:323`).
+  It already outranks the lossy branch at `expr/mod.rs:297`, and the `declared_names` guard at
+  `lowerer.rs:793` tests the ALIAS name, so it does not block this case. Costs a second alias table.
+- **(a), higher risk.** At `expr/mod.rs:341-346`, keep `Global(alias)` when the alias's original
+  name also has a local definition, so `mangle.rs:397` reaches `use_map`. The comment at 336-344
+  documents that the rewrite-to-original fixed flattened/JIT units where the alias names nothing,
+  so this must be made conditional, never reverted.
+
+## Stopgap landed 2026-09-03 (`3dd179a075a`)
+
+The compiler defect is still OPEN. The four stdlib cycles it created were broken at the source
+level by importing `detect_os` (no bare-name collision) instead of `is_windows`:
+`platform.spl`, `platform/__init__.spl`, `play/xvfb.spl`, `spec.spl`.
+`env.platform.is_windows` is literally `detect_os() == "windows"`, so behaviour is unchanged on
+every platform.
