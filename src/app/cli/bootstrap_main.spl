@@ -397,10 +397,22 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # below. The coordinator owns process/cache sharding, failure fallback, and
     # MemAvailable fanout clamping; the real build remains the sole mutable
     # CompileContext owner.
+    # Level-gated route trace (default OFF). The process route is taken ONLY
+    # when the parsed thread count is > 1; a wrong parse here silently spawns a
+    # worker for a `--threads 1` build, and the resulting child-side failure
+    # reads as a flag-propagation defect rather than a mis-parse. Printing the
+    # count next to the verdict is what distinguishes the two.
+    val route_threads = bootstrap_native_build_thread_count(args)
+    if (env_get("SIMPLE_BOOTSTRAP_ROUTE_TRACE") ?? "") == "1":
+        print "[stage3-route] parsed --threads -> {route_threads} (process route requires > 1)"
     if bootstrap_stage3_process_route_requested(
             args, env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
             env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""):
+        if (env_get("SIMPLE_BOOTSTRAP_ROUTE_TRACE") ?? "") == "1":
+            print "[stage3-route] taking the SPAWNED-WORKER process route"
         return run_bootstrap_stage3_process_route(args)
+    if (env_get("SIMPLE_BOOTSTRAP_ROUTE_TRACE") ?? "") == "1":
+        print "[stage3-route] taking the IN-PROCESS pure-Simple driver route"
     val output_arg = bootstrap_output_from_args(args, 0)
     val output = if output_arg != "": output_arg else: "build/native/{_bootstrap_default_stem(entry_path)}"
     # rfind + `> 0` (not path.dirname/Option-match on rfind): rfind returns a
