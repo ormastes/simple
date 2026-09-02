@@ -17,6 +17,11 @@ runtime, event-sequence, count, timing, animation, payload, UI, and font-frame
 rows. Any missing, forged, stale, aliased, malformed, fractional, unsafe, or
 out-of-budget value fails closed; `pass=true` alone never passes.
 
+The UI proof also requires an internal window panel with vertical scrolling,
+content taller than its viewport, an observed 0-to-40 scroll transition, and a
+delivered DOM `scroll` event. Trusted native wheel delivery remains covered by
+the separate headful Chromium primitive oracle.
+
 Required live proof includes the canonical host-pointer/focus/move/title/maximize/
 text/pointer-down/pointer-up sequence, matching aggregate counts, positive
 `performance.now()` and input-to-paint measurements, animation evidence, real
@@ -62,6 +67,7 @@ it "rejects a valid alternate receipt outside the configured proof path":
 | rejects a valid alternate receipt outside the configured proof path | FAIL: composition artifact invalid. |
 | rejects a font frame receipt that is not correlated with the event stream | FAIL: font-frame correlation missing. |
 | rejects pass true proof when required event counts are missing | FAIL: event-routing contract missing. |
+| rejects pass true proof without an observed internal panel scroll | FAIL: scroll-panel contract missing. |
 | rejects pass true proof without the live event surface identity | FAIL: surface identity missing. |
 | rejects pass true proof without the live event-check source marker | FAIL: proof source missing. |
 | rejects pass true proof when the live event-check source artifact is missing | FAIL: proof source missing. |
