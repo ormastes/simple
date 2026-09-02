@@ -1,6 +1,56 @@
 # Browser renders boxes pixel-exact, but any text node blanks the whole frame
 
-Status: OPEN (P1)
+Status: RESOLVED 2026-09-02 — both defects were fixed on 2026-08-06 (see the
+"Resolution" and "Defect 2 follow-up" sections at the bottom, which carry a
+sabotage receipt) and the fix is confirmed still present at `origin/main` @
+`1b76db1d6c3`. The record simply never had its header updated, which is why it
+kept reading as an open P1.
+
+### Fix-still-present evidence (2026-09-02, source inspection)
+
+The unresolved symbols that were the actual root cause all exist in
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl`:
+
+- `:376` `fn _web_budget_expired_at(site: i32) -> bool`
+- `:281` `pub fn simple_web_layout_last_render_degrade_reason() -> text`
+- 8 occurrences of `WEB_BUDGET_SITE_` in that file (the 7 call-site constants
+  plus their use), matching the 7 guarded call sites in
+  `simple_web_html_layout_renderer_layout.spl` / `..._paint_layout.spl`
+
+So the "every render that reached the real layout/paint pipeline hit an
+unresolved symbol and came back blank" condition no longer holds.
+
+### Execution evidence NOT obtained — read this before trusting a green run here
+
+This closure is **source inspection only**. It was not possible to re-run the
+pixel repro on this host (aarch64-apple-darwin), and the reason is worth
+recording because it will block the next person too:
+
+The only full-CLI binary available is
+`bin/release/aarch64-apple-darwin/simple` (29,315,096 bytes, mtime
+2026-07-25 14:15:52, sha256 prefix `f2c216a660da83da1a253d2e8191a305`,
+`--version` -> `Simple v1.0.0-beta`, prints the Rust-seed banner on `run`/`test`).
+`bin/simple` itself is the **bootstrap CLI** and has no `test`/`run` at all.
+That Jul-25 binary's parser is older than the current stdlib source, and the
+stdlib is read as SOURCE on every run, so any spec importing the browser engine
+dies before reaching a render. Measured, running the pre-existing
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_smoke_spec.spl`:
+
+```
+FAIL  browser_renderer_smoke_spec.spl (0 passed, 1 failed, 3779ms)
+      Error: error: compile failed: parse: in
+      ".../src/lib/common/encoding/utf8.spl": Unexpected token: expected
+      expression, found Colon
+Results: 1 total, 0 passed, 1 failed
+```
+
+That failure is the binary's vintage, **not** this bug — it is a parse error in
+`src/lib/common/encoding/utf8.spl`, a file unrelated to rendering, on the way in.
+Do not read it as a regression of this record, and do not read a future green run
+on a stale binary as proof either. Re-running the pixel repro needs a redeployed
+full CLI (i.e. a bootstrap).
+
+Previously: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Found:** 2026-08-05
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/`
