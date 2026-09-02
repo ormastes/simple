@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+ROOT=${KPM_ROOT_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}
+MATRIX=${KPM_EVIDENCE_MATRIX:-$ROOT/scripts/check/kernel-plugin-migration-evidence-matrix.tsv}
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+check_relative_file() {
+    case "$1" in
+        ''|/*|*..*) fail "unsafe evidence path: $1" ;;
+    esac
+    [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] || fail "missing regular evidence owner: $1"
+}
+
+check_matrix() {
+    [ -f "$MATRIX" ] && [ ! -L "$MATRIX" ] || fail "missing regular matrix: $MATRIX"
+    header=$(sed -n '1p' "$MATRIX")
+    expected_header=$(printf 'phase\tpositive_path\tpositive_marker\tmutation_path\tmutation_marker\tevidence_class\truntime_authority')
+    [ "$header" = "$expected_header" ] || fail "matrix header drift"
+
+    rows=0
+    expected_phase=0
+    while IFS="$(printf '\t')" read -r phase positive_path positive_marker mutation_path mutation_marker evidence_class runtime_authority extra; do
+        [ "$phase" = phase ] && continue
+        [ -n "$phase" ] || fail "blank matrix row"
+        [ -z "${extra:-}" ] || fail "phase $phase has extra fields"
+        [ "$phase" = "$expected_phase" ] || fail "expected phase $expected_phase, found $phase"
+        [ "$evidence_class" = structural-contract ] || fail "phase $phase fabricates non-structural evidence"
+        [ "$runtime_authority" = blocked-required ] || fail "phase $phase fabricates runtime authority"
+        [ -n "$positive_marker" ] && [ -n "$mutation_marker" ] || fail "phase $phase has an empty evidence marker"
+        [ "$positive_marker" != "$mutation_marker" ] || fail "phase $phase reuses one marker for positive and mutation evidence"
+        check_relative_file "$positive_path"
+        check_relative_file "$mutation_path"
+        grep -Fq -- "$positive_marker" "$ROOT/$positive_path" || fail "phase $phase positive marker is absent"
+        grep -Fq -- "$mutation_marker" "$ROOT/$mutation_path" || fail "phase $phase mutation marker is absent"
+        rows=$((rows + 1))
+        expected_phase=$((expected_phase + 1))
+    done < "$MATRIX"
+
+    [ "$rows" -eq 9 ] && [ "$expected_phase" -eq 9 ] || fail "expected exactly phases 0 through 8"
+    echo "PASS: phases 0-8 have distinct positive and injected-defect contracts; runtime/native authority remains blocked-required"
+}
+
+selftest() {
+    tmp=${TMPDIR:-/tmp}/kpm-evidence-matrix.$$
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    mkdir -p "$tmp"
+    phase=0
+    while [ "$phase" -le 8 ]; do
+        awk -F '\t' -v OFS='\t' -v target="$phase" 'NR == 1 { print; next } $1 == target { $5 = "missing-mutation-marker-" target } { print }' "$MATRIX" > "$tmp/mutant.tsv"
+        if KPM_EVIDENCE_MATRIX="$tmp/mutant.tsv" "$0" >/dev/null 2>&1; then
+            fail "phase $phase missing mutation evidence was accepted"
+        fi
+        phase=$((phase + 1))
+    done
+    awk -F '\t' -v OFS='\t' 'NR == 1 { print; next } $1 == 7 { $7 = "native-pass" } { print }' "$MATRIX" > "$tmp/runtime-forgery.tsv"
+    if KPM_EVIDENCE_MATRIX="$tmp/runtime-forgery.tsv" "$0" >/dev/null 2>&1; then
+        fail "runtime PASS forgery was accepted"
+    fi
+    echo "PASS: 9/9 phase mutations and runtime-authority forgery were rejected"
+}
+
+case "${1:-}" in
+    '') check_matrix ;;
+    --selftest) check_matrix >/dev/null; selftest ;;
+    *) echo "usage: $0 [--selftest]" >&2; exit 2 ;;
+esac
