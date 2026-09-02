@@ -157,11 +157,10 @@ stage4_write_candidate_provenance() (
     echo "essential_tools_log_path=$smoke_log"
     echo "essential_tools_log_sha256=$(bootstrap_stage3_hash_file "$smoke_log")"
     echo "completed_gate=stage4-essential-tools-smoke"
-    if [ -n "${SIMPLE_PHASE7_LLVM_RECEIPT:-}" ]; then
-      llvm_receipt="$(bootstrap_stage3_canonical_file "$SIMPLE_PHASE7_LLVM_RECEIPT")" || exit 1
-      echo "llvm_toolchain_receipt_path=$llvm_receipt"
-      echo "llvm_toolchain_receipt_sha256=$(bootstrap_stage3_hash_file "$llvm_receipt")"
-    fi
+    [ -n "${SIMPLE_PHASE7_LLVM_RECEIPT:-}" ] || exit 1
+    llvm_receipt="$(bootstrap_stage3_canonical_file "$SIMPLE_PHASE7_LLVM_RECEIPT")" || exit 1
+    echo "llvm_toolchain_receipt_path=$llvm_receipt"
+    echo "llvm_toolchain_receipt_sha256=$(bootstrap_stage3_hash_file "$llvm_receipt")"
     if [ -n "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
       echo "stage4_continuation_path=$continuation"
       echo "stage4_continuation_sha256=$(bootstrap_stage3_hash_file "$continuation")"
@@ -184,7 +183,8 @@ stage4_verify_candidate_provenance() (
       producer_sha256 provenance_helper_path provenance_helper_sha256 \
       parent_compiler_path parent_compiler_sha256 stage3_provenance_path \
       stage3_provenance_sha256 build_log_path build_log_sha256 \
-      essential_tools_log_path essential_tools_log_sha256 completed_gate; do
+      essential_tools_log_path essential_tools_log_sha256 completed_gate \
+      llvm_toolchain_receipt_path llvm_toolchain_receipt_sha256; do
     bootstrap_stage3_manifest_value "$key" "$provenance" >/dev/null || exit 1
   done
   [ "$(bootstrap_stage3_manifest_value schema "$provenance")" = simple-bootstrap-stage4-provenance-v1 ] || exit 1
@@ -211,18 +211,10 @@ stage4_verify_candidate_provenance() (
   [ "$(bootstrap_stage3_manifest_value essential_tools_log_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$smoke_log")" ] || exit 1
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
   [ "$(bootstrap_stage3_manifest_value completed_gate "$provenance")" = stage4-essential-tools-smoke ] || exit 1
-  if bootstrap_stage3_manifest_value llvm_toolchain_receipt_path "$provenance" >/dev/null 2>&1; then
-    llvm_receipt="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_path "$provenance")")" || exit 1
-    [ "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$llvm_receipt")" ] || exit 1
-    [ "$(bootstrap_stage3_manifest_value schema "$llvm_receipt")" = simple-kernel-phase7-llvm-toolchain-v1 ] || exit 1
-    [ "$(bootstrap_stage3_manifest_value status "$llvm_receipt")" = pass ] || exit 1
-    [ "$(bootstrap_stage3_manifest_value llvm_major "$llvm_receipt")" = 18 ] || exit 1
-    llvm_config="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value llvm_config_path "$llvm_receipt")")" || exit 1
-    [ "$(bootstrap_stage3_manifest_value llvm_config_sha256 "$llvm_receipt")" = "$(bootstrap_stage3_hash_file "$llvm_config")" ] || exit 1
-    case "$("$llvm_config" --version 2>/dev/null)" in 18.*) ;; *) exit 1 ;; esac
-    llvm_library="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value llvm_library_path "$llvm_receipt")")" || exit 1
-    [ "$(bootstrap_stage3_manifest_value llvm_library_sha256 "$llvm_receipt")" = "$(bootstrap_stage3_hash_file "$llvm_library")" ] || exit 1
-  fi
+  llvm_receipt="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_path "$provenance")")" || exit 1
+  [ "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$llvm_receipt")" ] || exit 1
+  . "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+  kernel_phase7_verify_llvm_toolchain_receipt "$llvm_receipt" || exit 1
   if bootstrap_stage3_manifest_value stage4_continuation_path "$provenance" >/dev/null 2>&1; then
     continuation="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")")" || exit 1
     [ "$(bootstrap_stage3_manifest_value stage4_continuation_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$continuation")" ] || exit 1

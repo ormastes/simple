@@ -9,6 +9,10 @@ trap 'rm -rf "$work"' EXIT HUP INT TERM
 runtime=$work/simple
 provenance=$work/simple.provenance.env
 cache=$work/cache.env
+runtime_receipt=$work/runtime.env
+llvm_receipt=$work/llvm-authority.env
+llvm_config=$work/llvm-config
+llvm_library=$work/libLLVM.dylib
 source_file=$work/source.spl
 printf 'source-v1\n' >"$source_file"
 cat >"$runtime" <<'EOF'
@@ -45,10 +49,38 @@ runtime_sha256=$(kernel_phase7_hash_file "$runtime")
 provenance_sha256=$(kernel_phase7_hash_file "$provenance")
 source_revision=$(kernel_phase7_hash_file "$source_file")
 EOF
+  cat >"$llvm_config" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = --version ] && echo 18.1.8
+EOF
+  chmod +x "$llvm_config"
+  printf 'llvm-library\n' >"$llvm_library"
+  cat >"$llvm_receipt" <<EOF
+schema=simple-kernel-phase7-llvm-toolchain-v1
+status=pass
+llvm_major=18
+llvm_config_path=$llvm_config
+llvm_config_sha256=$(kernel_phase7_hash_file "$llvm_config")
+llvm_library_path=$llvm_library
+llvm_library_sha256=$(kernel_phase7_hash_file "$llvm_library")
+EOF
+  cat >"$runtime_receipt" <<EOF
+schema=simple-kernel-phase7-runtime-prerequisite-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+runtime_path=$runtime
+runtime_sha256=$(kernel_phase7_hash_file "$runtime")
+provenance_path=$provenance
+provenance_sha256=$(kernel_phase7_hash_file "$provenance")
+cache_receipt_path=$cache
+cache_receipt_sha256=$(kernel_phase7_hash_file "$cache")
+llvm_toolchain_receipt_path=$llvm_receipt
+llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")
+EOF
 }
 admit() {
   KERNEL_PHASE7_TEST_MODE=1 KERNEL_PHASE7_PROVENANCE_VERIFY_FN=fixture_verify \
-    kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache" "$root"
+    kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache" "$root" "$runtime_receipt"
 }
 reject() { if "$@"; then echo "FAIL: mutation admitted: $*" >&2; exit 1; fi; }
 
@@ -75,6 +107,22 @@ sed 's/WARNING: Rust-built bootstrap seed only/simple test fixture (pure-Simple 
 write_receipts
 KERNEL_PHASE7_REQUIRED_TOOLS=phase7-tool-that-does-not-exist reject admit
 rm -f "$provenance"
+reject admit
+write_receipts
+rm -f "$runtime_receipt"
+reject admit
+write_receipts
+sed 's/status=pass/status=forged/' "$runtime_receipt" >"$work/forged-runtime.env"
+mv "$work/forged-runtime.env" "$runtime_receipt"
+reject admit
+write_receipts
+printf 'altered\n' >>"$llvm_receipt"
+reject admit
+write_receipts
+printf '# altered binary\n' >>"$llvm_config"
+reject admit
+write_receipts
+printf 'altered library\n' >>"$llvm_library"
 reject admit
 
 command_log=$work/commands.log
@@ -137,6 +185,10 @@ for trigger in scripts/check/prepare-kernel-phase7-runtime.shs \
   scripts/check/lib/kernel-phase7-runtime-admission.shs \
   scripts/check/lib/stage4-candidate-provenance.shs \
   scripts/check/lib/bootstrap-stage3-provenance.shs; do
+  grep -Fq -- "- '$trigger'" "$root/.github/workflows/kernel-phase7-qualification.yml"
+done
+for trigger in .github/workflows/kernel-phase7-qualification.yml \
+  scripts/setup/platform-detect.shs scripts/setup/llvm-toolchain-env.shs; do
   grep -Fq -- "- '$trigger'" "$root/.github/workflows/kernel-phase7-qualification.yml"
 done
 
