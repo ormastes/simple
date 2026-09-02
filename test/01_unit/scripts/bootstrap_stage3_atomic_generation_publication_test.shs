@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/bootstrap/bootstrap-authority-wiring.shs"
+
+tmp=${TMPDIR:-/tmp}/simple-stage3-publish-test.$$
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/source/deps" "$tmp/root" "$tmp/other"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/source/simple"
+chmod 755 "$tmp/source/simple"
+printf 'native\n' >"$tmp/source/libsimple_native_all.a"
+printf 'backfill\n' >"$tmp/source/libsimple_compiler_backfill.a"
+printf 'runtime\n' >"$tmp/source/deps/libsimple_runtime.a"
+printf 'hosted\n' >"$tmp/source/deps/libspl_hosted_runtime-test.rlib"
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+bootstrap_stage3_prepare_seed_generation "$tmp/source" "$tmp/root" \
+    "$fingerprint" simple libsimple_native_all.a \
+    libsimple_compiler_backfill.a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+stage=$BOOTSTRAP_STAGE3_PREPARED_STAGING
+final=$BOOTSTRAP_STAGE3_PREPARED_GENERATION
+hash=$BOOTSTRAP_STAGE3_PREPARED_HASH
+
+# Same-parent publication remains atomic and the admitted directory is frozen.
+bootstrap_stage3_publish_seed_generation "$stage" "$final" \
+    "$tmp/current.env" "$fingerprint" "$hash" "$fingerprint" "$tmp/compat"
+[ -d "$final" ]
+[ ! -w "$final" ] || [ "$(id -u)" -eq 0 ]
+[ -f "$tmp/current.env" ]
+
+# The authority helper must reject a staging path outside the final parent;
+# this also excludes cross-device fallback copying.
+mkdir "$tmp/other/.staging.cross"
+if bootstrap_stage3_publish_seed_generation \
+    "$tmp/other/.staging.cross" "$tmp/root/$fingerprint-$fingerprint" \
+    "$tmp/cross.env" "$fingerprint" "$fingerprint" "$fingerprint" \
+    "$tmp/cross-compat"; then
+    echo 'FAIL: cross-parent generation publication was admitted' >&2
+    exit 1
+fi
+[ -d "$tmp/other/.staging.cross" ]
+
+# An unwritable publication parent fails without a copy fallback or marker.
+mkdir -p "$tmp/denied/.staging.denied"
+chmod 500 "$tmp/denied"
+if mv "$tmp/denied/.staging.denied" "$tmp/denied/final" 2>/dev/null; then
+    if [ "$(id -u)" -ne 0 ]; then
+        echo 'FAIL: unwritable parent unexpectedly admitted rename' >&2
+        exit 1
+    fi
+else
+    [ ! -e "$tmp/denied/final" ]
+fi
+[ ! -e "$tmp/denied.env" ]
+
+echo 'BOOTSTRAP_STAGE3_ATOMIC_GENERATION_PUBLICATION_PASS'
