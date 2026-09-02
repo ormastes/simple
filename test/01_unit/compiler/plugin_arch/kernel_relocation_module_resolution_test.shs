@@ -126,6 +126,19 @@ src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl
 resolve_repo_module() {
     imported_module=$1
     case "$imported_module" in
+        compiler.backend.codegen_types)
+            printf '%s\n' src/compiler/70.backend/backend/codegen_types.spl
+            return 0
+            ;;
+        std.common.*)
+            module_relative="src/lib/common/$(printf '%s' "$imported_module" | cut -d. -f3- | tr . /)"
+            ;;
+        std.file_system)
+            module_relative=src/lib/nogc_sync_mut/file_system
+            ;;
+        std.io_runtime)
+            module_relative=src/lib/nogc_sync_mut/io_runtime
+            ;;
         std.*|lib.*)
             module_relative="src/lib/$(printf '%s' "$imported_module" | cut -d. -f2- | tr . /)"
             ;;
@@ -165,11 +178,14 @@ resolve_repo_module() {
 }
 
 consumer_count=0
+canonical_owner_manifest=$(mktemp)
+trap 'rm -f "$canonical_owner_manifest"' EXIT HUP INT TERM
 for consumer in $consumers; do
     test -f "$consumer"
     consumer_count=$((consumer_count + 1))
-    sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\?use[[:space:]]*\(lazy[[:space:]]*\)\?\([A-Za-z0-9_.]*\).*/\3/p' "$consumer" |
-        sed 's/\.$//' |
+    awk '$1 == "use" { print ($2 == "lazy" ? $3 : $2) }
+         $1 == "export" && $2 == "use" { print ($3 == "lazy" ? $4 : $3) }' "$consumer" |
+        sed 's/\.{.*$//; s/\.$//' |
         while IFS= read -r imported_module; do
             imported_owner=$(resolve_repo_module "$imported_module" 2>/dev/null || true)
             if test -z "$imported_owner"; then
@@ -181,11 +197,14 @@ for consumer in $consumers; do
                 echo "FAIL — unresolved consumer import $imported_module in $consumer"
                 exit 1
             }
+            printf '%s\n' "$imported_owner" >>"$canonical_owner_manifest"
         done
 done
 test "$consumer_count" -eq 15
+sort -u "$canonical_owner_manifest" -o "$canonical_owner_manifest"
+test "$(wc -l <"$canonical_owner_manifest" | tr -d ' ')" -eq 65
 
-cargo test --quiet \
+KERNEL_RELOCATION_OWNER_MANIFEST="$canonical_owner_manifest" cargo test --quiet \
     --manifest-path src/compiler_rust/parser/Cargo.toml \
     --test kernel_relocation_consumers_strict_parse
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -29,5 +30,22 @@ fn stage2_failure_consumers_parse_strictly() {
         simple_parser::Parser::new(&source)
             .parse()
             .unwrap_or_else(|error| panic!("{relative} must parse strictly: {error:?}"));
+    }
+
+    let owner_manifest = std::env::var("KERNEL_RELOCATION_OWNER_MANIFEST")
+        .expect("kernel relocation owner manifest must be provided");
+    let owner_paths = fs::read_to_string(&owner_manifest)
+        .unwrap_or_else(|error| panic!("failed to read {owner_manifest}: {error}"));
+    let canonical_owners: BTreeSet<&str> = owner_paths.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(canonical_owners.len(), 65);
+    assert_eq!(canonical_owners.len(), owner_paths.lines().count());
+
+    for relative in canonical_owners {
+        let path = repository.join(relative);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        simple_parser::Parser::new(&source)
+            .parse()
+            .unwrap_or_else(|error| panic!("{relative} canonical owner must parse strictly: {error:?}"));
     }
 }
