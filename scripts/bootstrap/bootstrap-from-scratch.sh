@@ -3271,10 +3271,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   stage2_capability_bin="${output_dir}/stage2-capability-${PLATFORM}${exe_suffix}"
   stage2_capability_cache="${output_dir}/stage2-capability-cache"
   rm -f "${stage2_capability_bin}"
-  # bootstrap_stage2_capability_log_phantom_2026-08-17: a stale log from a
-  # prior run must never be mistaken for current evidence when this probe is
-  # skipped below (stage2 itself failed / stage2_bin not executable).
-  rm -f "${log_dir}/stage2-capability.log"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     set +e
     env SIMPLE_BOOTSTRAP=1 \
@@ -3303,10 +3299,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     fi
   fi
   if [ "${stage2_capability_ok}" -ne 1 ]; then
-    if [ ! -e "${log_dir}/stage2-capability.log" ]; then
-      echo "capability build not attempted: stage2 unusable (stage2_status=${stage2_status})" \
-        >"${log_dir}/stage2-capability.log"
-    fi
     echo "  warning: Stage 2 native-build capability failed; using seed for stage 4" >&2
     echo "  warning: see ${log_dir}/stage2-capability.log" >&2
   fi
@@ -3786,6 +3778,19 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   }
 
+  # Canonical deployment is always a complete tooling generation. Resume and
+  # --no-mcp lanes may build partial artifacts, but cannot publish them.
+  [ -z "${resume_stage4_output}" ] || {
+    echo "ERROR: deploy refused - resumed Stage 4 is a partial generation" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+  [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ] || {
+    echo "ERROR: deploy refused - MCP/LSP companions are required for canonical publication" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  }
+
   if [ "${build_mcp}" -eq 1 ] && [ "${mcp_build_ok}" -eq 1 ]; then
     for mcp_bin_name in simple_mcp_server simple_lsp_mcp_server; do
       mcp_candidate="${full_dir}/${mcp_bin_name}${exe_suffix}"
@@ -3842,6 +3847,14 @@ if [ "${deploy}" -eq 1 ]; then
     "${phase7_baseline_receipt}" "${phase7_baseline_receipt_sha256}" || exit 1
   bootstrap_add_deploy_authority authority.performance-measurement.env \
     "${phase7_measurement_receipt}" "${phase7_measurement_receipt_sha256}" || exit 1
+
+  for launcher_program in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+    launcher_candidate="${full_dir}/launcher.${launcher_program}${exe_suffix}"
+    simple_release_write_generation_launcher "${launcher_candidate}" "${launcher_program}${exe_suffix}" v1 || exit 1
+    bootstrap_deploy_tx_add "launcher.${launcher_program}${exe_suffix}" \
+      "${launcher_candidate}" "${deploy_dir}/launcher.${launcher_program}${exe_suffix}" 755 \
+      "$(hash_file "${launcher_candidate}")" || exit 1
+  done
 
   staged_bin="${bootstrap_deploy_tx_dir}/simple${exe_suffix}"
   [ "$(hash_file "${staged_bin}")" = "${full_hash}" ] || {
@@ -3987,6 +4000,15 @@ if [ "${deploy}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
     exit 1
   }
+  BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER="${repo_root}/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs"
+  export BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER
+  if [ "${os}" != windows ]; then
+    simple_release_bind_generation_launchers "${repo_root}" "${deploy_platform}" "${exe_suffix}" || {
+      echo "ERROR: immutable generation launchers could not be bound" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
   bootstrap_deploy_tx_apply || {
     echo "ERROR: deploy generation pointer CAS failed" >&2
     bootstrap_deploy_tx_abort || true
@@ -3997,11 +4019,6 @@ if [ "${deploy}" -eq 1 ]; then
     bootstrap_deploy_tx_abort || true
     exit 1
   }
-  if [ "${os}" != windows ] && ! "${repo_root}/scripts/setup/setup.shs"; then
-    echo "ERROR: deployment setup failed; restoring previous generation pointer" >&2
-    bootstrap_deploy_tx_abort || true
-    exit 1
-  fi
   bootstrap_deploy_tx_commit || exit 1
   echo "Deployed compiler and companions as immutable generation ${deploy_transaction_id}"
   echo "Deployment receipt: ${deploy_receipt}"

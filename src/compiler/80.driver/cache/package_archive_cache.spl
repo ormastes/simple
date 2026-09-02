@@ -1,0 +1,199 @@
+# Sealed package archive admission and publication.
+
+use compiler.driver.cache.cas_store.{
+    ActionManifest, action_get, action_put, cas_blob_path, cas_get, cas_put
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.{file_is_regular_no_follow}
+
+val PACKAGE_ARCHIVE_MANIFEST_V1: text = "simple-package-archive-v1"
+
+struct PackageArchiveAuthorityV1:
+    producer_digest: text
+    root_generation: text
+    variant_digest: text
+    scv_revision_id: text
+    scv_tree_id: text
+    inventory_digest: text
+
+struct PackageArchiveLoadV1:
+    valid: bool
+    reason: text
+    source_required: bool
+    interface_path: text
+    action_path: text
+
+struct PackageArchivePublishInputV1:
+    entry: PackageModuleIndexEntryV1
+    dependency_interface_digests: [text]
+    interface_content: text
+    action_content: text
+    success: bool
+
+fn package_archive_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn package_archive_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn package_archive_authority_valid_v1(
+    authority: PackageArchiveAuthorityV1
+) -> bool:
+    (package_archive_digest_valid_v1(authority.producer_digest) and
+        package_archive_text_valid_v1(authority.root_generation) and
+        package_archive_digest_valid_v1(authority.variant_digest) and
+        package_archive_text_valid_v1(authority.scv_revision_id) and
+        package_archive_text_valid_v1(authority.scv_tree_id) and
+        package_archive_digest_valid_v1(authority.inventory_digest))
+
+fn package_archive_dependencies_v1(values: [text]) -> text:
+    var sorted = values
+    var left = 0
+    while left < sorted.len():
+        var least = left
+        var right = left + 1
+        while right < sorted.len():
+            if sorted[right] < sorted[least]:
+                least = right
+            right = right + 1
+        if least != left:
+            val swap = sorted[left]
+            sorted[left] = sorted[least]
+            sorted[least] = swap
+        left = left + 1
+    var previous = ""
+    for digest in sorted:
+        if not package_archive_digest_valid_v1(digest) or digest == previous:
+            return ""
+        previous = digest
+    "{sorted.len()};{sorted.join(",")}"
+
+fn package_archive_manifest_v1(
+    entry: PackageModuleIndexEntryV1, authority: PackageArchiveAuthorityV1,
+    dependency_interface_digests: [text], interface_digest: text,
+    action_artifact_digest: text
+) -> text:
+    val dependencies = package_archive_dependencies_v1(
+        dependency_interface_digests)
+    if (dependencies == "" or
+            not package_archive_digest_valid_v1(entry.action_digest) or
+            not package_archive_authority_valid_v1(authority) or
+            not package_archive_text_valid_v1(entry.module_identity) or
+            not package_archive_text_valid_v1(entry.package_identity) or
+            not package_archive_digest_valid_v1(interface_digest) or
+            not package_archive_digest_valid_v1(action_artifact_digest)):
+        return ""
+    [
+        PACKAGE_ARCHIVE_MANIFEST_V1,
+        "module={entry.module_identity}",
+        "package={entry.package_identity}",
+        "action-key={entry.action_digest}",
+        "producer={authority.producer_digest}",
+        "root={authority.root_generation}",
+        "variant={authority.variant_digest}",
+        "scv-revision={authority.scv_revision_id}",
+        "scv-tree={authority.scv_tree_id}",
+        "inventory={authority.inventory_digest}",
+        "dependencies={dependencies}",
+        "interface={interface_digest}",
+        "action={action_artifact_digest}"
+    ].join("\n")
+
+fn package_archive_load_v1(
+    root: text, entry: PackageModuleIndexEntryV1,
+    authority: PackageArchiveAuthorityV1,
+    dependency_interface_digests: [text]
+) -> PackageArchiveLoadV1:
+    val mapping = action_get(root, entry.action_digest)
+    if mapping == nil:
+        return PackageArchiveLoadV1(false, "archive-missing", true, "", "")
+    if mapping!.artifact_digests.len() != 3:
+        return PackageArchiveLoadV1(false, "archive-closure-invalid", false, "", "")
+    val manifest_content = cas_get(root, mapping!.artifact_digests[0])
+    val interface_content = cas_get(root, mapping!.artifact_digests[1])
+    val action_content = cas_get(root, mapping!.artifact_digests[2])
+    if manifest_content == nil or interface_content == nil or action_content == nil:
+        return PackageArchiveLoadV1(false, "archive-corrupt-or-incomplete", false, "", "")
+    val expected = package_archive_manifest_v1(
+        entry, authority, dependency_interface_digests,
+        mapping!.artifact_digests[1], mapping!.artifact_digests[2])
+    if expected == "" or manifest_content! != expected:
+        return PackageArchiveLoadV1(false, "archive-provenance-mismatch", false, "", "")
+    if mapping!.artifact_digests[1] != entry.smf_metadata_digest:
+        return PackageArchiveLoadV1(false, "interface-digest-mismatch", false, "", "")
+    val interface_path = cas_blob_path(root, mapping!.artifact_digests[1])
+    val action_path = cas_blob_path(root, mapping!.artifact_digests[2])
+    if (not file_is_regular_no_follow(interface_path) or
+            not file_is_regular_no_follow(action_path)):
+        return PackageArchiveLoadV1(false, "archive-path-not-regular", false, "", "")
+    PackageArchiveLoadV1(
+        true, "ok", false, interface_path, action_path)
+
+fn package_archive_publish_v1(
+    root: text, entry: PackageModuleIndexEntryV1,
+    authority: PackageArchiveAuthorityV1,
+    dependency_interface_digests: [text], interface_content: text,
+    action_content: text
+) -> bool:
+    val interface_digest = sha256_text(interface_content)
+    if interface_digest != entry.smf_metadata_digest:
+        return false
+    val action_artifact_digest = sha256_text(action_content)
+    val manifest = package_archive_manifest_v1(
+        entry, authority, dependency_interface_digests,
+        interface_digest, action_artifact_digest)
+    if manifest == "":
+        return false
+    val stored_interface = cas_put(root, interface_content)
+    val stored_action = cas_put(root, action_content)
+    val stored_manifest = cas_put(root, manifest)
+    if (stored_interface != interface_digest or
+            stored_action != action_artifact_digest or stored_manifest == ""):
+        return false
+    action_put(root, entry.action_digest, ActionManifest(
+        entry.action_digest,
+        [stored_manifest, stored_interface, stored_action], 1))
+
+fn package_archive_publish_scc_v1(
+    root: text, scc_identity: text, authority: PackageArchiveAuthorityV1,
+    inputs: [PackageArchivePublishInputV1]
+) -> bool:
+    if scc_identity == "" or inputs.len() == 0:
+        return false
+    var action_keys: [text] = []
+    for input in inputs:
+        if (not input.success or input.entry.scc_identity != scc_identity or
+                action_keys.contains(input.entry.action_digest)):
+            return false
+        action_keys = action_keys.push(input.entry.action_digest)
+        if (sha256_text(input.interface_content) !=
+                input.entry.smf_metadata_digest or
+                package_archive_manifest_v1(
+                    input.entry, authority,
+                    input.dependency_interface_digests,
+                    sha256_text(input.interface_content),
+                    sha256_text(input.action_content)) == ""):
+            return false
+    # No action mapping becomes visible until every SCC result has passed the
+    # closure and provenance preflight. Readers additionally route a partially
+    # visible SCC wholly to frozen sources, so they never mix generations.
+    for input in inputs:
+        if not package_archive_publish_v1(
+                root, input.entry, authority,
+                input.dependency_interface_digests,
+                input.interface_content, input.action_content):
+            return false
+    true
+
+export PackageArchiveAuthorityV1, PackageArchiveLoadV1
+export PackageArchivePublishInputV1
+export package_archive_load_v1, package_archive_publish_v1
+export package_archive_publish_scc_v1

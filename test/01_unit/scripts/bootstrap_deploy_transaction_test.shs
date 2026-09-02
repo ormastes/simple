@@ -9,8 +9,13 @@ fail() { echo "bootstrap deploy transaction test: FAIL — $1" >&2; exit 1; }
 expect_reject() { if "$@" >/dev/null 2>&1; then fail "mutation accepted: $*"; fi; }
 payload() { printf '%s\n' "$2" >"$1"; chmod "${3:-755}" "$1"; }
 
-release="$scratch/release"; platform=test-platform; deploy="$release/$platform"; candidates="$scratch/candidates"
-mkdir -p "$deploy" "$candidates"
+release_parent_real="$scratch/private-var"; release_parent_alias="$scratch/var"; release="$release_parent_alias/release"; platform=test-platform; deploy="$release/$platform"; candidates="$scratch/candidates"
+mkdir -p "$release_parent_real/release" "$candidates"
+ln -s "$release_parent_real" "$release_parent_alias"
+bootstrap_deploy_tx_release_root=$(bootstrap_deploy_tx_canonical_dir "$release")
+bootstrap_deploy_tx_platform=$platform
+[ "$(bootstrap_deploy_tx_canonical_destination "$deploy/simple")" = "$bootstrap_deploy_tx_release_root/$platform/simple" ] || fail nonexistent_generation_parent
+mkdir "$release_parent_real/release/$platform"
 payload "$deploy/simple" old-simple
 for pair in 'simple:new-simple' 'simple_mcp_server:new-mcp' 'simple_lsp_mcp_server:new-lsp'; do
   payload "$candidates/${pair%%:*}" "${pair#*:}"
@@ -83,6 +88,7 @@ begin_generation() {
   printf 'schema=simple-bootstrap-stage3-current-acceptance-v1\nstatus=verified\nstage4_candidate_sha256=%s\n' \
     "$stage4_sha" >"$candidates/stage3-acceptance"
   printf 'schema=simple-kernel-phase7-qualification-v2\nstatus=PASS\n' >"$candidates/phase7"
+  expect_reject bootstrap_deploy_tx_add simple "$candidates/simple" "$deploy/not-simple" 755 "$stage4_sha"
   for name in simple simple_mcp_server simple_lsp_mcp_server; do
     bootstrap_deploy_tx_add "$name" "$candidates/$name" "$deploy/$name" 755 "$(bootstrap_deploy_tx_hash_file "$candidates/$name")"
   done

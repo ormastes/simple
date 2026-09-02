@@ -45,6 +45,22 @@ bootstrap_deploy_tx_canonical_file() {
   printf '%s/%s\n' "$bootstrap_deploy_tx_file_dir" "$(basename -- "$1")"
 }
 
+bootstrap_deploy_tx_canonical_destination() {
+  [ "$#" -eq 1 ] || return 1
+  [ -n "$bootstrap_deploy_tx_release_root" ] && [ -n "$bootstrap_deploy_tx_platform" ] || return 1
+  bootstrap_deploy_tx_destination_name=$(basename -- "$1")
+  bootstrap_deploy_tx_destination_platform_path=$(dirname -- "$1")
+  bootstrap_deploy_tx_destination_platform=$(basename -- "$bootstrap_deploy_tx_destination_platform_path")
+  bootstrap_deploy_tx_destination_release=$(dirname -- "$bootstrap_deploy_tx_destination_platform_path")
+  bootstrap_deploy_tx_safe_name "$bootstrap_deploy_tx_destination_name" || return 1
+  bootstrap_deploy_tx_safe_name "$bootstrap_deploy_tx_destination_platform" || return 1
+  [ "$bootstrap_deploy_tx_destination_platform" = "$bootstrap_deploy_tx_platform" ] || return 1
+  bootstrap_deploy_tx_destination_release=$(bootstrap_deploy_tx_canonical_dir "$bootstrap_deploy_tx_destination_release") || return 1
+  [ "$bootstrap_deploy_tx_destination_release" = "$bootstrap_deploy_tx_release_root" ] || return 1
+  printf '%s/%s/%s\n' "$bootstrap_deploy_tx_release_root" \
+    "$bootstrap_deploy_tx_destination_platform" "$bootstrap_deploy_tx_destination_name"
+}
+
 bootstrap_deploy_tx_safe_name() {
   case "$1" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
@@ -52,6 +68,39 @@ bootstrap_deploy_tx_safe_name() {
 bootstrap_deploy_tx_safe_text() {
   case "$1" in *'|'*|*'	'*|*'
 '*) return 1 ;; *) return 0 ;; esac
+}
+
+bootstrap_deploy_tx_role_for_name() {
+  case "$1" in
+    simple|simple.exe) echo compiler ;;
+    simple_seed|simple_seed.exe) echo seed ;;
+    simple_ui_backend|simple_ui_backend.exe) echo ui-backend ;;
+    simple_mcp_server|simple_mcp_server.exe) echo mcp-server ;;
+    simple_lsp_mcp_server|simple_lsp_mcp_server.exe) echo lsp-mcp-server ;;
+    *.sha256) echo companion-digest ;;
+    launcher.*) echo launcher ;;
+    authority.*) echo authority ;;
+    *) return 1 ;;
+  esac
+}
+
+bootstrap_deploy_tx_verify_full_closure() {
+  [ "$#" -eq 2 ] || return 1
+  journal=$1
+  suffix=$2
+  required="simple${suffix} simple_seed${suffix} simple_ui_backend${suffix} simple_mcp_server${suffix} simple_mcp_server${suffix}.sha256 simple_lsp_mcp_server${suffix} simple_lsp_mcp_server${suffix}.sha256 launcher.simple${suffix} launcher.simple_seed${suffix} launcher.simple_ui_backend${suffix} launcher.simple_mcp_server${suffix} launcher.simple_lsp_mcp_server${suffix} authority.stage4-provenance.env authority.stage3-acceptance.env authority.kernel-policy.sdn authority.phase7.env authority.phase7-candidates.env authority.performance-baseline.env authority.performance-measurement.env"
+  [ "$(wc -l <"$journal" | tr -d ' ')" -eq 19 ] || return 1
+  for name in $required; do
+    [ "$(awk -F '|' -v name="$name" '$1 == name { count++ } END { print count + 0 }' "$journal")" -eq 1 ] || return 1
+  done
+}
+
+bootstrap_deploy_tx_verify_authority() {
+  [ "$#" -eq 2 ] || return 1
+  bootstrap_deploy_tx_authority_verifier=${BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER:-}
+  [ -n "$bootstrap_deploy_tx_authority_verifier" ] || return 1
+  [ -x "$bootstrap_deploy_tx_authority_verifier" ] && [ ! -L "$bootstrap_deploy_tx_authority_verifier" ] || return 1
+  "$bootstrap_deploy_tx_authority_verifier" "$1" "$2"
 }
 
 bootstrap_deploy_tx_sync_path() {
@@ -356,6 +405,8 @@ bootstrap_deploy_tx_add() {
   case "$bootstrap_deploy_tx_mode" in 644|755) ;; *) return 1 ;; esac
   bootstrap_deploy_tx_safe_text "$bootstrap_deploy_tx_source" || return 1
   bootstrap_deploy_tx_source=$(bootstrap_deploy_tx_canonical_file "$bootstrap_deploy_tx_source") || return 1
+  bootstrap_deploy_tx_safe_text "$bootstrap_deploy_tx_destination" || return 1
+  bootstrap_deploy_tx_destination=$(bootstrap_deploy_tx_canonical_destination "$bootstrap_deploy_tx_destination") || return 1
   [ "$bootstrap_deploy_tx_destination" = "$bootstrap_deploy_tx_platform_path/$bootstrap_deploy_tx_name" ] || return 1
   if awk -F '|' -v name="$bootstrap_deploy_tx_name" '$1 == name { found = 1 } END { exit !found }' "$bootstrap_deploy_tx_journal"; then
     return 1
@@ -379,9 +430,13 @@ bootstrap_deploy_tx_write_receipt_entries() {
   while IFS='|' read -r bootstrap_deploy_tx_name bootstrap_deploy_tx_source bootstrap_deploy_tx_destination bootstrap_deploy_tx_mode bootstrap_deploy_tx_sha; do
     bootstrap_deploy_tx_index=$((bootstrap_deploy_tx_index + 1))
     bootstrap_deploy_tx_prefix="entry_${bootstrap_deploy_tx_index}"
+    bootstrap_deploy_tx_role=$(bootstrap_deploy_tx_role_for_name "$bootstrap_deploy_tx_name") || return 1
+    bootstrap_deploy_tx_size=$(wc -c <"$bootstrap_deploy_tx_dir/$bootstrap_deploy_tx_name" | tr -d ' ') || return 1
     {
       echo "${bootstrap_deploy_tx_prefix}_name=$bootstrap_deploy_tx_name"
+      echo "${bootstrap_deploy_tx_prefix}_role=$bootstrap_deploy_tx_role"
       echo "${bootstrap_deploy_tx_prefix}_mode=$bootstrap_deploy_tx_mode"
+      echo "${bootstrap_deploy_tx_prefix}_size=$bootstrap_deploy_tx_size"
       echo "${bootstrap_deploy_tx_prefix}_candidate_path=$bootstrap_deploy_tx_source"
       echo "${bootstrap_deploy_tx_prefix}_candidate_sha256=$bootstrap_deploy_tx_sha"
       echo "${bootstrap_deploy_tx_prefix}_generation_path=$bootstrap_deploy_tx_final_dir/$bootstrap_deploy_tx_name"
@@ -414,6 +469,9 @@ bootstrap_deploy_tx_seal() {
   [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_stage3_verify_receipt" schema)" = simple-bootstrap-stage3-current-acceptance-v1 ] || return 1
   [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_stage3_verify_receipt" status)" = verified ] || return 1
   [ "$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_stage3_verify_receipt" stage4_candidate_sha256)" = "$bootstrap_deploy_tx_stage4_sha" ] || return 1
+  case "$bootstrap_deploy_tx_stage4_path" in *.exe) bootstrap_deploy_tx_suffix=.exe ;; *) bootstrap_deploy_tx_suffix= ;; esac
+  bootstrap_deploy_tx_verify_full_closure "$bootstrap_deploy_tx_journal" "$bootstrap_deploy_tx_suffix" || return 1
+  bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_dir" publication || return 1
   bootstrap_deploy_tx_expected_inventory="$bootstrap_deploy_tx_dir/.expected-inventory.$$"
   bootstrap_deploy_tx_actual_inventory="$bootstrap_deploy_tx_dir/.actual-inventory.$$"
   {
@@ -455,6 +513,7 @@ bootstrap_deploy_tx_seal() {
 
 bootstrap_deploy_tx_apply() {
   [ "$bootstrap_deploy_tx_active" -eq 1 ] && [ "$bootstrap_deploy_tx_state" = sealed ] || return 1
+  bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_final_dir" publication || return 1
   bootstrap_deploy_tx_pointer_swap "$bootstrap_deploy_tx_previous_target" \
     "$bootstrap_deploy_tx_pointer_target" || return 1
   bootstrap_deploy_tx_write_control deploy published "$bootstrap_deploy_tx_id" || return 1
@@ -504,6 +563,10 @@ bootstrap_deploy_tx_known_generation_entry() {
     simple|simple.exe|simple_seed|simple_seed.exe|simple_ui_backend|simple_ui_backend.exe|\
     simple_mcp_server|simple_mcp_server.exe|simple_mcp_server.sha256|simple_mcp_server.exe.sha256|\
     simple_lsp_mcp_server|simple_lsp_mcp_server.exe|simple_lsp_mcp_server.sha256|simple_lsp_mcp_server.exe.sha256|\
+    launcher.simple|launcher.simple.exe|launcher.simple_seed|launcher.simple_seed.exe|\
+    launcher.simple_ui_backend|launcher.simple_ui_backend.exe|\
+    launcher.simple_mcp_server|launcher.simple_mcp_server.exe|\
+    launcher.simple_lsp_mcp_server|launcher.simple_lsp_mcp_server.exe|\
     authority.stage4-provenance.env|authority.stage3-acceptance.env|authority.kernel-policy.sdn|\
     authority.phase7.env|authority.phase7-candidates.env|authority.performance-baseline.env|\
     authority.performance-measurement.env) ;;
@@ -517,17 +580,22 @@ bootstrap_deploy_tx_validate_entries() {
   bootstrap_deploy_tx_validate_generation_dir=$2
   bootstrap_deploy_tx_validate_count=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" entry_count) || return 1
   case "$bootstrap_deploy_tx_validate_count" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$bootstrap_deploy_tx_validate_count" -ge 1 ] && [ "$bootstrap_deploy_tx_validate_count" -le 14 ] || return 1
+  [ "$bootstrap_deploy_tx_validate_count" -eq 19 ] || return 1
   bootstrap_deploy_tx_validate_index=1
   bootstrap_deploy_tx_validate_simple=0
   while [ "$bootstrap_deploy_tx_validate_index" -le "$bootstrap_deploy_tx_validate_count" ]; do
     bootstrap_deploy_tx_validate_prefix="entry_$bootstrap_deploy_tx_validate_index"
     bootstrap_deploy_tx_validate_name=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_name") || return 1
     bootstrap_deploy_tx_known_generation_entry "$bootstrap_deploy_tx_validate_name" || return 1
+    bootstrap_deploy_tx_validate_role=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_role") || return 1
+    [ "$bootstrap_deploy_tx_validate_role" = "$(bootstrap_deploy_tx_role_for_name "$bootstrap_deploy_tx_validate_name")" ] || return 1
+    bootstrap_deploy_tx_validate_size=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_size") || return 1
     bootstrap_deploy_tx_validate_path=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_generation_path") || return 1
     bootstrap_deploy_tx_validate_sha=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_generation_sha256") || return 1
     [ "$bootstrap_deploy_tx_validate_path" = "$bootstrap_deploy_tx_validate_generation_dir/$bootstrap_deploy_tx_validate_name" ] &&
       [ "$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_validate_path")" = "$bootstrap_deploy_tx_validate_sha" ] || return 1
+    [ "$(wc -c <"$bootstrap_deploy_tx_validate_path" | tr -d ' ')" = "$bootstrap_deploy_tx_validate_size" ] || return 1
+    [ "$(find "$bootstrap_deploy_tx_validate_path" -links +1 -print | wc -l | tr -d ' ')" -eq 0 ] || return 1
     case "$bootstrap_deploy_tx_validate_name" in simple|simple.exe) bootstrap_deploy_tx_validate_simple=$((bootstrap_deploy_tx_validate_simple + 1)) ;; esac
     bootstrap_deploy_tx_validate_index=$((bootstrap_deploy_tx_validate_index + 1))
   done
@@ -645,6 +713,7 @@ bootstrap_deploy_tx_rollback_generation() {
   bootstrap_deploy_tx_validate_generation "$bootstrap_deploy_tx_rollback_previous_dir" \
     "$bootstrap_deploy_tx_rollback_previous_manifest" \
     "$bootstrap_deploy_tx_rollback_previous_manifest_sha" || return 1
+  bootstrap_deploy_tx_verify_authority "$bootstrap_deploy_tx_rollback_previous_dir" rollback || return 1
   bootstrap_deploy_tx_rollback_receipt_pending="$bootstrap_deploy_tx_control_root/.rollback-${bootstrap_deploy_tx_rollback_expected}.$$.env"
   [ ! -e "$bootstrap_deploy_tx_rollback_receipt_pending" ] && [ ! -L "$bootstrap_deploy_tx_rollback_receipt_pending" ] || return 1
   {

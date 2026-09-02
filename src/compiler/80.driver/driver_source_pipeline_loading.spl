@@ -25,6 +25,7 @@ use compiler.driver.driver_phase_gates.{driver_explicit_source_entry}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
+use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
 
 @unsafe(reason: "raw nullable bootstrap source read; nil is provider failure", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text?
@@ -154,8 +155,45 @@ impl CompilerDriver:
         val explicit_entry_closure = explicit_entry_input != ""
         val entry_closure_walk = explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre)
+        val package_index_cold_init =
+            (rt_env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1"
+        var package_index_routed = false
+        if not package_index_cold_init:
+            var changed_modules: [text] = []
+            val changed_text = rt_env_get("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
+            if changed_text != "":
+                for changed_module in changed_text.split(","):
+                    val normalized = changed_module.trim()
+                    if normalized != "":
+                        changed_modules = changed_modules.push(normalized)
+            val route = package_index_route_current_v1(
+                if entry_closure_walk: requested_entry_input else: "",
+                rt_env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
+                rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_TREE_ID") ?? "",
+                rt_env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "",
+                rt_env_get("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
+                changed_modules,
+                (rt_env_get("SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED") ?? "") == "1")
+            if not route.valid:
+                self.ctx.add_error("persistent package index admission failed: {route.reason}; run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            driver_inputs = route.source_paths
+            package_index_routed = true
+            if route.package_schedule.len() > 0:
+                rt_env_set("SIMPLE_PACKAGE_INDEX_PACKAGE_SCHEDULE", route.package_schedule.join(","))
+            rt_env_set(
+                "SIMPLE_PACKAGE_INDEX_INTERFACE_ARCHIVES",
+                route.interface_archive_paths.join(","))
+            rt_env_set(
+                "SIMPLE_PACKAGE_INDEX_ACTION_ARCHIVES",
+                route.action_archive_paths.join(","))
         if entry_closure_walk:
-            driver_inputs = [requested_entry_input]
+            if not package_index_routed:
+                driver_inputs = [requested_entry_input]
         elif driver_inputs.len() == 0:
             if requested_entry_input != "":
                 driver_inputs = [requested_entry_input]
@@ -164,6 +202,11 @@ impl CompilerDriver:
         if source_trace:
             print "[load_sources] inputs {input_len}"
         if input_len <= 0:
+            if package_index_routed:
+                self.ctx.add_error(
+                    "persistent package index produced an archive-only route, but archive ingestion is unavailable; refusing bootstrap source fallback")
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
             if source_trace:
                 print "[load_sources] bootstrap defaults"
             self.parse_bootstrap_default_root("./src/compiler")
@@ -187,7 +230,9 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if entry_closure_walk and input_path == requested_entry_input:
+            val loaded = if package_index_routed:
+                _driver_collect_explicit_compiler_source(input_path)
+            elif entry_closure_walk and input_path == requested_entry_input:
                 if explicit_entry_closure:
                     _driver_collect_explicit_compiler_source(input_path)
                 else:
@@ -237,7 +282,7 @@ impl CompilerDriver:
         # module is parsed, lowered, and compiled into the binary. This also
         # keeps the bootstrap Stage-4 path from parsing every explicit source
         # tree before entry-closure pruning can happen.
-        if entry_closure_walk:
+        if entry_closure_walk and not package_index_routed:
             # Explicit --source roots are resolver fallbacks, not closure seeds.
             # This preserves custom source layouts without parsing every file in
             # each root before the entry's transitive imports are known.
@@ -407,7 +452,8 @@ impl CompilerDriver:
             rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
-        if has_project_source and needs_bulk_project_sources and not nb_entry_closure:
+        if (has_project_source and needs_bulk_project_sources and
+                not nb_entry_closure and not package_index_routed):
             val paths = ["src/app", "src/lib", "src/compiler", "src/runtime"]
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:

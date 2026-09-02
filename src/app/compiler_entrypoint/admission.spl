@@ -1,0 +1,83 @@
+# Shared immutable-source admission for compiler-facing entrypoints.
+
+use app.io.file_ops.{path_absolute}
+use app.io.env_ops.{env_get, env_set}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.package_module_index.{package_module_index_read_current_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+struct CompilerEntrypointAdmissionV1:
+    valid: bool
+    reason: text
+    root: text
+    snapshot_root: text
+    revision_id: text
+    index_digest: text
+    inventory_generation: i64
+
+fn compiler_entrypoint_invalid_v1(reason: text) -> CompilerEntrypointAdmissionV1:
+    CompilerEntrypointAdmissionV1(false, reason, "", "", "", "", -1)
+
+fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmissionV1:
+    val root = path_absolute(".").replace("\\", "/")
+    if root == "":
+        return compiler_entrypoint_invalid_v1("repository-root-unavailable")
+    val cache_root = root + "/build/scv"
+    val cold_init = (env_get("SIMPLE_SCV_INVENTORY_COLD_INIT") ?? "") == "1"
+    val refresh = compiler_inventory_refresh_v1(
+        root, cache_root, source_roots, cold_init)
+    if not refresh.valid:
+        return compiler_entrypoint_invalid_v1(refresh.reason)
+    val snapshot = scv_compile_snapshot_acquire_v1(
+        root, cache_root, source_roots)
+    if not snapshot.valid:
+        return compiler_entrypoint_invalid_v1(snapshot.reason)
+    val index = package_module_index_read_current_v1(machine_cache_root())
+    if not index.valid or index.generation == nil:
+        return compiler_entrypoint_invalid_v1("package-index:" + index.reason)
+    val generation = index.generation!
+    if (generation.scv_revision_id != snapshot.revision_id or
+            generation.scv_commit_id != snapshot.commit_id or
+            generation.scv_tree_id != snapshot.tree_id or
+            generation.inventory_digest != snapshot.inventory_digest):
+        return compiler_entrypoint_invalid_v1("package-index-scv-binding-mismatch")
+    env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root)
+    env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id)
+    env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id)
+    env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id)
+    env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest)
+    env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(refresh.inventory_generation))
+    env_set("SIMPLE_PACKAGE_INDEX_DIGEST", index.digest)
+    CompilerEntrypointAdmissionV1(
+        true, "ok", root, snapshot.snapshot_root, snapshot.revision_id,
+        index.digest, refresh.inventory_generation)
+
+fn compiler_entrypoint_frozen_path_v1(
+    admission: CompilerEntrypointAdmissionV1, path: text
+) -> text:
+    if not admission.valid or path == "":
+        return ""
+    val absolute = path_absolute(path).replace("\\", "/")
+    if absolute == admission.root:
+        return admission.snapshot_root
+    if not absolute.starts_with(admission.root + "/"):
+        return ""
+    admission.snapshot_root + absolute.substring(admission.root.len(), absolute.len())
+
+fn compiler_entrypoint_frozen_env_path_v1(path: text) -> text:
+    val root = path_absolute(".").replace("\\", "/")
+    val snapshot_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    val revision_id = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
+    val index_digest = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
+    if root == "" or snapshot_root == "" or revision_id == "" or index_digest == "":
+        return ""
+    val absolute = path_absolute(path).replace("\\", "/")
+    if absolute == snapshot_root or absolute.starts_with(snapshot_root + "/"):
+        return absolute
+    compiler_entrypoint_frozen_path_v1(CompilerEntrypointAdmissionV1(
+        true, "ok", root, snapshot_root, revision_id, index_digest, -1), path)
+
+export CompilerEntrypointAdmissionV1
+export compiler_entrypoint_admit_v1, compiler_entrypoint_frozen_path_v1
+export compiler_entrypoint_frozen_env_path_v1
