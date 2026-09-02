@@ -1,0 +1,77 @@
+# Purpose and audience: executable spec of the be_dom path-event constructor
+# family and <style> HTML serialization for the browser-engine/DOM
+# maintenance team.
+# Audience: engineers touching src/lib/gc_async_mut/gpu/browser_engine/{dom_accessors,html_tree_builder}.spl.
+# Scope: (1) BeDomEvent.create call-site arity inside be_dom_create_event and
+# _be_dom_dispatch_event_path_with_executor's empty-path fallback; (2) that a
+# <style> element becomes a real DOM node whose text content round-trips
+# through be_dom_serialize_html. Layout/paint suppression of <style> content
+# and the raw-text CSS cascade extractor are explicitly out of scope — this
+# file only asserts the DOM/serialize contract.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""be_dom path-event family arity and <style> serialization."""
+#
+# Regression guard for
+# doc/08_tracking/bug/be_dom_event_path_family_arity_and_style_serialize_2026-08-19.md
+#
+# Defect 1: `be_dom_create_event` (and the empty-path branch of
+# `_be_dom_dispatch_event_path_with_executor`) called `BeDomEvent.create` with
+# 7 positional arguments against its real 4-parameter signature
+# (event_type, namespace_uri, bubbles, cancelable). Any call through the
+# path-based dispatch family (`be_dom_dispatch_event_path` and friends) failed
+# at runtime with "unknown static method create" before this fix — the
+# typed-route family (`be_dom_dispatch_event` / `_to_id`) was unaffected and
+# is what earlier ad hoc smoke checks exercised, which is how this went
+# unnoticed.
+#
+# Defect 2: the HTML tree builder treated `<style>` as a fully-skipped raw
+# text tag (`skipped_raw_text_tag`), so it never became a DOM node at all.
+# `be_dom_serialize_html` walks the DOM tree, so a document that never
+# contained a <style> node could not possibly re-emit one — any consumer that
+# re-derives CSS from the serialized HTML (rather than the pristine source)
+# silently lost all inline stylesheets on every mutation.
+#
+# NON-VACUITY: example 1 calls the exact path-dispatch function named in the
+# bug doc and asserts on its actions/dispatch shape, not just "did not throw".
+# Example 2 asserts the exact style text substring is present in the
+# serialized output; under the defect the substring is Absent (dropped
+# entirely) rather than merely reordered.
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_dispatch_event_path, be_dom_serialize_html
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+
+describe "be_dom path-event family and style serialization":
+    it "dispatches a path-based click event without an arity crash":
+        # @req REQ-SSPEC-LIB
+        val root = BeDomNode.element_with_id(1, "div")
+        val dispatch = be_dom_dispatch_event_path([root], "click", true, true)
+        expect(dispatch.event.event_type).to_equal("click")
+        # be_dom_event_identity: an "id"-less node's identity is
+        # "node:{node_id}", not the bare node_id — see
+        # dom_accessors.spl:78-82.
+        expect(dispatch.event.target_id).to_equal("node:1")
+        expect(dispatch.event.bubbles).to_equal(true)
+        expect(dispatch.event.cancelable).to_equal(true)
+
+    it "round-trips a <style> block through the DOM and back to HTML":
+        # @req REQ-SSPEC-LIB
+        # A child combinator (`>`) and an attribute selector (`"`) are
+        # deliberately included: <style> content is HTML5 raw text and must
+        # NOT be entity-escaped on serialize. If it were (as a generic #text
+        # node would be), ".a > .b" would come back as ".a &gt; .b", and the
+        # raw-text CSS cascade extractor (style_block_parse.spl) would then
+        # re-parse a broken selector — the same re-layout-against-stale-CSS
+        # failure mode this bug doc describes, one level deeper.
+        val html = "<html><head><style>.a > .b[data-x=\"y\"]{color:red}</style></head><body></body></html>"
+        val doc = html_tree_builder_build(html)
+        val serialized = be_dom_serialize_html(doc)
+        expect(serialized.contains("<style>")).to_equal(true)
+        expect(serialized.contains(".a > .b[data-x=\"y\"]{color:red}")).to_equal(true)
+        expect(serialized.contains("&gt;")).to_equal(false)
+        expect(serialized.contains("&quot;")).to_equal(false)

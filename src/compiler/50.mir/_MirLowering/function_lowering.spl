@@ -48,6 +48,10 @@ fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+fn _mir_tag_probe_enabled() -> bool:
+    """Two-sided HirType tag probe, off unless SIMPLE_MIR_TAG_PROBE=1."""
+    (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1"
+
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
 
@@ -216,6 +220,33 @@ impl MirLowering:
             elif gpu_kernel_target == "cuda":
                 self.lower_cuda_kernel_param_type(fn_.params[pmi])
             else:
+                # TWO-SIDED TAG PROBE (2026-09-02, OFF unless
+                # SIMPLE_MIR_TAG_PROBE=1; zero cost and zero reads when unset).
+                # This is the crossing E-MIR-TYPE-ZeroKind is suspected to be
+                # minted at: a HirType read out of an ARRAY ELEMENT and passed
+                # BY VALUE into a method -- the exact shape
+                # mir_lowering_types.spl:574-580 documents as unsafe under the
+                # admitted Stage 2 native ABI.
+                # Reading the discriminant HERE and comparing with what
+                # lower_type sees separates the two candidate roots that have
+                # opposite fixes:
+                #   caller non-zero, callee 0  -> dead copy MINTED IN FLIGHT
+                #                                 (repair the ABI crossing)
+                #   caller 0 too               -> already dead upstream
+                #                                 (the producer is earlier)
+                # Deliberately reads only the discriminant of the SAME field
+                # lower_type is about to read -- no extra fields, no `.span`.
+                # A previous "diagnostic-only" round that read five extra
+                # fields off `.span` was NOT behaviour-neutral (see :1112), so
+                # this stays minimal and default-off.
+                # SCOPED to the suspect functions. An unscoped probe printed one
+                # line per parameter per function across all 760 modules and drove
+                # RSS to 10 GB in 3 minutes on a host whose swap is already
+                # committed -- it would have OOM-killed the run and taught us
+                # nothing. Only the ZeroKind victims matter here.
+                if _mir_tag_probe_enabled() and fn_.name.contains("compile_specialized_template"):
+                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_)
+                    eprint("[mir-tag-probe] fn={fn_.name} param={pmi} caller_disc={probe_disc}")
                 self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
@@ -547,7 +578,38 @@ impl MirLowering:
                 # Keep the coalesce out of the nested Some(call(...)) shape,
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
-                val tail_local = result ?? LocalId(id: 0)
+                var tail_local = result ?? LocalId(id: 0)
+                # Bug native_option_bool_eq_against_raw_literal_2026-08-08:
+                # an IMPLICIT tail return in a `-> T?` function handed back
+                # the bare value, while the EXPLICIT `return v` form boxes it
+                # into the canonical Option handle (lower_return_expr's
+                # ensure_option_handle call). The two forms therefore produced
+                # different physical representations for the same declared
+                # type, and every consumer that decodes through the Option box
+                # (rt_native_eq, `??`) saw a raw scalar -- `f(true) == true`
+                # compared a 0/1 word against a boxed handle and answered
+                # `false`. Box here too, but only on POSITIVE evidence that the
+                # tail is a bare primitive: its own HIR type must be recorded
+                # and be a scalar. "Not known to be Optional" is not enough --
+                # an `if flag: 7 else: nil` tail merges into a local with no
+                # recorded type, is not in nil_locals, and boxing it blind
+                # turns the None word 3 into `Some(3)` (measured: `?? -1`
+                # printed 3 instead of -1). Anything without that evidence is
+                # left exactly as it was before this fix.
+                match fn_.return_type.kind:
+                    case HirTypeKind.Optional(_):
+                        var tail_is_bare_scalar = false
+                        if val tail_ty = self.find_local_hir_type(tail_local.id):
+                            match tail_ty.kind:
+                                case HirTypeKind.Bool | HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Char | HirTypeKind.Str:
+                                    tail_is_bare_scalar = true
+                                case _:
+                                    ()
+                        if tail_is_bare_scalar:
+                            tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
+                            bldr2 = self.builder
+                    case _:
+                        ()
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
@@ -1079,8 +1141,15 @@ impl MirLowering:
         # opposite fixes (nil-guard the CALLER vs add a lower_type arm), and
         # guessing between them costs a full bootstrap per attempt. Split them,
         # and name the function being lowered so the caller is locatable.
+        # NOT the function being lowered. `current_function_names` is never
+        # pushed/popped -- every write is a whole-array assignment of a MODULE's
+        # (module_lowering.spl:1150) or the PROGRAM's (bootstrap_globals.spl:386)
+        # complete name list, so `[len-1]` is a fixed tail name that is identical
+        # for every fatal raised while that list is installed. Reported as a
+        # scope hint only; a session that reads it as the offending function
+        # searches the wrong file (this cost two bootstrap runs on 2026-09-02).
         val fn_ctx = if self.current_function_names.len() > 0:
-            self.current_function_names[self.current_function_names.len() - 1]
+            "scope-tail:" + self.current_function_names[self.current_function_names.len() - 1]
         else:
             "<no-function-context>"
         if type_ == nil:

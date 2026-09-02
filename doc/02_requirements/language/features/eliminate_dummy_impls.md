@@ -19,8 +19,21 @@ The compiler codebase contains ~15 dummy/stub/placeholder implementations that s
 - **Status:** Fixed — default parser `\payload, _ctx: Ok(BlockValue.Raw(payload))`
 
 #### STUB-002: Effect Inference Not Wired
-- **File:** `src/compiler/80.driver/driver.spl`
-- **Status:** Fixed — wired `run_effect_pass(self.ctx.hir_modules)`
+- **File:** `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`
+- **Status:** NOT FIXED — needs an owner ruling (delete vs implement). See
+  `doc/08_tracking/bug/effect_pass_dead_and_stub002_falsely_fixed_2026-08-01.md`.
+  The previous entry here read *"Fixed — wired `run_effect_pass(self.ctx.hir_modules)`"*.
+  That was never true (the pass body was an unconditional early return, and the
+  single call site sat in a bootstrap-only branch), and as of 2026-09-02 it names
+  a function that no longer exists anywhere in the tree:
+  `/usr/bin/grep -rn "run_effect_pass" src/ test/` returns zero hits, and
+  `src/compiler/30.types/type_system/effect_pass.spl` has been deleted along with
+  both guarding specs (`test/02_integration/compiler/driver/effect_inference_wiring_spec.spl`,
+  `test/01_unit/compiler/type_system/effect_pass_spec.spl`). What remains at
+  `driver_hir_pipeline_lowering.spl:914` is a comment and a `log_debug` line, not
+  a pass. `src/compiler/00.common/effects_solver.spl` (`effectsolver_create`,
+  `effectsolver_solve`) is now orphaned — the deleted `effect_pass.spl` was its
+  only in-tree consumer.
 
 #### STUB-003: Literal Converter Stubs
 - **File:** `src/compiler/70.backend/backend/common/literal_converter.spl`

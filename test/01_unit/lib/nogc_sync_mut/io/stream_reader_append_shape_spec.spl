@@ -1,0 +1,103 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Stream readers must append into the retained buffer, never rebuild it
+#
+# Regression guard for doc/08_tracking/bug/networking_fragment_accumulator_quadratic_neighbors_2026-08-21.md
+#
+# DEFECT CLASS. A receive loop that writes `buf = buf + chunk` allocates a
+# fresh array of the WHOLE retained length on every ingress fragment. Under
+# adversarial one-byte fragmentation that is O(n^2) byte copies before a frame
+# is even framed. The fixed reference shape in this package is
+# `io_append_chunk` (src/lib/nogc_sync_mut/io/byte_append.spl): write each
+# admitted byte once, never rebuild the prefix.
+#
+# THE SPECIFIC SITE THIS PINS. The 2026-08-21 disposition converted
+# `read_exact` / `read_all` / `read_bytes_or_empty` in tcp.spl and `read_exact`
+# in pipe.spl. It MISSED a fourth reader in the same file —
+# `tcp_fd_read_bytes_or_empty` (tcp.spl:828) — which kept the quadratic shape
+# while importing `io_append_chunk` three lines above it. That is the exact way
+# this class survives a fix: one sibling in the already-edited file.
+#
+# WHY A SOURCE SCAN. Exercising these readers needs a live socket or pipe fd,
+# which a unit spec cannot stand up hermetically, and the defect is a COST
+# property that a functional assertion cannot see (both shapes return the same
+# bytes — that is precisely why the concat sat here unnoticed). The shape is
+# fully decidable from source: the accumulator either rebuilds its prefix or it
+# does not. The scan reads the real files these readers are built from and
+# carries a non-vacuity control, so a green run is not a silent no-op.
+#
+# OUT OF SCOPE. One-shot response/hex encoders over fixed-size inputs
+# (http/headers.spl, ssh_cipher.spl, http_server/response.spl) are explicitly
+# excluded by the bug record as benign — they are not per-fragment receive
+# accumulators. So is http_server/parser.spl's `self.buffer = self.buffer +
+# data`, which the record defers: removing it needs a read-offset cursor that
+# changes `feed`'s `consumed` contract.
+
+use std.spec.step
+
+use std.spec.*
+
+use std.io_runtime.{process_run}
+
+val SYNC_IO_DIR: text = "src/lib/nogc_sync_mut/io"
+
+# Grep a directory and return matching "file:line:text" lines. `grep -r` exits
+# 1 with empty stdout when there are no matches, which is the passing case;
+# stdout is the whole oracle, so no exit code is ever read through a pipe.
+fn grep_io(pattern: text) -> text:
+    val cmd = "/usr/bin/grep -rn -- '" + pattern + "' " + SYNC_IO_DIR + " || true"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+# The same scan restricted to the two stream-reader files. The generalised
+# self-reassignment pattern legitimately also matches the hex-dump builders in
+# tls_common_hooks.spl, which run over fixed-size keys and are named by the bug
+# record's own "checked and excluded as benign" list -- they are not
+# per-fragment receive accumulators and converting them would be noise.
+fn grep_readers(pattern: text) -> text:
+    val cmd = "/usr/bin/grep -n -- '" + pattern + "' " + SYNC_IO_DIR + "/tcp.spl " + SYNC_IO_DIR + "/pipe.spl || true"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "sync stream readers accumulate without rebuilding the retained prefix":
+    # @manual scenario evidence
+
+    it "has no `buf = buf + chunk` accumulator left in tcp.spl":
+        # @req REQ-SSPEC-LIB
+        step("has no `buf = buf + chunk` accumulator left in tcp.spl")
+        step("Scan the sync io package for the exact quadratic shape the 2026-08-21 pass converted")
+        val hits = grep_io("^ *buf = buf + chunk")
+
+        step("Every reader in this package must append via io_append_chunk instead")
+        expect(hits).to_equal("")
+
+    it "has no whole-buffer rebuild of any local byte accumulator in the sync io readers":
+        # @req REQ-SSPEC-LIB
+        step("has no whole-buffer rebuild of any local byte accumulator in the sync io readers")
+        step("Generalise past the one variable name: any `X = X + <chunk-ish>` re-assignment in a reader")
+        val hits = grep_readers("^ *\\(buf\\|acc\\|data\\|out\\) = \\1 + ")
+
+        step("A retained accumulator that re-assigns itself from itself is the quadratic shape")
+        expect(hits).to_equal("")
+
+    it "routes the readers through the shared amortized append helper":
+        # @req REQ-SSPEC-LIB
+        step("routes the readers through the shared amortized append helper")
+        step("io_append_chunk is the reference shape; each converted reader must call it")
+        val hits = grep_io("io_append_chunk(buf, chunk")
+
+        step("read_exact, read_all, read_bytes_or_empty and tcp_fd_read_bytes_or_empty all append in place")
+        expect(hits).to_contain("tcp.spl")
+
+    it "proves the scan is live and would actually catch the shape":
+        # @req REQ-SSPEC-LIB
+        step("proves the scan is live and would actually catch the shape")
+        # Non-vacuity control: the same grep for a string that IS present must
+        # find it. If this comes back empty the scan itself is broken (wrong
+        # path, grep missing, wrong cwd) and every green above is meaningless.
+        val control = grep_io("io_append_chunk")
+
+        step("A green suite above is only meaningful if this control is non-empty")
+        expect(control).to_contain("byte_append.spl")

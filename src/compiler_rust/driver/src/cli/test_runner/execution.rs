@@ -237,7 +237,12 @@ fn verdict_reports_clean_ok(output: &str) -> bool {
 ///
 /// Legitimate zero-exit cases are unaffected (`exit_code == 0` is a no-op
 /// here).
-fn reconcile_child_exit_status(exit_code: i32, passed: usize, mut failed: usize, output: &str) -> (usize, Option<String>) {
+fn reconcile_child_exit_status(
+    exit_code: i32,
+    passed: usize,
+    mut failed: usize,
+    output: &str,
+) -> (usize, Option<String>) {
     if exit_code == 0 {
         return (failed, None);
     }
@@ -2260,11 +2265,7 @@ mod tests {
         // Both list literals must be closed *above* fn main().
         let opens = top.matches('[').count();
         let closes = top.matches(']').count();
-        assert_eq!(
-            opens, closes,
-            "unbalanced brackets at module scope:\n{}",
-            top
-        );
+        assert_eq!(opens, closes, "unbalanced brackets at module scope:\n{}", top);
         assert!(
             top.contains("val CANONICAL_BACKENDS"),
             "second declaration missing from module scope:\n{}",
