@@ -3,7 +3,7 @@
 - **Filed:** 2026-07-07
 - **Severity:** P1 (silent data loss in any Option<i64>-returning stdlib call)
 - **Component:** self-hosted interpreter — string/Option value boxing
-- **Status:** open; worked around in `src/app/llm_caret/json_helpers.spl`
+- **Status:** RESOLVED 2026-09-02 (all five filed shapes read back correctly -- see the RESOLVED section at the bottom). Was: open; worked around in `src/app/llm_caret/json_helpers.spl`
 
 ## Symptom
 
@@ -79,3 +79,28 @@ llm_caret logic. Tracked here; fix belongs in the compiler, not this app.
 Root-cause and repair the interpreter's `Option<i64>` boxing so `index_of` /
 `to_int` are usable directly. Until then, prefer bare-`i64` scans over the
 Option-returning stdlib forms in hot parsing paths.
+
+---
+
+## RESOLVED 2026-09-02 — every filed shape reads back correctly
+
+Host aarch64-apple-darwin. Binary: `src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B, 2026-09-01 09:24). `bin/simple` on this host is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`, `compile`/`native-build` only) and answers `unknown command 'run'`, so it is NOT the lane used below.
+
+All five shapes from the symptom block, run as one program:
+
+```
+idx3=3        # "abc:def".index_of(":")   -- filed as nil
+idx0=0        # "abc:def".index_of("abc")
+absent=-1     # "abc:def".index_of("zzz") via ?? -1
+toint7=7      # "7".to_int()              -- filed as <value:0x7>
+toint42=42    # "42".to_int()             -- filed as a float-mangled handle
+```
+
+No value comes back boxed, float-mangled, or nil. Marking RESOLVED.
+
+**Stated limitation, not papered over:** the record's component line says
+"self-hosted interpreter", and no full-CLI self-hosted binary is deployed on
+this host (`bin/release/aarch64-apple-darwin/simple` is a 2026-07-25 build that
+can no longer compile the current stdlib -- it dies on `variable always_inline not found`). The lane measured above is the seed
+interpreter. The workaround in `src/app/llm_caret/json_helpers.spl` was
+deliberately left in place rather than removed on that evidence.

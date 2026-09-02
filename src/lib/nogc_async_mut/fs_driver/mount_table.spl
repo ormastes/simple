@@ -12,7 +12,10 @@ use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_capabilities, _dr
     _driver_pwrite_text_handle, _driver_pread_text_handle, _driver_close_handle,
     _driver_fsync, _driver_fdatasync, _file_stat_is_directory,
     _driver_unlink_path_text, _driver_rename_path_text, _driver_ftruncate_handle,
-    _driver_mmap_shared_writable_handle, _driver_link_path_text}
+    _driver_mmap_shared_writable_handle, _driver_link_path_text,
+    _driver_kind_name, _driver_dbfs_server_data_identity,
+    _driver_dbfs_current_server_data_identity, _driver_nvfs_root_identity,
+    _driver_nvfs_current_root_identity, _driver_nvfs_device_instance_id}
 val MOUNT_ID_MAX: u32 = 0xFFFFFFFFu32
 val HANDLE_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 val MOUNT_TABLE_MAX_MOUNTS: i64 = 4096
@@ -21,6 +24,8 @@ val MOUNT_TABLE_MAX_OPEN_DIRS: i64 = 65536
 val MOUNT_TABLE_MAX_IO_BYTES: i64 = 16 * 1024 * 1024
 val MOUNT_TABLE_MAX_EXECUTABLE_BYTES: u64 = 281474976710656u64
 val MOUNT_HANDLE_GENERATION_MAX: u32 = 0xFFFFFFFFu32
+val DBFS_ROOT_MOUNT_SEAL_MAX_LEASES: i64 = 64
+val NVFS_ROOT_MOUNT_SEAL_MAX_LEASES: i64 = 64
 
 struct MountId:
     """Opaque mount table index. Assigned sequentially; not reused after unmount."""
@@ -98,17 +103,344 @@ fn _retired_dir_binding(binding: OpenDirBinding) -> OpenDirBinding:
         virtual_handle: 0u64, mount_id: binding.mount_id,
         inner_handle: binding.inner_handle)
 
+struct DbfsRootMountSealV1:
+    """Opaque lease for one canonical, durable DBFS root mount."""
+    id: u64
+    owner_nonce: u64
+
+struct DbfsRootMountSealInfoV1:
+    """Immutable facts reissued only while the MountTable binding is current."""
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    owner_nonce: u64
+    dbfs_mutation_epoch: u64
+
+struct DbfsRootMountSealBindingV1:
+    active: bool
+    retired: bool
+    generation: u32
+    lease_id: u64
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    dbfs_instance_identity: i64
+    owner_nonce: u64
+    dbfs_mutation_epoch: u64
+
+struct NvfsRootMountSealV1:
+    """Opaque lease for one canonical NVFS root and its DBFS backing owner."""
+    id: u64
+    owner_nonce: u64
+
+struct NvfsRootMountSealInfoV1:
+    """Immutable facts reissued only while the exact NVFS root remains live."""
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    backing_instance_identity: i64
+    owner_nonce: u64
+    backing_mutation_epoch: u64
+
+struct NvfsRootMountSealBindingV1:
+    active: bool
+    retired: bool
+    generation: u32
+    lease_id: u64
+    mount_id: MountId
+    mount_generation: u64
+    namespace_generation: u64
+    content_generation: u64
+    backing_instance_identity: i64
+    owner_nonce: u64
+    backing_mutation_epoch: u64
+
 struct MountTable:
     """Bounded mount and generational open-handle registry."""
     mounts:           [MountEntry]
     next_id:          u32
     open_files:       [OpenFileBinding]
     open_dirs:        [OpenDirBinding]
+    dbfs_root_mount_seals: [DbfsRootMountSealBindingV1]
+    nvfs_root_mount_seals: [NvfsRootMountSealBindingV1]
     dir_capacity_limit: i64
 
 impl MountTable:
     static fn new() -> MountTable:
-        MountTable(mounts: [], next_id: 1, open_files: [], open_dirs: [], dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
+        MountTable(mounts: [], next_id: 1, open_files: [], open_dirs: [],
+            dbfs_root_mount_seals: [], nvfs_root_mount_seals: [],
+            dir_capacity_limit: MOUNT_TABLE_MAX_OPEN_DIRS)
+
+    me fn acquire_dbfs_root_mount_seal() -> Result<DbfsRootMountSealV1, FsError>:
+        """Seal the uniquely resolved canonical root after backend-owner admission.
+
+        The MountTable is the sole issuer.  Caller booleans, backend labels,
+        and paths other than the exact canonical root cannot manufacture this
+        authority.
+        """
+        val root = match self.lookup_text("/"):
+            case nil: return Err(FsError.NotFound)
+            case Some(entry): entry
+        if root.mount_point != "/" or _driver_kind_name(root.driver) != "dbfs":
+            return Err(FsError.Unsupported)
+        val owner_identity = _driver_dbfs_server_data_identity(root.driver)?
+        val instance_identity = owner_identity.0
+        val owner_nonce = owner_identity.1
+        val mutation_epoch = owner_identity.2
+        var slot: i32 = 0
+        while slot < self.dbfs_root_mount_seals.len() as i32:
+            val prior = self.dbfs_root_mount_seals[slot]
+            if not prior.active and not prior.retired:
+                val lease_id = mount_handle_encode(slot, prior.generation)
+                self.dbfs_root_mount_seals[slot] = DbfsRootMountSealBindingV1(
+                    active: true, retired: false, generation: prior.generation,
+                    lease_id: lease_id, mount_id: root.id,
+                    mount_generation: root.mount_generation,
+                    namespace_generation: root.namespace_generation,
+                    content_generation: root.content_generation,
+                    dbfs_instance_identity: instance_identity,
+                    owner_nonce: owner_nonce,
+                    dbfs_mutation_epoch: mutation_epoch)
+                return Ok(DbfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+            slot = slot + 1
+        if self.dbfs_root_mount_seals.len() >= DBFS_ROOT_MOUNT_SEAL_MAX_LEASES:
+            return Err(FsError.TooLarge)
+        val lease_id = mount_handle_encode(self.dbfs_root_mount_seals.len() as i32, 1u32)
+        self.dbfs_root_mount_seals.push(DbfsRootMountSealBindingV1(
+            active: true, retired: false, generation: 1u32,
+            lease_id: lease_id, mount_id: root.id,
+            mount_generation: root.mount_generation,
+            namespace_generation: root.namespace_generation,
+            content_generation: root.content_generation,
+            dbfs_instance_identity: instance_identity,
+            owner_nonce: owner_nonce,
+            dbfs_mutation_epoch: mutation_epoch))
+        Ok(DbfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+
+    me fn revalidate_dbfs_root_mount_seal(
+        seal: DbfsRootMountSealV1
+    ) -> Result<DbfsRootMountSealInfoV1, FsError>:
+        """Reissue DBFS root facts only while the exact binding is still live."""
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.dbfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.dbfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        val entry = match self.lookup_text("/"):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if entry.mount_point != "/" or entry.id != binding.mount_id or
+           entry.mount_generation != binding.mount_generation or
+           entry.namespace_generation != binding.namespace_generation or
+           entry.content_generation != binding.content_generation:
+            return Err(FsError.StaleHandle)
+        val current_identity = match _driver_dbfs_current_server_data_identity(entry.driver):
+            case Err(_): return Err(FsError.StaleHandle)
+            case Ok(value): value
+        if current_identity.0 != binding.dbfs_instance_identity or
+           current_identity.1 != binding.dbfs_mutation_epoch:
+            return Err(FsError.StaleHandle)
+        Ok(DbfsRootMountSealInfoV1(
+            mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            dbfs_instance_identity: binding.dbfs_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            dbfs_mutation_epoch: binding.dbfs_mutation_epoch))
+
+    me fn close_dbfs_root_mount_seal(seal: DbfsRootMountSealV1) -> Result<(), FsError>:
+        """Retire one DBFS root lease; a stale binding still releases the slot."""
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.dbfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.dbfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        val current = self.revalidate_dbfs_root_mount_seal(seal).is_ok()
+        val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
+        self.dbfs_root_mount_seals[slot] = DbfsRootMountSealBindingV1(
+            active: false, retired: terminal,
+            generation: if terminal: binding.generation else: binding.generation + 1u32,
+            lease_id: 0u64, mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            dbfs_instance_identity: binding.dbfs_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            dbfs_mutation_epoch: binding.dbfs_mutation_epoch)
+        if not current: return Err(FsError.StaleHandle)
+        Ok(())
+
+    me fn acquire_nvfs_root_mount_seal() -> Result<NvfsRootMountSealV1, FsError>:
+        """Seal the canonical NVFS root to its exact persistent backing owner."""
+        val root = match self.lookup_text("/"):
+            case nil: return Err(FsError.NotFound)
+            case Some(entry): entry
+        if root.mount_point != "/" or _driver_kind_name(root.driver) != "nvfs":
+            return Err(FsError.Unsupported)
+        val owner_identity = _driver_nvfs_root_identity(root.driver)?
+        val instance_identity = owner_identity.0
+        val owner_nonce = owner_identity.1
+        val mutation_epoch = owner_identity.2
+        var slot: i32 = 0
+        while slot < self.nvfs_root_mount_seals.len() as i32:
+            val prior = self.nvfs_root_mount_seals[slot]
+            if not prior.active and not prior.retired:
+                val lease_id = mount_handle_encode(slot, prior.generation)
+                self.nvfs_root_mount_seals[slot] = NvfsRootMountSealBindingV1(
+                    active: true, retired: false, generation: prior.generation,
+                    lease_id: lease_id, mount_id: root.id,
+                    mount_generation: root.mount_generation,
+                    namespace_generation: root.namespace_generation,
+                    content_generation: root.content_generation,
+                    backing_instance_identity: instance_identity,
+                    owner_nonce: owner_nonce,
+                    backing_mutation_epoch: mutation_epoch)
+                return Ok(NvfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+            slot = slot + 1
+        if self.nvfs_root_mount_seals.len() >= NVFS_ROOT_MOUNT_SEAL_MAX_LEASES:
+            return Err(FsError.TooLarge)
+        val lease_id = mount_handle_encode(self.nvfs_root_mount_seals.len() as i32, 1u32)
+        self.nvfs_root_mount_seals.push(NvfsRootMountSealBindingV1(
+            active: true, retired: false, generation: 1u32,
+            lease_id: lease_id, mount_id: root.id,
+            mount_generation: root.mount_generation,
+            namespace_generation: root.namespace_generation,
+            content_generation: root.content_generation,
+            backing_instance_identity: instance_identity,
+            owner_nonce: owner_nonce,
+            backing_mutation_epoch: mutation_epoch))
+        Ok(NvfsRootMountSealV1(id: lease_id, owner_nonce: owner_nonce))
+
+    me fn revalidate_nvfs_root_mount_seal(
+        seal: NvfsRootMountSealV1
+    ) -> Result<NvfsRootMountSealInfoV1, FsError>:
+        """Reissue NVFS root facts only while the exact backing owner is live."""
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.nvfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.nvfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        val entry = match self.lookup_text("/"):
+            case nil: return Err(FsError.StaleHandle)
+            case Some(value): value
+        if entry.mount_point != "/" or entry.id != binding.mount_id or
+           entry.mount_generation != binding.mount_generation or
+           entry.namespace_generation != binding.namespace_generation or
+           entry.content_generation != binding.content_generation or
+           _driver_kind_name(entry.driver) != "nvfs":
+            return Err(FsError.StaleHandle)
+        val current_identity = match _driver_nvfs_current_root_identity(entry.driver):
+            case Err(_): return Err(FsError.StaleHandle)
+            case Ok(value): value
+        if current_identity.0 != binding.backing_instance_identity or
+           current_identity.1 != binding.backing_mutation_epoch:
+            return Err(FsError.StaleHandle)
+        Ok(NvfsRootMountSealInfoV1(
+            mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            backing_instance_identity: binding.backing_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            backing_mutation_epoch: binding.backing_mutation_epoch))
+
+    me fn close_nvfs_root_mount_seal(seal: NvfsRootMountSealV1) -> Result<(), FsError>:
+        """Finalize publication of a still-exact NVFS root and retire its lease."""
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.nvfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.nvfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce:
+            return Err(FsError.StaleHandle)
+        if not self.revalidate_nvfs_root_mount_seal(seal).is_ok():
+            return Err(FsError.StaleHandle)
+        val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
+        self.nvfs_root_mount_seals[slot] = NvfsRootMountSealBindingV1(
+            active: false, retired: terminal,
+            generation: if terminal: binding.generation else: binding.generation + 1u32,
+            lease_id: 0u64, mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            backing_instance_identity: binding.backing_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            backing_mutation_epoch: binding.backing_mutation_epoch)
+        Ok(())
+
+    me fn abort_nvfs_root_mount_seal(
+        seal: NvfsRootMountSealV1,
+        expected_instance_id: i64
+    ) -> Result<(), FsError>:
+        """Retire and remove the seal-bound root despite a stale mutation epoch."""
+        if expected_instance_id <= 0:
+            return Err(FsError.StaleHandle)
+        val slot = mount_handle_slot(seal.id)
+        if slot < 0 or slot >= self.nvfs_root_mount_seals.len() as i32:
+            return Err(FsError.StaleHandle)
+        val binding = self.nvfs_root_mount_seals[slot]
+        if not binding.active or binding.lease_id != seal.id or
+           binding.generation != mount_handle_generation(seal.id) or
+           binding.owner_nonce != seal.owner_nonce or
+           binding.backing_instance_identity != expected_instance_id:
+            return Err(FsError.StaleHandle)
+        val root = match self.lookup_text("/"):
+            case nil: return Err(FsError.NotFound)
+            case Some(entry): entry
+        if root.mount_point != "/" or root.id != binding.mount_id or
+           _driver_kind_name(root.driver) != "nvfs":
+            return Err(FsError.StaleHandle)
+        val current_instance = _driver_nvfs_device_instance_id(root.driver)?
+        if current_instance != expected_instance_id:
+            return Err(FsError.StaleHandle)
+        val terminal = binding.generation == MOUNT_HANDLE_GENERATION_MAX
+        self.nvfs_root_mount_seals[slot] = NvfsRootMountSealBindingV1(
+            active: false, retired: terminal,
+            generation: if terminal: binding.generation else: binding.generation + 1u32,
+            lease_id: 0u64, mount_id: binding.mount_id,
+            mount_generation: binding.mount_generation,
+            namespace_generation: binding.namespace_generation,
+            content_generation: binding.content_generation,
+            backing_instance_identity: binding.backing_instance_identity,
+            owner_nonce: binding.owner_nonce,
+            backing_mutation_epoch: binding.backing_mutation_epoch)
+        self.unmount("/")
+
+    me fn remove_exact_nvfs_root_mount(
+        expected_instance_id: i64
+    ) -> Result<(), FsError>:
+        """Remove only the canonical NVFS root backed by this exact instance.
+
+        Cleanup deliberately does not require an unchanged mutation epoch.
+        A failed/stale seal must not strand a privately staged mount, while a
+        copied or unrelated instance identity must never remove another root.
+        """
+        if expected_instance_id <= 0:
+            return Err(FsError.StaleHandle)
+        val root = match self.lookup_text("/"):
+            case nil: return Err(FsError.NotFound)
+            case Some(entry): entry
+        if root.mount_point != "/" or _driver_kind_name(root.driver) != "nvfs":
+            return Err(FsError.Unsupported)
+        val current_instance = _driver_nvfs_device_instance_id(root.driver)?
+        if current_instance != expected_instance_id:
+            return Err(FsError.StaleHandle)
+        self.unmount("/")
 
     fn _dir_admission_available() -> bool:
         for binding in self.open_dirs:
@@ -797,3 +1129,5 @@ impl MountTable:
             case Some(entry):
                 _driver_link_path_text(entry.driver, target, link_path)
 export PositionedDriverKind
+export DbfsRootMountSealV1, DbfsRootMountSealInfoV1
+export NvfsRootMountSealV1, NvfsRootMountSealInfoV1

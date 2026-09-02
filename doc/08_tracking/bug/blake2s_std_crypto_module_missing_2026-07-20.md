@@ -3,7 +3,22 @@
 - **Date:** 2026-07-20
 - **Area:** `src/lib/common/crypto/` (missing file)
 - **Severity:** medium (whole spec file cannot load; 0 examples run).
-- **Status:** OPEN.
+- **Status:** RESOLVED (was OPEN).
+
+## Re-verified 2026-09-02 (fix/bugdb-batch-g triage)
+
+`src/lib/common/crypto/blake2s.spl` exists and exports
+`blake2s_init`, `blake2s_update`, `blake2s_final`, `blake2s_hash` — exactly the
+symbol set both `test/01_unit/lib/crypto/blake2s_spec.spl:32` and
+`test/unit/lib/crypto/blake2s_spec.spl:32` import via
+`use std.crypto.blake2s.{...}`. The module described as missing is present at
+the exact path this record's own root-cause hypothesis named. Could not
+execute the spec to confirm runtime behavior — this host's deployed
+self-hosted `simple` binary (`bin/release/aarch64-apple-darwin/simple`) fails
+every spec run with `error: semantic: variable `always_inline` not found`
+(pre-existing stdlib/binary skew unrelated to this fix; see PR description).
+Source-level evidence (file presence + exact symbol match) is the basis for
+RESOLVED here.
 
 ## Symptom
 
