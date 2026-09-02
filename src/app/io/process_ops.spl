@@ -23,6 +23,8 @@ extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (t
 use std.io_runtime.{env_get, read_file_text_result, file_delete, file_exists, time_now_unix_micros, getpid}
 use std.nogc_sync_mut.io_runtime.{file_size_signed}
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at}
+
+extern fn rt_file_exists(path: text) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 @unsafe(reason: "raw inherited-stdio child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -91,12 +93,42 @@ fn _read_text_or_empty(path: text) -> text:
         case Err(_): ""
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
+# FAIL-OPEN FIX (2026-09-02): this used to read ONLY `OS` and return false when
+# it was unset -- i.e. it silently assumed Unix and handed callers "/bin/sh",
+# which does not exist on Windows. `OS` is absent under a stripped environment
+# (the bootstrap probe transcript captures only HOME/PATH/TMPDIR/TMP/TEMP/
+# LC_ALL/LANG), so the wrong branch was taken exactly where a bootstrap runs.
+#
+# Signals, most specific first. COMSPEC is checked first because it NAMES the
+# command processor -- it is the system variable that answers this exact
+# question, and Windows always sets it. Env signals are cheap; if all of them
+# are absent the decision falls through to a filesystem probe, which needs no
+# environment at all and is therefore correct under `env -i`. Ambiguity (no
+# signal either way, e.g. baremetal) is reported LOUDLY on stderr instead of
+# being silently resolved to Unix.
 fn _is_windows_platform() -> bool:
+    if env_get("COMSPEC") != nil:
+        return true
     val os_env = env_get("OS")
-    if os_env == nil:
-        false
-    else:
-        os_env.lower().contains("windows")
+    if os_env != nil and os_env.lower().contains("windows"):
+        return true
+    if env_get("SystemRoot") != nil or env_get("WINDIR") != nil:
+        return true
+
+    # No environment signal. Decide from the filesystem, which cannot lie and
+    # cannot be stripped. /bin/sh is present on every hosted POSIX target and
+    # absent on Windows; cmd.exe is the converse.
+    unsafe(capabilities: [ffi]):
+        if rt_file_exists("/bin/sh"):
+            return false
+        if rt_file_exists("C:/Windows/System32/cmd.exe"):
+            return true
+
+    # Genuinely undecidable: no env signal, no shell of either kind on disk.
+    # Say so rather than guessing quietly -- a silent wrong branch here is the
+    # defect this function was rewritten to remove.
+    eprint("warning: _is_windows_platform(): no platform signal (COMSPEC/OS/SystemRoot/WINDIR unset, neither /bin/sh nor cmd.exe on disk); assuming POSIX")
+    false
 
 # ============================================================================
 # Process Result struct
