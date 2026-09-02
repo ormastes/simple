@@ -3452,12 +3452,14 @@ stage4_write_candidate_provenance \
   "${stage4_provenance_helper_sha256_before}" \
   "$(absolute_path "${bootstrap_lock}")" \
   "$(absolute_path "${log_dir}/stage4-native-build.log")" \
-  "$(absolute_path "${log_dir}/stage4-essential-tools-smoke.log")" || {
+  "$(absolute_path "${log_dir}/stage4-essential-tools-smoke.log")" \
+  "${SIMPLE_STAGE4_PROVENANCE_MODE:-generic}" || {
     echo "error: refusing Stage 4 without canonical candidate provenance" >&2
     exit 1
   }
 stage4_verify_candidate_provenance \
-  "${stage4_provenance}" "${full_bin}" "${repo_root}" || {
+  "${stage4_provenance}" "${full_bin}" "${repo_root}" \
+  "${SIMPLE_STAGE4_PROVENANCE_MODE:-generic}" || {
     echo "error: Stage 4 candidate provenance did not re-verify" >&2
     exit 1
   }

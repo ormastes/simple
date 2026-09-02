@@ -4,6 +4,11 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 . "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
 . "$root/scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
 work=$(mktemp -d "${TMPDIR:-/tmp}/phase7-runtime-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 runtime=$work/simple
@@ -83,6 +88,42 @@ admit() {
     kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache" "$root" "$runtime_receipt"
 }
 reject() { if "$@"; then echo "FAIL: mutation admitted: $*" >&2; exit 1; fi; }
+real_stage4_verify() {
+  STAGE4_PROVENANCE_TEST_MODE=1 \
+    stage4_verify_candidate_provenance "$provenance" "$runtime" "$root" \
+      phase7-llvm-binding-test
+}
+write_phase7_llvm_binding() {
+  cat >>"$provenance" <<EOF
+llvm_toolchain_receipt_path=$llvm_receipt
+llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")
+EOF
+}
+
+write_receipts
+reject real_stage4_verify
+write_phase7_llvm_binding
+real_stage4_verify
+sed 's/llvm_toolchain_receipt_sha256=.*/llvm_toolchain_receipt_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' \
+  "$provenance" >"$work/altered-provenance.env"
+mv "$work/altered-provenance.env" "$provenance"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+sed 's/status=pass/status=forged/' "$llvm_receipt" >"$work/altered-llvm.env"
+mv "$work/altered-llvm.env" "$llvm_receipt"
+sed "s|llvm_toolchain_receipt_sha256=.*|llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")|" \
+  "$provenance" >"$work/rebound-provenance.env"
+mv "$work/rebound-provenance.env" "$provenance"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+printf '# altered binary\n' >>"$llvm_config"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+printf 'altered library\n' >>"$llvm_library"
+reject real_stage4_verify
 
 write_receipts
 admit
