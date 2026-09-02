@@ -22,6 +22,31 @@ well-formed HirType whose `kind` field is raw 0 (never written) while lowering
 `scope-tail:` is a fixed tail label of an installed `current_function_names`
 array (`function_lowering.spl:1144-1152` documents this) and names no victim.
 
+### Proof that the label carries no module information either
+
+This matters, because the fix below is in a module the label does not name. The
+bootstrap path — and the fatal's own prefix is literally "bootstrap MIR
+lowering:" — installs the list at `bootstrap_globals.spl:652` and `:776`, and in
+both cases the whole-program `_bootstrap_function_value_names` is appended
+**LAST**, after this module's own names:
+
+```
+        for function_name in _bootstrap_function_value_names:
+            function_names.push(function_name)
+        lowering.current_function_names = function_names
+```
+
+So `[len-1]` is the final entry of a **program-wide** array, identical for every
+module lowered in the run. A ZeroKind raised while lowering
+`driver_vhdl_artifact_build` reports exactly the same `pipeline_fn` tail as one
+raised anywhere else. (`bootstrap_globals.spl:390` installs that program array
+bare; `module_lowering.spl:1181` is the non-bootstrap path.)
+
+This also explains the roaming that runs B–F mistook for progress: every one of
+those runs EDITED `pipeline_fn.spl`, which reshuffled the tail of the
+program-wide list — so the reported name changed while nothing about the
+producer did.
+
 ## The producer
 
 `src/compiler/80.driver/driver_vhdl_artifact_build.spl:146` constructs
@@ -120,11 +145,23 @@ per-parameter print drove RSS to 10 GB in 3 minutes). This change keeps that
 bound and drops the false premise: the probe now reads the discriminant for
 every parameter (a cheap SFFI call, no output) and prints **only when the caller
 side is already anomalous** — `_sffi_hir_type_discriminant` returns `-1` for a
-non-enum kind, which is what a raw-0 or nil `kind` yields. Print count is
+non-enum argument, which is what a raw-0 or nil `kind` yields. Print count is
 bounded by the number of fatals, not by 760 modules. Still default-off behind
 `SIMPLE_MIR_TAG_PROBE=1`, and it still reads only the discriminant of the same
 field `lower_type` is about to read, so the `:1112` round-2 hazard (reading
 further fields off the corrupt object) is not reintroduced.
+
+**The probe also had a second, independent defect: it passed the wrong
+argument.** `_sffi_hir_type_discriminant` is `rt_enum_discriminant(value)`
+(`function_lowering.spl:46-49`) — it discriminates its OWN ARGUMENT and answers
+`-1` for anything that is not an enum. The probe passed
+`fn_.params[pmi].type_`, a `HirType` **struct**, which is never an enum: that
+call returned `-1` unconditionally and carried no information whatsoever. So the
+one remaining instrument was both scoped by a meaningless name AND reading a
+constant. It now passes `.kind` — the enum — mirroring the two existing correct
+uses at `:1189` (`type_.kind`) and `:735` (`kind`). Without that correction the
+new anomaly filter would have matched every parameter of every function and
+reproduced the exact 10 GB flood the old name filter existed to prevent.
 
 Run it with `SIMPLE_MIR_TAG_PROBE=1`. If the fix above is correct the probe
 prints nothing and Stage 3 proceeds. If ZeroKind persists, the probe now names

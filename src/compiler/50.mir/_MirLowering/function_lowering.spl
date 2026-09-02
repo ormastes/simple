@@ -261,18 +261,31 @@ impl MirLowering:
                 # keeps that bound and drops the false premise -- the probe now
                 # reads every parameter (a cheap SFFI discriminant, no output)
                 # and prints only when the caller side is ALREADY anomalous.
-                # `_sffi_hir_type_discriminant` returns -1 for a non-enum kind,
-                # which is exactly what a raw-0 (never-written) or nil `kind`
-                # produces, so the print count is bounded by the number of
+                # `_sffi_hir_type_discriminant` returns -1 for a non-enum
+                # argument, which is exactly what a raw-0 (never-written) or nil
+                # `kind` produces, so the print count is bounded by the number of
                 # ZeroKind/NilType fatals (2 in the current Stage-3 run), not by
-                # 760 modules. Still default-off behind SIMPLE_MIR_TAG_PROBE=1,
-                # and still reads only the discriminant of the SAME field
-                # lower_type is about to read -- `fn_.name` and
-                # `fn_.params[pmi].name` are fields of HirFunction/HirParam, not
-                # of the suspect HirType, so the :1112 round-2 hazard (reading
+                # 760 modules. Still default-off behind SIMPLE_MIR_TAG_PROBE=1.
+                #
+                # ARGUMENT FIX, same date and load-bearing for the above.
+                # `_sffi_hir_type_discriminant` is `rt_enum_discriminant(value)`
+                # (:46-49) -- it discriminates its OWN ARGUMENT, so it answers -1
+                # for anything that is not an enum. The probe used to pass
+                # `fn_.params[pmi].type_`, a HirType STRUCT, which is never an
+                # enum: that call returned -1 unconditionally and carried no
+                # information at all, in addition to being scoped by a
+                # meaningless name. Pass `.kind` -- the enum -- mirroring the two
+                # existing correct uses, :1189 (`type_.kind`) and :735 (`kind`).
+                # Without this the anomaly filter below would match every
+                # parameter of every function and reproduce the exact 10 GB
+                # output flood the old name filter existed to prevent.
+                # `.kind` is the SAME field `lower_type` is about to read and
+                # round 1 proved safe to touch; `fn_.name` and
+                # `fn_.params[pmi].name` belong to HirFunction/HirParam, not to
+                # the suspect HirType, so the :1112 round-2 hazard (reading
                 # further fields OFF THE CORRUPT OBJECT) is not reintroduced.
                 if _mir_tag_probe_enabled():
-                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_)
+                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_.kind)
                     if probe_disc == -1:
                         eprint("[mir-tag-probe] ZERO-OR-NIL-KIND AT CALLER module={self.current_module_id} fn={fn_.name} param={pmi} param_name={fn_.params[pmi].name} caller_disc={probe_disc}")
                 self.lower_type(fn_.params[pmi].type_)
