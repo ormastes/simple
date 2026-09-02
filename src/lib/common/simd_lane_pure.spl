@@ -1,0 +1,55 @@
+# Pure-Simple scalar reference for the lane-wise SIMD primitives dispatched in
+# src/runtime/runtime_simd_dispatch.c:
+#   rt_simd_shuffle_u8x16 (:2547)  — PSHUFB / TBL byte permute
+#   rt_simd_add_i64x4     (:2454)  — AVX2 _mm256_add_epi64
+#   rt_simd_sub_i64x4     (:2464)  — AVX2 _mm256_sub_epi64
+#
+# These are the reference semantics the vector instruction must reproduce.
+# Lanes are carried as i64 so the reference can be written without depending
+# on any SIMD type; the specs convert to Vec16u8 / Vec4i64 at the boundary.
+
+# PSHUFB semantics, mirrored from the C kernel and the interpreter bridge
+# (interpreter_extern/simd.rs:1734): each mask lane selects one source byte.
+# Bit 7 set zeroes the output lane; otherwise the low 5 bits index a 32-byte
+# window where 0..15 draws from `a` and 16..31 draws from `b`. The masking to
+# 5 bits (not 4) is the part that is easy to get wrong.
+#
+# NOT YET DUAL-RUN. The oracle is unreachable from the interpreter: the stdlib
+# Vec16u8 has u8-typed fields and the bridge helper require_u8_field
+# (interpreter_extern/simd.rs:1204) accepts only Value::Int, so the call fails
+# before either side computes. Filed as
+# doc/08_tracking/bug/interpreter_vec16u8_extern_rejects_u8_fields_2026-09-02.md,
+# which carries the ready case set this reference is written against.
+pub fn shuffle_u8x16_pure(a: [i64], b: [i64], mask: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < 16:
+        val m = mask[i] & 255
+        if (m & 128) != 0:
+            out.push(0)
+        else:
+            val idx = m & 31
+            if idx < 16:
+                out.push(a[idx] & 255)
+            else:
+                out.push(b[idx - 16] & 255)
+        i = i + 1
+    return out
+
+# Lane-wise wrapping add / subtract of four i64 lanes. No carry crosses a lane
+# boundary — that independence is the property the vector form must preserve.
+pub fn add_i64x4_pure(a: [i64], b: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < 4:
+        out.push(a[i] + b[i])
+        i = i + 1
+    return out
+
+pub fn sub_i64x4_pure(a: [i64], b: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < 4:
+        out.push(a[i] - b[i])
+        i = i + 1
+    return out
