@@ -65,7 +65,7 @@ grepped `extern fn rt_…` with `-o` and no `^` anchor, so it read the COMMENT
 `# HISTORICAL. Six \`extern fn rt_smf_reader_*\` symbols used to be declared here`
 (`src/compiler/70.backend/linker/smf_reader.spl:41`) as a declaration.
 
-`rt_text_eq_20any` — sorry, `rt_text_eq_any` — is declared at
+`rt_text_eq_any` is declared at
 `src/compiler/70.backend/backend/llvm_lib_translate_expr.spl:18`.
 **`src/compiler/70.backend/` is another agent's live lane this session was told
 to coordinate away from**, so it was reported rather than edited.
