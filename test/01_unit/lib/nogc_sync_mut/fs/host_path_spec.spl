@@ -1,0 +1,125 @@
+# host_path -- THE canonical-to-native boundary converter.
+#
+# PR #255 wired host_path_native into every src/lib/nogc_sync_mut/io/file_ops.spl
+# operation plus process spawn, rename, move and dir_remove_all, with ZERO direct
+# coverage of the converter itself. This file is that coverage.
+#
+# Method note, non-obvious and load-bearing:
+#
+#   1. Every assertion checks BYTES **and** .len(). The headline defect rewrote
+#      `/home/a\b.txt` (13 bytes) to `/home/a/b.txt` (13 bytes) -- the SAME
+#      LENGTH -- so a length-only assertion is blind to it, and a content-only
+#      assertion would not catch truncation. Both, always.
+#
+#   2. Backslashes are built by concatenating a STANDALONE "\\" literal, never
+#      embedded mid-literal. The lexer silently drops an embedded backslash
+#      escape: "C:\Temp" lexes to `C:Temp` (6 bytes). A trailing "\\" lexes
+#      correctly, which is why the standalone-literal idiom is safe.
+#      See doc/08_tracking/bug/lexer_drops_backslash_escape_in_string_literal_2026-09-02.md
+#
+#   3. The platform is INJECTED via the `_for` seam. These scenarios must assert
+#      the POSIX contract, and they run on whatever host CI provides -- passing
+#      "linux" is the only way to exercise the Unix branch from Windows and the
+#      Windows branch from Linux. Stated plainly: this asserts the CONTRACT of
+#      the non-Windows branch; it is not a run on a real POSIX kernel.
+#
+# Record: doc/08_tracking/bug/pr255_host_path_native_corrupts_posix_paths_and_costs_unix_2026-09-02.md
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.nogc_sync_mut.fs.host_path.{host_path_native_for, host_path_canonical_for, host_path_native, host_is_windows_host}
+
+fn _bs() -> text:
+    "\\"
+
+fn _assert_exact(actual: text, expected: text):
+    # Bytes AND length together -- see method note 1.
+    assert_equal(actual, expected)
+    assert_equal(actual.len(), expected.len())
+
+describe "host_path boundary converter":
+
+    it "leaves a POSIX path containing a literal backslash byte-identical off Windows":
+        # @req REQ-SSPEC-LIB
+        step("leaves a POSIX path containing a literal backslash byte-identical off Windows")
+        # THE regression. `\` is a legal POSIX filename character; the pre-fix
+        # converter rewrote it to `/` before the platform check, silently
+        # addressing a different file on every Linux/macOS file operation.
+        val input = "/home/a" + _bs() + "b.txt"
+        assert_equal(input.len(), 13)
+        _assert_exact(host_path_native_for(input, "linux"), input)
+        _assert_exact(host_path_native_for(input, "macos"), input)
+        _assert_exact(host_path_native_for(input, "freebsd"), input)
+        # The canonicalising direction has the same contract.
+        _assert_exact(host_path_canonical_for("a" + _bs() + "b", "linux"), "a" + _bs() + "b")
+
+    it "converts the MinGW drive form to a LOWER-CASE drive letter on Windows":
+        # @req REQ-SSPEC-LIB
+        step("converts the MinGW drive form to a LOWER-CASE drive letter on Windows")
+        # Specified conversion: /d/foo/bar -> d:\foo\bar. The case is pinned:
+        # Windows treats the two cases as equivalent, fixtures and logs do not.
+        _assert_exact(host_path_native_for("/d/foo/bar", "windows"),
+                      "d:" + _bs() + "foo" + _bs() + "bar")
+        _assert_exact(host_path_native_for("/c/tmp", "windows"), "c:" + _bs() + "tmp")
+        # ... and the same input is untouched off Windows.
+        _assert_exact(host_path_native_for("/d/foo/bar", "linux"), "/d/foo/bar")
+
+    it "preserves the case of a drive letter that is already present":
+        # @req REQ-SSPEC-LIB
+        step("preserves the case of a drive letter that is already present")
+        # Case-preserving idempotence is what lets std.platform.to_native_path
+        # delegate here; its own spec asserts this exact pair.
+        _assert_exact(host_path_native_for("C:/tmp/probe.txt", "windows"),
+                      "C:" + _bs() + "tmp" + _bs() + "probe.txt")
+        _assert_exact(host_path_native_for("d:/tmp", "windows"), "d:" + _bs() + "tmp")
+
+    it "is idempotent on input that is already native":
+        # @req REQ-SSPEC-LIB
+        step("is idempotent on input that is already native")
+        val native = "C:" + _bs() + "tmp" + _bs() + "a.txt"
+        _assert_exact(host_path_native_for(native, "windows"), native)
+        val once = host_path_native_for("/d/foo/bar", "windows")
+        _assert_exact(host_path_native_for(once, "windows"), once)
+
+    it "does NOT turn a bare relative path into a drive root":
+        # @req REQ-SSPEC-LIB
+        step("does NOT turn a bare relative path into a drive root")
+        # `c/foo` used to become `C:\foo` -- a relative directory named `c`
+        # rewritten to the root of drive C:. At a boundary that every file
+        # operation crosses, and with rt_file_atomic_write behind it, that is a
+        # data-loss shape.
+        _assert_exact(host_path_native_for("c/foo", "windows"), "c" + _bs() + "foo")
+        _assert_exact(host_path_native_for("c/foo", "linux"), "c/foo")
+        _assert_exact(host_path_native_for("d/e/f", "windows"),
+                      "d" + _bs() + "e" + _bs() + "f")
+
+    it "preserves a trailing separator and accepts empty input":
+        # @req REQ-SSPEC-LIB
+        step("preserves a trailing separator and accepts empty input")
+        _assert_exact(host_path_native_for("/d/foo/", "windows"), "d:" + _bs() + "foo" + _bs())
+        _assert_exact(host_path_native_for("/usr/lib/", "linux"), "/usr/lib/")
+        _assert_exact(host_path_native_for("", "windows"), "")
+        _assert_exact(host_path_native_for("", "linux"), "")
+        _assert_exact(host_path_canonical_for("", "windows"), "")
+
+    it "agrees with the injected seam on the live host and does not truncate a long path":
+        # @req REQ-SSPEC-LIB
+        step("agrees with the injected seam on the live host and does not truncate a long path")
+        # Ties the cached-bool entry point to the seam the rest of this file uses.
+        val probe = "/d/foo/bar"
+        if host_is_windows_host():
+            _assert_exact(host_path_native(probe), host_path_native_for(probe, "windows"))
+        else:
+            _assert_exact(host_path_native(probe), probe)
+        # Length is preserved past MAX_PATH; a converter that silently shortened
+        # a long path would be the same defect class in a different disguise.
+        var deep = "/d/mp"
+        var i = 0
+        while i < 12:
+            deep = deep + "/dddddddddddddddddddddddddddddd"
+            i = i + 1
+        assert_true(deep.len() > 260)
+        # `/d/` -> `d:` is length-preserving, so the native form matches exactly.
+        assert_equal(host_path_native_for(deep, "windows").len(), deep.len())
+        _assert_exact(host_path_native_for(deep, "linux"), deep)
