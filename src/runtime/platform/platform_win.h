@@ -454,10 +454,14 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-int64_t rt_mmap(const uint8_t* path_ptr, uint64_t path_len, int64_t size, int64_t offset, int64_t readonly) {
-    /* (ptr, len) `text` contract per runtime.h; returns the mapped address as
-     * int64_t (0 on failure), matching the POSIX implementation. */
-    if (!path_ptr || path_len == 0 || size <= 0 || offset < 0) return 0;
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    /* Tagged-value `text` contract per runtime.h: rt_mmap is ABSENT from
+     * text_arg_indices (50.mir/text_extern_abi.spl + the Rust twin), so the
+     * caller passes ONE tagged value, not a (ptr, len) pair. Returns the
+     * mapped address as int64_t (0 on failure), matching the POSIX impl. */
+    int64_t path_len = rt_string_len(path_value);
+    const uint8_t* path_ptr = rt_string_data(path_value);
+    if (!path_ptr || path_len <= 0 || size <= 0 || offset < 0) return 0;
     char* path = (char*)malloc((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
