@@ -1,0 +1,141 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+
+"""
+# `.upper()`, plain-expression `.chars()`, `.to_float()` must lower in MIR
+
+## Overview
+
+MIR lowering's text-special dispatch arm
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) claims a
+fixed allow-list of text methods. Three method names the interpreter accepts
+were missing from it, so a directly-typed `text` receiver (no `any` erasure)
+died at MIR lowering with `unresolved method call:`:
+
+- `.upper()` — interpreter alias of `.to_upper()`
+  (`interpreter_method/string.rs:79`), lowers to `rt_string_to_upper`
+  (`src/runtime/runtime.h:686`, `value/collections.rs:4157`).
+- plain-expression `.chars()` — `for ch in text` already worked (the for-in
+  stmt lane emits `rt_string_chars` itself, `mir_lowering_stmts.spl` text
+  lane), but `val cs = s.chars()` / `for c in s.chars()` had no expression
+  arm. Lowers to `rt_string_chars` (`runtime.h:403`,
+  `value/collections.rs:3970`), flagged as a runtime array of `Str` elements.
+- `.to_float()` — TOTAL in the interpreter (`string.rs:447`: trims, 0.0 on
+  parse failure), unlike nullable `parse_f64`. Lowers to
+  `rt_string_to_float` (`runtime.h:687`, `value/collections.rs:4259`) then
+  unboxes through `rt_value_as_float` (`runtime.h:342`,
+  `value/sffi/value_ops.rs:91`; NIL decodes to 0.0, exactly the
+  interpreter's failure value).
+
+## The empty-concat symptom (2026-09-01 WIP commit d260c9246e2)
+
+The first attempt at this fix observed `for c in s.chars(): out = out + c`
+producing EMPTY output natively. Root cause: that branch's
+`mir_lowering_stmts.spl` for-in lane had no `element_type_from_hir` repair
+(zero grep hits), so the loop element defaulted to i64 instead of text and
+the accumulation never string-concatenated. The current tree carries the
+repair; the chars arm records an `Array(Str)` HIR type on its result local
+so the element types as text and `out + c` lowers to `rt_strcat_tagged`
+(`runtime_native.c:6344`) — pinned by an example below.
+
+## Platform note
+
+This spec drives the REAL pure-Simple MIR lowering in-process. It imports
+`MirLowering` via `compiler.mir._MirLowering.module_lowering` explicitly:
+on Windows seeds the `compiler.mir.mir.*` re-export chain fails to expose
+`MirLowering.new` (`semantic: variable MirLowering not found` — the same
+pre-existing class that fails `array_at_native_lowering_spec.spl` there).
+
+## Related
+
+- doc/08_tracking/bug/native_string_methods_unresolved_in_mir_2026-07-17.md
+  — the prior `.to_upper()`/`.parse_f64()` instance of this class.
+"""
+
+# @tag: unit, compiler, mir, text, dispatch
+
+use std.spec.step
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir.*
+
+fn lower_src(src: text, tag: text) -> text:
+    val filename = "text_special_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        result = result + serialize_mir_function(function)
+    result
+
+describe "text .upper() / .chars() / .to_float() MIR lowering":
+    it "lowers text.upper() to rt_string_to_upper without an unresolved error":
+        step("Lower fn up(s: text) -> text: s.upper() through real MIR lowering")
+        val mir = lower_src("fn up(s: text) -> text:\n    s.upper()\n", "up")
+        # Non-vacuity: the lowering must have produced SOMETHING.
+        assert_equal(mir.trim() == "", false)
+        assert_equal(mir.contains("unresolved method call"), false)
+        assert_equal(mir.contains("rt_string_to_upper"), true)
+
+    it "lowers text.to_float() to rt_string_to_float and unboxes via rt_value_as_float":
+        step("Lower fn conv(s: text) -> f64: s.to_float()")
+        val mir = lower_src("fn conv(s: text) -> f64:\n    s.to_float()\n", "tf")
+        assert_equal(mir.trim() == "", false)
+        assert_equal(mir.contains("unresolved method call"), false)
+        assert_equal(mir.contains("rt_string_to_float"), true)
+        # Total semantics: raw f64, not parse_f64's Optional marking.
+        assert_equal(mir.contains("rt_value_as_float"), true)
+
+    it "lowers plain-expression text.chars() to rt_string_chars":
+        step("Lower fn charr(s: text) -> [text]: s.chars()")
+        val mir = lower_src("fn charr(s: text) -> [text]:\n    s.chars()\n", "pl")
+        assert_equal(mir.trim() == "", false)
+        assert_equal(mir.contains("unresolved method call"), false)
+        assert_equal(mir.contains("rt_string_chars"), true)
+
+    it "types for-in over .chars() elements as text so concat is a string concat (empty-concat pin)":
+        step("Lower the exact accumulation loop that came out empty on the WIP branch")
+        val src = "fn cat(s: text) -> text:\n    var out = \"\"\n    for c in s.chars():\n        out = out + c\n    out\n"
+        val mir = lower_src(src, "cc")
+        assert_equal(mir.trim() == "", false)
+        assert_equal(mir.contains("unresolved method call"), false)
+        # The #143 loud-fail must NOT fire: the chars result is a flagged
+        # runtime array, iterable by the counted-loop lane.
+        assert_equal(mir.contains("non-array iterables"), false)
+        assert_equal(mir.contains("rt_string_chars"), true)
+        assert_equal(mir.contains("rt_array_len"), true)
+        assert_equal(mir.contains("rt_array_get"), true)
+        # THE pin: `out + c` must be a STRING concat. On the broken branch the
+        # element typed as i64 and no rt_strcat_tagged was emitted, which is
+        # how the concat silently came out empty.
+        assert_equal(mir.contains("rt_strcat_tagged"), true)
+
+    it "matches interpreter semantics for all three methods":
+        step("upper aliases to_upper; to_float is total (0.0 on failure); chars yields 1-codepoint strings")
+        expect("abc".upper()).to_equal("ABC")
+        expect("abc".upper()).to_equal("abc".to_upper())
+        expect("3.5".to_float()).to_equal(3.5)
+        expect(" 2.5 ".to_float()).to_equal(2.5)
+        expect("xyz".to_float()).to_equal(0.0)
+        expect("".to_float()).to_equal(0.0)
+        val cs = "wxy".chars()
+        expect(cs.len()).to_equal(3)
+        expect(cs[0]).to_equal("w")
+        expect(cs[2]).to_equal("y")
+        var out = ""
+        for c in "hello".chars():
+            out = out + c
+        expect(out).to_equal("hello")

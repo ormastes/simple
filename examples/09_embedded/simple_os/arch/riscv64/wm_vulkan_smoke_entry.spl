@@ -24,7 +24,8 @@ use os.kernel.arch.riscv64.display.{
     riscv64_display_height,
     riscv64_display_pitch,
     riscv64_display_bpp,
-    riscv64_display_present
+    riscv64_display_present,
+    riscv64_display_fill_rect_argb
 }
 # The UART is brought up straight from the shared RISC-V console primitive
 # rather than through os.kernel.arch.riscv64.console. console.spl also hosts the
@@ -40,7 +41,6 @@ use build.os.generated.rv64_wm_nonce.{rv64_wm_nonce, rv64_wm_nonce_r, rv64_wm_no
 
 extern fn serial_println(msg: text)
 extern fn __simple_call_module_inits()
-extern fn rt_mmio_write_u32(addr: u64, value: u32)
 
 # The nonce patch: a 64x64 rectangle at a FIXED origin, filled with a colour
 # derived from this build's nonce. Fixed so the host knows exactly which bytes
@@ -51,23 +51,16 @@ val WM_PATCH_Y: u32 = 16u32
 val WM_PATCH_W: u32 = 64u32
 val WM_PATCH_H: u32 = 64u32
 
-fn paint_nonce_patch(base: u64, pitch: u32) -> u32:
-    # BGRA8888, matching the scanout format the display module reports.
+fn paint_nonce_patch() -> u32:
+    # BGRA8888, matching the scanout format the display module reports. The
+    # pixels go through riscv64_display_fill_rect_argb -- the scanout facade --
+    # so this entry declares no framebuffer extern of its own (UI backend
+    # isolation: examples call facades, backends own the raw writes).
     val r = rv64_wm_nonce_r()
     val g = rv64_wm_nonce_g()
     val b = rv64_wm_nonce_b()
     val argb: u32 = 0xFF000000u32 + (r * 65536u32) + (g * 256u32) + b
-    var painted: u32 = 0u32
-    var row: u32 = 0u32
-    while row < WM_PATCH_H:
-        var col: u32 = 0u32
-        while col < WM_PATCH_W:
-            val off = ((WM_PATCH_Y + row) * pitch) + ((WM_PATCH_X + col) * 4u32)
-            rt_mmio_write_u32(base + off.to_u64(), argb)
-            painted = painted + 1u32
-            col = col + 1u32
-        row = row + 1u32
-    painted
+    riscv64_display_fill_rect_argb(WM_PATCH_X, WM_PATCH_Y, WM_PATCH_W, WM_PATCH_H, argb)
 
 # The freestanding boot chain (boot_entry.c, baremetal_stubs.c,
 # baremetal_uart_stdout.c) calls `spl_start()` with no arguments, and the seed's
@@ -109,7 +102,7 @@ fn wm_vulkan_smoke_row() -> bool:
         return false
     serial_println("[wm-rv64] scanout-ready width={width} height={height} stride={pitch} bpp={bpp}")
 
-    val painted = paint_nonce_patch(address, pitch)
+    val painted = paint_nonce_patch()
     if painted != WM_PATCH_W * WM_PATCH_H:
         serial_println("[wm-rv64] fatal reason=patch-incomplete painted={painted}")
         return false
