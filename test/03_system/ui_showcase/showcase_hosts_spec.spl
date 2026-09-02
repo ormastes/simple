@@ -55,7 +55,7 @@ GuiRenderer mouse-button event becomes a `Pointer` with HOST_BTN_LEFT.
 use std.spec.step
 
 use std.spec.*
-use std.io_runtime.{write_file, mkdir_p}
+use std.io_runtime.{file_read, write_file, mkdir_p}
 use common.ui.host_input_event.{
     HostInputEvent, HOST_BTN_LEFT, HOST_BTN_RIGHT, HOST_BTN_NONE,
     host_pointer_down, host_pointer_up
@@ -80,6 +80,9 @@ use app.ui_showcase.showcase_core.{
     showcase_composition_extras, showcase_scene, showcase_screen, showcase_run
 }
 use app.ui_showcase.hosts.host_2d.{Screen2dHost, screen_2d_parse_script}
+use app.ui_showcase.hosts.host_2d_engine.{
+    Screen2dEngineHost, showcase_engine_backend_supported
+}
 use app.ui_showcase.hosts.host_gui.{gui_event_to_host, gui_button_to_host}
 use app.ui_showcase.hosts.host_web.{
     ScreenWebHost, web_scene_to_html, web_color_css, web_read_event_at,
@@ -89,6 +92,32 @@ use app.ui_showcase.hosts.scene_raster.{
     RasterSurface, RASTER_BG, raster_scene_into, raster_scene_argb,
     raster_distinct_pixel_count, raster_to_ppm_bytes
 }
+
+describe "exact Engine2D showcase backend admission":
+
+    it "admits only software CPU SIMD and Metal showcase backends":
+        # @req REQ-SSPEC-SYSTEM
+        step("Check the exact-backend allowlist and reject unsupported fallback requests")
+        expect(showcase_engine_backend_supported("software")).to_equal(true)
+        expect(showcase_engine_backend_supported("cpu")).to_equal(true)
+        expect(showcase_engine_backend_supported("cpu_simd")).to_equal(true)
+        expect(showcase_engine_backend_supported("metal")).to_equal(true)
+        expect(showcase_engine_backend_supported("vulkan")).to_equal(false)
+        expect(showcase_engine_backend_supported("auto")).to_equal(false)
+        expect(Screen2dEngineHost.open(64, 48, "", "auto") == nil).to_equal(true)
+
+    it "keeps Metal and CPU SIMD receipts fail closed":
+        # @req REQ-SSPEC-SYSTEM
+        step("Inspect the production host for exact selection and native evidence gates")
+        val source = file_read("src/app/ui_showcase/hosts/host_2d_engine.spl")
+        val entry = file_read("src/app/ui_showcase/hosts/main_2d_engine.spl")
+        expect(source).to_contain("engine.backend_name() != requested")
+        expect(source).to_contain("result.readback_source != \"device_readback\"")
+        expect(source).to_contain("native_hits_after <= native_hits_before")
+        expect(source).to_contain("cpu-simd-native-execution-required")
+        expect(entry).to_contain("SIMPLE_SHOWCASE_BACKEND")
+        expect(entry).to_contain("showcase status=blocked")
+        expect(entry).to_contain("showcase status=pass")
 
 # --- HostInputEvent destructuring (the enum carries positional payloads) ---
 

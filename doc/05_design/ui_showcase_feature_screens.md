@@ -60,6 +60,10 @@ statusbar: event evidence stays visible on all screens.
   switching: click menu index 2 → Shapes scene contains PATH commands and
   the 2D raster paints them (nonzero painted count, distinct pixels).
 - Launch matrix: 2D software (scripted nav clicks through all screens,
-  per-screen PPM captures), Metal (per-screen device readback), web (HTML
-  per screen, Chrome screenshots), wm (frame bridge), gui (real window).
+  per-screen PPM captures), exact Engine2D `software`/`cpu`/`cpu_simd` via
+  `hosts/main_2d_engine.spl`, Metal through the same entry with mandatory
+  device readback, web (HTML per screen, Chrome screenshots), wm (frame
+  bridge), gui (real window). `cpu_simd` must advance the native SIMD hit
+  counter; Metal must provide positive backend/device identities. Neither lane
+  may accept Engine2D fallback under the requested backend's name.
 - Vulkan via MoltenVK on the dev machine.
