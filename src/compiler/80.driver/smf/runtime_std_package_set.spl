@@ -61,6 +61,10 @@ struct RuntimeStdPackageSetV1:
     runtime: RuntimeStdPackageAdmissionV1
     std: RuntimeStdPackageAdmissionV1
 
+struct RuntimeStdStageResultV1:
+    admission: RuntimeStdPackageAdmissionV1
+    transaction: CasBatchTransactionV1
+
 fn runtime_std_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
         return false
@@ -149,14 +153,16 @@ fn runtime_std_empty_admission_v1(reason: text) -> RuntimeStdPackageAdmissionV1:
 
 fn runtime_std_stage_package_v1(
     root: text, authority: RuntimeStdPackageAuthorityV1,
-    input: RuntimeStdPackageInputV1, transaction: &mut CasBatchTransactionV1
-) -> RuntimeStdPackageAdmissionV1:
+    input: RuntimeStdPackageInputV1, transaction_input: CasBatchTransactionV1
+) -> RuntimeStdStageResultV1:
+    var transaction = transaction_input
     val action_digest = runtime_std_action_digest_v1(
         authority, input.package_identity)
     if (action_digest == "" or input.package_abi_digest !=
             runtime_std_package_abi_v1(authority, input.package_identity) or
             not runtime_std_sections_valid_v1(input.sections)):
-        return runtime_std_empty_admission_v1("runtime-std-input-invalid")
+        return RuntimeStdStageResultV1(
+            runtime_std_empty_admission_v1("runtime-std-input-invalid"), transaction)
     var content = ""
     var members: [PackageArchiveMemberReceiptV1] = []
     var descriptors: [PackageSectionDescriptorV1] = []
@@ -195,10 +201,14 @@ fn runtime_std_stage_package_v1(
             cas_batch_stage_object_v1(
                 transaction, input.package_identity,
                 PackageActionKeyV1(action_digest), receipt).is_err()):
-        return runtime_std_empty_admission_v1("runtime-std-publication-invalid")
-    RuntimeStdPackageAdmissionV1(
-        true, "staged", input.package_identity, action_digest,
-        cas_blob_path(root, archive_digest), Some(image), Some(receipt))
+        return RuntimeStdStageResultV1(
+            runtime_std_empty_admission_v1("runtime-std-publication-invalid"),
+            transaction)
+    RuntimeStdStageResultV1(
+        RuntimeStdPackageAdmissionV1(
+            true, "staged", input.package_identity, action_digest,
+            cas_blob_path(root, archive_digest), Some(image), Some(receipt)),
+        transaction)
 
 fn runtime_std_publish_set_v1(
     root: text, authority: RuntimeStdPackageAuthorityV1,
@@ -232,20 +242,21 @@ fn runtime_std_publish_set_v1(
         val invalid = runtime_std_empty_admission_v1(
             "runtime-std-transaction-refused")
         return RuntimeStdPackageSetV1(false, invalid.reason, invalid, invalid)
-    var transaction = begun.unwrap()
-    val runtime = runtime_std_stage_package_v1(
-        root, authority, runtime_input, &mut transaction)
+    val runtime_stage = runtime_std_stage_package_v1(
+        root, authority, runtime_input, begun.unwrap())
+    val runtime = runtime_stage.admission
     if not runtime.valid:
-        _ = cas_batch_abort_v1(transaction)
+        _ = cas_batch_abort_v1(runtime_stage.transaction)
         return RuntimeStdPackageSetV1(
             false, runtime.reason, runtime,
             runtime_std_empty_admission_v1("not-staged"))
-    val standard = runtime_std_stage_package_v1(
-        root, authority, std_input, &mut transaction)
+    val standard_stage = runtime_std_stage_package_v1(
+        root, authority, std_input, runtime_stage.transaction)
+    val standard = standard_stage.admission
     if not standard.valid:
-        _ = cas_batch_abort_v1(transaction)
+        _ = cas_batch_abort_v1(standard_stage.transaction)
         return RuntimeStdPackageSetV1(false, standard.reason, runtime, standard)
-    if cas_batch_publish_v1(transaction).is_err():
+    if cas_batch_publish_v1(standard_stage.transaction).is_err():
         return RuntimeStdPackageSetV1(
             false, "runtime-std-publication-failed", runtime, standard)
     RuntimeStdPackageSetV1(true, "rebuilt", runtime, standard)

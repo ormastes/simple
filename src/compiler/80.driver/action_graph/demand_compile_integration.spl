@@ -26,11 +26,8 @@ use compiler.driver.action_graph.scc_compile_outputs.{
 }
 use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
 use compiler.driver.perf.demand_compile_counters.{
-    DemandCompileCountersV1, demand_compile_counter_action_completed_v1,
-    demand_compile_counter_action_scheduled_v1, demand_compile_counter_add_phase_v1,
-    demand_compile_counter_cache_hit_v1, demand_compile_counter_cache_miss_v1,
-    demand_compile_counter_now_ns_v1, demand_compile_counter_source_open_v1,
-    demand_compile_counter_section_read_v1,
+    DemandCompileCountersV1, demand_compile_counter_add_phase_v1,
+    demand_compile_counter_now_ns_v1,
     demand_compile_counters_empty_v1
 }
 
@@ -75,7 +72,7 @@ fn demand_compile_begin_v1(
     var actions: [BuildActionV1] = []
     var dependencies: [text] = []
     for admission in route.archive_admissions:
-        demand_compile_counter_cache_hit_v1(&mut counters)
+        counters.cache_hit_count = counters.cache_hit_count + 1
         val action_id = demand_archive_action_id_v1(admission.package_identity)
         dependencies = dependencies.push(action_id)
         actions = actions.push(BuildActionV1(
@@ -83,16 +80,16 @@ fn demand_compile_begin_v1(
             [admission.load.receipt!.archive_digest], BuildActionPoolV1.io,
             foreground_budget.priority, identity.snapshot_revision,
             foreground_budget.memory_bytes, admission.load.receipt!.archive_digest))
-        demand_compile_counter_action_scheduled_v1(&mut counters)
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
     for source_path in route.source_paths:
-        demand_compile_counter_cache_miss_v1(&mut counters)
+        counters.cache_miss_count = counters.cache_miss_count + 1
         val action_id = demand_source_action_id_v1(source_path)
         dependencies = dependencies.push(action_id)
         actions = actions.push(BuildActionV1(
             action_id, "frozen-source-scc", [source_path], [], [],
             BuildActionPoolV1.semantic, foreground_budget.priority,
             identity.snapshot_revision, foreground_budget.memory_bytes, ""))
-        demand_compile_counter_action_scheduled_v1(&mut counters)
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
     val baseline_action_id = "baseline:{plan.baseline_action_digest}"
     actions = actions.push(BuildActionV1(
         baseline_action_id, plan.baseline_action_digest, [],
@@ -103,7 +100,7 @@ fn demand_compile_begin_v1(
             BuildActionPoolV1.mir,
         foreground_budget.priority, identity.snapshot_revision,
         foreground_budget.memory_bytes, ""))
-    demand_compile_counter_action_scheduled_v1(&mut counters)
+    counters.action_scheduled_count = counters.action_scheduled_count + 1
     val provisional = PersistedBuildGraphV1(
         "pending", "", identity.snapshot_revision, actions)
     val graph = PersistedBuildGraphV1(
@@ -146,7 +143,8 @@ fn demand_compile_bind_mir_admission_v1(
                 execution.backend_plan!.promotion_action_digest, identity,
                 demand_backend_identity_digest_v1(identity), execution.build_ordinal,
                 budget.priority - 1, budget.memory_bytes, budget.cancelled))
-        demand_compile_counter_action_scheduled_v1(&mut execution.counters)
+        execution.counters.action_scheduled_count =
+            execution.counters.action_scheduled_count + 1
         _ = demand_compile_counter_add_phase_v1(
             &mut execution.counters, "llvm-promotion", promotion_started_ns)
     true
@@ -172,14 +170,15 @@ fn demand_compile_complete_action_v1(
             diagnostics, memory_peak_bytes))
     execution.coordinator = Some(coordinator)
     if committed.accepted:
-        demand_compile_counter_action_completed_v1(&mut execution.counters)
+        execution.counters.action_completed_count =
+            execution.counters.action_completed_count + 1
     committed.accepted
 
 fn demand_compile_source_open_v1(execution: &mut DemandCompileExecutionV1):
-    demand_compile_counter_source_open_v1(&mut execution.counters)
+    execution.counters.source_open_count = execution.counters.source_open_count + 1
 
 fn demand_compile_section_read_v1(execution: &mut DemandCompileExecutionV1):
-    demand_compile_counter_section_read_v1(&mut execution.counters)
+    execution.counters.section_read_count = execution.counters.section_read_count + 1
 
 fn demand_compile_phase_finish_v1(
     execution: &mut DemandCompileExecutionV1, phase: text, started_ns: i64
@@ -195,18 +194,21 @@ fn demand_compile_finalize_baseline_v1(
 ) -> bool:
     if execution.baseline_started_ns <= 0:
         return false
+    val baseline_action_id = execution.baseline_action_id
+    val baseline_started_ns = execution.baseline_started_ns
+    val total_started_ns = execution.total_started_ns
     if success:
         if execution.mir_admission_digest == "":
             return false
         if not demand_compile_complete_action_v1(
-                execution, execution.baseline_action_id,
+                execution, baseline_action_id,
                 "driver-baseline-owner", true, output_identity, [], 0):
             return false
     _ = demand_compile_counter_add_phase_v1(
         &mut execution.counters, "baseline-backend",
-        execution.baseline_started_ns)
+        baseline_started_ns)
     _ = demand_compile_counter_add_phase_v1(
-        &mut execution.counters, "total", execution.total_started_ns)
+        &mut execution.counters, "total", total_started_ns)
     execution.baseline_started_ns = 0
     true
 

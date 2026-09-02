@@ -50,6 +50,14 @@ struct CombinedMirEvidenceBuilder:
     archives: [CombinedMirArchiveEvidenceV1]
     dirty: [CombinedMirDirtyEvidenceV1]
 
+struct CombinedMirAccumulationV1:
+    modules: [text]
+    symbols: [text]
+    semantic_by_module: [text]
+    dependency_ids: [text]
+    evidence: [MirDependencyEvidenceV1]
+    module_frames: [text]
+
 fn combined_mir_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
         return false
@@ -109,16 +117,12 @@ fn combined_mir_add_module_v1(
     read_sets: [text],
     semantic_digest: text,
     expected_scv: CombinedMirScvIdentityV1,
-    modules: &mut [text],
-    symbols: &mut [text],
-    semantic_by_module: &mut [text],
-    dependency_ids: &mut [text],
-    evidence: &mut [MirDependencyEvidenceV1],
-    module_frames: &mut [text]
-) -> Result<bool, CombinedMirEvidenceErrorV1>:
-    if modules.contains(module_id):
-        val position = modules.index_of(module_id)
-        if semantic_by_module[position] != semantic_digest:
+    accumulation: CombinedMirAccumulationV1
+) -> Result<CombinedMirAccumulationV1, CombinedMirEvidenceErrorV1>:
+    var result = accumulation
+    if result.modules.contains(module_id):
+        val position = result.modules.index_of(module_id)
+        if result.semantic_by_module[position] != semantic_digest:
             return Err(CombinedMirEvidenceErrorV1.dependency_conflict)
         return Err(CombinedMirEvidenceErrorV1.duplicate_module)
     if not combined_mir_unique_valid_v1(symbol_ids, false):
@@ -128,27 +132,27 @@ fn combined_mir_add_module_v1(
     if dependencies.len() > 0 and not combined_mir_unique_valid_v1(dependencies, false):
         return Err(CombinedMirEvidenceErrorV1.dependency_conflict)
     for symbol_id in symbol_ids:
-        if symbols.contains(symbol_id):
+        if result.symbols.contains(symbol_id):
             return Err(CombinedMirEvidenceErrorV1.duplicate_symbol)
-        symbols.push(symbol_id)
-    modules.push(module_id)
-    semantic_by_module.push(semantic_digest)
+        result.symbols.push(symbol_id)
+    result.modules.push(module_id)
+    result.semantic_by_module.push(semantic_digest)
     for dependency in dependencies:
         if not combined_mir_text_valid_v1(dependency):
             return Err(CombinedMirEvidenceErrorV1.dependency_unresolved)
-        dependency_ids.push(dependency)
+        result.dependency_ids.push(dependency)
     val sorted_reads = combined_mir_sorted_text_v1(read_sets)
     var materialization = semantic_digest
     for read_digest in sorted_reads:
         materialization = sha256_text(
             combined_mir_append_frame_v1(materialization, read_digest))
-    evidence.push(MirDependencyEvidenceV1(
+    result.evidence.push(MirDependencyEvidenceV1(
         module_id, MirDependencyKindV1.body_dependency,
         MirDependencyStateV1.concrete, expected_scv.revision, materialization))
-    module_frames.push(
+    result.module_frames.push(
         combined_mir_append_frame_v1(
             combined_mir_append_frame_v1("", module_id), semantic_digest))
-    Ok(true)
+    Ok(result)
 
 fn combined_mir_evidence_build_v1(
     builder: CombinedMirEvidenceBuilder
@@ -160,12 +164,7 @@ fn combined_mir_evidence_build_v1(
             not combined_mir_digest_valid_v1(builder.expected_scv.inventory_digest)):
         return Err(CombinedMirEvidenceErrorV1.scv_identity_mismatch)
 
-    var modules: [text] = []
-    var symbols: [text] = []
-    var semantic_by_module: [text] = []
-    var dependency_ids: [text] = []
-    var evidence: [MirDependencyEvidenceV1] = []
-    var module_frames: [text] = []
+    var accumulation = CombinedMirAccumulationV1([], [], [], [], [], [])
 
     for archive in builder.archives:
         if (not combined_mir_scv_matches_v1(archive.scv, builder.expected_scv) or
@@ -178,10 +177,10 @@ fn combined_mir_evidence_build_v1(
         val added = combined_mir_add_module_v1(
             archive.module_id, archive.symbol_ids, archive.dependency_module_ids,
             archive.read_set_digests, archive.semantic_digest, builder.expected_scv,
-            &mut modules, &mut symbols, &mut semantic_by_module,
-            &mut dependency_ids, &mut evidence, &mut module_frames)
+            accumulation)
         if added.is_err():
             return Err(added.unwrap_err())
+        accumulation = added.unwrap()
 
     for dirty in builder.dirty:
         if (not combined_mir_scv_matches_v1(dirty.scv, builder.expected_scv) or
@@ -194,21 +193,22 @@ fn combined_mir_evidence_build_v1(
         val added = combined_mir_add_module_v1(
             dirty.module_id, dirty.symbol_ids, dirty.dependency_module_ids,
             dirty.read_set_digests, dirty.semantic_digest, builder.expected_scv,
-            &mut modules, &mut symbols, &mut semantic_by_module,
-            &mut dependency_ids, &mut evidence, &mut module_frames)
+            accumulation)
         if added.is_err():
             return Err(added.unwrap_err())
+        accumulation = added.unwrap()
 
-    for dependency_id in dependency_ids:
-        if not modules.contains(dependency_id):
+    for dependency_id in accumulation.dependency_ids:
+        if not accumulation.modules.contains(dependency_id):
             return Err(CombinedMirEvidenceErrorV1.dependency_unresolved)
 
     var encoded = "simple/combined-mir-evidence/v1"
-    for frame in combined_mir_sorted_text_v1(module_frames):
+    for frame in combined_mir_sorted_text_v1(accumulation.module_frames):
         encoded = combined_mir_append_frame_v1(encoded, frame)
     val admission = mir_admission_prove_v1(
         builder.expected_scv.revision, builder.expected_scv.tree_digest,
-        builder.expected_scv.inventory_digest, sha256_text(encoded), evidence)
+        builder.expected_scv.inventory_digest, sha256_text(encoded),
+        accumulation.evidence)
     if admission.is_err():
         return Err(CombinedMirEvidenceErrorV1.admission_rejected)
     Ok(admission.unwrap())
