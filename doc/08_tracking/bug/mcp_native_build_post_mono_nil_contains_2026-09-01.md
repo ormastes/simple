@@ -146,3 +146,79 @@ reports type `nil`; both reach the same construction site (`Value::Nil` vs a
 Provenance of this correction: HEAD `27c89536f8c`, 89 dirty paths, seed
 `src/compiler_rust/target/release/simple.exe` md5
 `286f66b8615dce0e0da788f0550c4008` (39,120,896 bytes).
+
+## PINNED AND FIXED 2026-09-02 — the site is inside MIR lowering, not before it
+
+Re-ran the worker with `SIMPLE_INTERP_OOB_DEBUG=1 SIMPLE_DEBUG_FIELD_ACCESS=1`
+and stderr captured to a file (35 min, rc=1). The probe answered immediately:
+
+```
+[mnf-debug] method=contains recv_type=nil recv=nil
+[mnf-debug-spl] main -> cli_native_build -> compiler_driver_run_compile -> compile
+  -> aot_compile -> lower_to_mir -> lower_to_mir_with_target_context
+  -> lower_module -> lower_function -> lower_function_with_gpu_metadata
+  -> lower_block -> lower_block_expected -> lower_expr -> lower_expr_impl
+  -> try_lower_global_read -> find_global_static
+[mnf-expr] method=contains recv_expr=Identifier("__nested_field_global_statics_by_id__")
+error: semantic: method `contains` not found on type `nil` (receiver value: nil)
+```
+
+**Two corrections to this record's earlier framing.** The failure is NOT
+"between the `[mono]` receipt and MIR lowering" — it is INSIDE `lower_to_mir`,
+several frames deep. And the candidate region named earlier
+(`driver_hir_pipeline_passes.spl:129-175`, `post_mono_verify_modules`) was never
+on the path, which is why the post_mono_verify guard experiment was refuted.
+
+### Root cause (confirmed, contained)
+
+`MirLowering.global_statics_by_id` and `.global_constants_by_id` are declared in
+`src/compiler/50.mir/mir_lowering_types.spl:424-425` with no default, and were
+initialised **nowhere in the tree**:
+
+- absent from the ONLY constructor call, `MirLowering.new_for_target`
+  (`src/compiler/50.mir/_MirLowering/module_lowering.spl:253`), which does
+  initialise the neighbouring `global_symbol_ids`, `global_const_exprs` and
+  `array_global_mutation_warned`;
+- the only two assignments in the tree
+  (`_MirLoweringExpr/switch_operators_calls.spl:4468-4469`) copy `self`'s
+  already-nil value into a sub-lowerer, so they propagate the defect rather
+  than fix it.
+
+Every `MirLowering` therefore carried both fields as `Value::Nil` for its whole
+life, and the first read — `self.global_statics_by_id.contains(symbol_id)` at
+`_MirLoweringExpr/expr_dispatch.spl:223`, inside `find_global_static` — was
+fatal. Omitting a `Dict` field from a constructor call yields nil, not an empty
+dict, so the mistake is silent at construction and only fatal at first use; the
+desugared receiver name `__nested_field_<field>__` in the diagnostic does not
+textually match the use site, which is why it misdirected earlier readers.
+
+### Fix
+Initialise both fields in `MirLowering.new_for_target`
+(`module_lowering.spl:326`). One-line-per-field, no behaviour change for any
+already-working path.
+
+### The record's own bool-set workaround advice was stale, and is corrected
+`mir_lowering_types.spl:405-412` claimed that naming such a field in the
+constructor STILL leaves it nil, and recommended a bool-set instead. That does
+not reproduce on this seed for a struct-valued `Dict<i64, Struct>` field —
+measured directly (4 examples, 0 failures). The comment is corrected in place.
+
+### Specs
+- reproducing: `test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl`
+  (4 examples, 0 failures)
+- generalizing: `test/01_unit/compiler/50.mir/struct_collection_field_construction_contract_spec.spl`
+  (7 examples, 0 failures) — sweeps element kinds, access forms, and the
+  field-to-field copy shape from `switch_operators_calls.spl:4468`.
+
+### Separate defect found while writing the generalization spec
+`Dict<i64, _>.keys()` yields text-typed keys, so summing them concatenates
+(`0 + 1 + 2` -> `"012"`). Reproduces on a plain local dict, unrelated to struct
+fields. Filed as
+`doc/08_tracking/bug/dict_i64_keys_sum_concatenates_as_text_2026-09-02.md`.
+
+### MIR error count
+Still not produced by THIS run — the build aborted at the first
+`find_global_static` call, so MIR lowering never completed and no error count
+exists. A verification build with the fix is in flight; the count will be
+recorded when it lands. The last real full-build number remains **133**, and
+nothing in this record supersedes it.

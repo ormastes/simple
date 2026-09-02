@@ -3303,12 +3303,35 @@ impl MirLowering:
                         val conv_widened = b_conv_n.emit_cast(mir_operand_copy(conv_narrowed), MirType.i64())
                         self.builder = b_conv_n
                         return conv_widened
-                    # `to_i64` on an already-i64 receiver is the identity; the
-                    # receiver local is already lowered and i64-typed.
+                    # `to_i64` on an already-i64 receiver is the identity -- but
+                    # this arm is the ERASED-receiver arm, so the receiver may
+                    # just as well be a TEXT handle, and returning it unchanged
+                    # silently yields the handle's tagged word instead of the
+                    # parsed number. That is exactly the defect measured in the
+                    # Windows MSVC Stage 2 candidate on the LLVM seed lane
+                    # (`(value.to_i64() ?? 0) > 0` compiled to `test %rsi,%rsi;
+                    # setle`), which made `--threads 1` "not a positive integer"
+                    # while `--threads 0` was accepted. Dispatch at runtime
+                    # instead: rt_to_int_dynamic parses a registry-validated
+                    # heap string and is the IDENTITY for everything else, so
+                    # the genuinely-i64 case is bit-for-bit unchanged.
+                    # doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
                     if method == "to_i64":
                         if mir_conv_log_on():
-                            eprint("[conv-lower] identity conversion arm hit method={method}\n")
-                        return unresolved_receiver_local
+                            eprint("[conv-lower] dynamic to_i64 arm hit method={method}\n")
+                        val conv_dyn_ty = MirType.i64()
+                        val conv_dyn_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_to_int_dynamic"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [], return_type: conv_dyn_ty, is_variadic: false)))
+                        ))
+                        var b_conv_dyn = self.builder
+                        val conv_dyn_local = b_conv_dyn.emit_call_value(
+                            conv_dyn_op,
+                            [mir_operand_copy(unresolved_receiver_local)],
+                            conv_dyn_ty)
+                        self.builder = b_conv_dyn
+                        return conv_dyn_local
                     # Float conversions genuinely change representation, so they
                     # are a single Cast with no widen-back (the result IS f64).
                     if method == "to_f64" or method == "to_f32":
