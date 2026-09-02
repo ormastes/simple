@@ -1,0 +1,84 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Tranche D: the rt_string_* / rt_text_* / rt_array_* pure-computation family.
+#
+# SELECTION METHOD, and why this tranche is only TWO pairs. The candidate set
+# was the 53 symbols declared in src/runtime/runtime.h under those three
+# prefixes that have no same-name pure-Simple definition anywhere in the tree
+# (26 rt_string_*, 13 rt_text_*, 14 rt_array_*). Condition 3 of the tranche C
+# filter -- the oracle must be REGISTERED in the tree-walk interpreter's extern
+# dispatch -- eliminates 44 of them. MEASURED, not assumed: an unregistered
+# oracle is a hard `semantic: unknown extern function: <name>` under
+# `simple test`, verified directly on rt_string_capitalize.
+#
+# Registered, and therefore pairable at all: rt_string_free, rt_array_free_deep
+# (memory lifetime, NOT pure computation -- classified out, not twinned for the
+# count), rt_text_is_ascii / rt_text_to_upper_ascii / rt_text_validate_utf8
+# (already paired in dual_run_shadow_spec.spl), rt_text_to_lower_ascii (already
+# paired in tranche C), rt_text_find_invalid_utf8 (needs a byte-array twin, and
+# rt_string_to_byte_array is itself unregistered -- left uncovered rather than
+# faked), and the two counted here.
+#
+# HONEST LIMITATION (same as the sibling shadow specs): this dual-runs both
+# sides only inside test specs, not on live traffic. Engine is the TREE-WALK
+# interpreter (`simple test`), not the Cranelift JIT (`simple run`).
+#
+# @dual_pair: twin_char_count_vs_rt_text_count_codepoints mode=value-legacy ref=rt_text_count_codepoints cand=std.common.str_pure_twins.twin_char_count
+# @dual_pair: twin_char_count_vs_rt_text_count_codepoints_cached mode=value-legacy ref=rt_text_count_codepoints_cached cand=std.common.str_pure_twins.twin_char_count
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_true, assert_equal}
+use std.common.spec.dual_run.{dual_check_i64, dual_summarize}
+use std.common.str_pure_twins.{twin_char_count}
+
+extern fn rt_text_count_codepoints(s: text) -> i64
+extern fn rt_text_count_codepoints_cached(s: text) -> i64
+
+describe "dual_run tranche D — rt_text codepoint counting":
+    # @manual scenario evidence
+    it "twin_char_count vs rt_text_count_codepoints agrees on empty, ASCII and multi-byte text":
+        # @req REQ-SSPEC-LIB
+        step("twin_char_count vs rt_text_count_codepoints agrees on empty, ASCII and multi-byte text")
+        # Edge cases on purpose: the empty text, a single ASCII character, an
+        # all-whitespace text, a two-byte codepoint, a three-byte codepoint, a
+        # four-byte codepoint (astral plane), and mixtures where the CHARACTER
+        # count and the BYTE count differ -- the exact axis this entry point
+        # exists to distinguish from `len`.
+        val cases = ["", "a", "   ", "\t\n", "abc", "é", "aéb", "日", "a日b",
+                     "日本語", "🙂", "a🙂b", "aé日🙂z", "0123456789"]
+        var verdicts = [dual_check_i64(
+            "count_codepoints", twin_char_count(cases[0]), rt_text_count_codepoints(cases[0]))]
+        var i = 1
+        while i < cases.len():
+            verdicts = verdicts.push(dual_check_i64(
+                "count_codepoints", twin_char_count(cases[i]), rt_text_count_codepoints(cases[i])))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 14)
+        assert_equal(summary.divergent, 0)
+        # Non-vacuity: the case set must actually exercise the char-vs-byte
+        # distinction, otherwise agreement would be trivial.
+        assert_equal(twin_char_count("a日b"), 3)
+        assert_true("a日b".len() > 3)
+
+    it "twin_char_count vs rt_text_count_codepoints_cached agrees, including on repeat calls":
+        # @req REQ-SSPEC-LIB
+        step("twin_char_count vs rt_text_count_codepoints_cached agrees, including on repeat calls")
+        # The cached entry point memoises; asking twice for the same text is a
+        # deliberate case, so a stale or mis-keyed cache would show up as a
+        # divergence rather than being hidden by single-shot inputs.
+        val cases = ["", "a", "日本語", "a🙂b", "日本語", "a🙂b", "   ", "aéb"]
+        var verdicts = [dual_check_i64(
+            "count_codepoints_cached", twin_char_count(cases[0]), rt_text_count_codepoints_cached(cases[0]))]
+        var i = 1
+        while i < cases.len():
+            verdicts = verdicts.push(dual_check_i64(
+                "count_codepoints_cached", twin_char_count(cases[i]), rt_text_count_codepoints_cached(cases[i])))
+            i = i + 1
+        val summary = dual_summarize(verdicts)
+        assert_equal(summary.total, 8)
+        assert_equal(summary.divergent, 0)
+        assert_equal(twin_char_count("日本語"), 3)
