@@ -5624,42 +5624,6 @@ __attribute__((weak)) SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-/* rt_cli_get_args / rt_cli_arg_count / rt_cli_arg_at are ALSO defined, and
- * also weak, in runtime.c (lines 2276/2284/2288). On ELF and Mach-O two weak
- * definitions of the same name are simply resolved to one and nothing is
- * reported. On COFF they are not: clang-cl lowers `__attribute__((weak))` to a
- * weak EXTERNAL carrying a default-resolution symbol whose name is derived
- * from the object it lives in, so the two translation units declare the same
- * weak external with DIFFERENT defaults and link.exe fails
- *
- *   fatal error LNK1227: conflicting weak extern definition for
- *   'rt_cli_get_args'. new default '.weak.rt_cli_get_args.default.
- *   rt_random_hex' conflicts with previous default '.weak.rt_cli_get_args.
- *   default.rt_dir_create_cpath' (in ..._runtime.obj)
- *
- * measured 2026-09-02 on the MSVC Stage 2 receiver probe, link.exe 14.44,
- * exit 1227. `/FORCE:MULTIPLE` does NOT cover this: it downgrades duplicate
- * STRONG definitions to LNK4006 warnings (about 40 of those are emitted on the
- * same link and are tolerated), but conflicting weak-external defaults are a
- * separate, unforceable rule. LNK1227 is fatal at the first conflict, so all
- * three must be guarded together or the next one simply takes its place.
- *
- * Guarded on `_WIN32 && SIMPLE_CORE_C_STANDALONE`, i.e. exactly the standalone
- * core-C bundle where runtime.c is guaranteed to be linked in and therefore
- * guaranteed to supply these three. That is the same suppression mechanism
- * runtime_compiler.spl already describes for this define ("compile
- * runtime_native.c's per-lane fallback copies out so exactly ONE definition
- * ships"); this group was simply never covered by it.
- *
- * CROSS-PLATFORM: `_WIN32` is half the condition precisely so that no
- * Linux/macOS/FreeBSD lane changes. SIMPLE_CORE_C_STANDALONE alone would NOT
- * be inert -- runtime_compiler.spl passes it on the GCC/clang branch too --
- * and the weak-ness of these definitions is load-bearing off Windows, for the
- * same Stage4 dual-capsule reason spelled out at the rt_set_args carve-out a
- * hundred lines above. The mingw lane is unaffected in practice as well: it
- * takes the GNU branch of that same bundle, and this guard removes nothing it
- * relies on that runtime.c does not also define. */
-#if !(defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE))
 __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
@@ -5684,7 +5648,6 @@ __attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
     if (!arg) arg = "";
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
-#endif /* !(_WIN32 && SIMPLE_CORE_C_STANDALONE) -- see LNK1227 note above */
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
