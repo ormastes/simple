@@ -60,3 +60,16 @@ known blocker.
 Make the linker wrapper capture the child's stderr into a freshly-owned `text` at the call site
 (rather than propagating a payload through the `Result`), or add a probe that prints the raw
 linker stderr before it is wrapped. Once the real diagnostic is visible, re-triage.
+
+## Scope check (2026-09-03, measured on candidate `432d9c98...`)
+
+Re-running the original two-line hello world against the NEW rejected candidate now prints
+**`aot:lower_to_mir:done`** (2 occurrences) and proceeds all the way to the link step. The
+exit-127 stack overflow is directly, positively closed — not merely inferred.
+
+That run does not discriminate the link failure's scope, however: the hello-world path selects
+the MinGW/`gcc` link route, not the MSVC route the probe uses, so it fails differently
+(`command: gcc ... -lmingw32 ...`). The `<invalid-heap>` failure has so far been observed only
+on the probe's MSVC route. Whether it is specific to the large route-guard link or affects every
+MSVC link is still **open** and is the first thing to settle next session — force the MSVC route
+on a small input rather than relying on the default route selection.
