@@ -1,0 +1,94 @@
+#!/bin/sh
+# Windows MSVC bootstrap lane environment.  SOURCE this (`. scripts/setup/windows-msvc-bootstrap-env.shs`)
+# before `scripts/bootstrap/bootstrap-windows.sh --msvc`.
+#
+# Why this file exists (measured 2026-09-01):
+#   The Sep-1 MSVC lane run (build/cx1, pid 22183) exited 1 in
+#   `bootstrap_stage3_tool_authority_snapshot`
+#   (scripts/check/lib/bootstrap-stage3/authority.shs:736), leaving a truncated
+#   `tool-authority-before.txt.tmp.22183` that stops at `tool=file` — the entry
+#   immediately before `shasum` in that function's tool loop.  The run's PATH
+#   (recorded on line 1 of that tmp) was `/mingw64/bin:/usr/bin:<Windows dirs>`:
+#   it omitted `/usr/bin/core_perl`, where MSYS2 keeps `shasum`, so
+#   `bootstrap_stage3_tool_requested_path shasum` could not resolve and the
+#   function returned 1 -> "error: could not bind bootstrap tool authority".
+#   The same PATH also lacked every MSVC tool directory (no `cl.exe`,
+#   `link.exe`, `lib.exe`).
+#
+#   Second failure mode, also measured: the snapshot fails closed on ANY PATH
+#   component that is not an existing, already-canonical directory
+#   (`[ -d "$dir" ] || return 1` and a `pwd -P` equality test).  An inherited
+#   Windows PATH routinely carries both.  Filtering the PATH here is what makes
+#   the snapshot reach RC=0 instead of aborting during path enumeration.
+#
+# Cross-platform impact: NONE.  This file is new, Windows-only, and is sourced
+# by nothing on Unix.  No existing script was modified.
+
+simple_msvc_vc_bin="/c/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64"
+simple_msvc_sdk_bin="/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+simple_msvc_msys_bin="/c/dev/tool/msys2/mingw64/bin"
+# MSVC-ABI LLVM 18. This MUST precede the MinGW bin dir: llvm-sys 180's build
+# script runs the first llvm-config on PATH and feeds its --cflags to cl.exe.
+# With MinGW first that is -IC:/dev/tool/msys2/mingw64/include, and cl.exe fails
+# compiling MinGW's stdlib.h (error C2085/C2143 on _exit, _Exit, ecvt, ...).
+simple_msvc_llvm_bin="/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/bin"
+
+for simple_msvc_d in \
+  "$simple_msvc_vc_bin" "$simple_msvc_sdk_bin" "$simple_msvc_msys_bin" \
+  /usr/bin /usr/bin/core_perl /usr/local/bin /bin; do
+  [ -d "$simple_msvc_d" ] || {
+    echo "windows-msvc-bootstrap-env: missing PATH component: $simple_msvc_d" >&2
+    return 1 2>/dev/null || exit 1
+  }
+done
+
+PATH="$simple_msvc_llvm_bin:$simple_msvc_vc_bin:$simple_msvc_msys_bin:$simple_msvc_sdk_bin:/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/usr/bin/vendor_perl:/usr/bin/core_perl:$PATH"
+
+# Drop non-absolute, missing, non-canonical and duplicate components so the
+# Stage 3 tool-authority snapshot's fail-closed path check can succeed.
+simple_msvc_filtered=""
+simple_msvc_oifs=$IFS
+IFS=:
+for simple_msvc_d in $PATH; do
+  IFS=$simple_msvc_oifs
+  case "$simple_msvc_d" in /*) ;; *) IFS=:; continue ;; esac
+  [ -d "$simple_msvc_d" ] || { IFS=:; continue; }
+  simple_msvc_c=$(CDPATH= cd -- "$simple_msvc_d" 2>/dev/null && pwd -P) || {
+    IFS=:; continue
+  }
+  [ "$simple_msvc_c" = "$simple_msvc_d" ] || { IFS=:; continue; }
+  case ":$simple_msvc_filtered:" in *":$simple_msvc_d:"*) IFS=:; continue ;; esac
+  simple_msvc_filtered="${simple_msvc_filtered:+$simple_msvc_filtered:}$simple_msvc_d"
+  IFS=:
+done
+IFS=$simple_msvc_oifs
+PATH=$simple_msvc_filtered
+export PATH
+
+INCLUDE="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\winrt"
+LIB="C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
+export INCLUDE LIB
+export SIMPLE_WINDOWS_ABI=msvc
+
+# C: is at 100% (23G free of 2.3T); D: has ~797G.  Keep scratch off C:.
+if [ -d /d ]; then
+  mkdir -p /d/simple-tmp 2>/dev/null || true
+  TMPDIR=/d/simple-tmp
+  TMP='D:\simple-tmp'
+  TEMP='D:\simple-tmp'
+  export TMPDIR TMP TEMP
+fi
+
+unset simple_msvc_vc_bin simple_msvc_sdk_bin simple_msvc_msys_bin \
+  simple_msvc_d simple_msvc_c simple_msvc_filtered simple_msvc_oifs
+
+# LLVM 18 for the MSVC ABI. scripts/setup/platform-detect.shs searches PATH for
+# an llvm-config reporting major 18; the MSYS2 llvm-config on this host reports
+# 21.1.1, and the windows well-known-prefix list only covers %ProgramFiles%/LLVM,
+# so detection failed with "error: LLVM not found ... versions: 18". The
+# version-named override prefix is the supported knob (platform-detect.shs:136).
+if [ -z "${LLVM_SYS_180_PREFIX:-}" ] &&
+   [ -f "/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc/lib/LLVM-C.lib" ]; then
+  LLVM_SYS_180_PREFIX="/c/dev/install/clang+llvm-18.1.8-x86_64-pc-windows-msvc"
+  export LLVM_SYS_180_PREFIX
+fi
