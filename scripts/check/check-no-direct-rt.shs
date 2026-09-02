@@ -61,6 +61,54 @@ RT_RE='^[^#]*\brt_[a-z0-9_]*\('
 # separately so neither class can disappear from the structured result.
 DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
 
+# On Windows (Git Bash / MSYS / Cygwin) ripgrep emits native `\` path
+# separators while `find` emits `/`. That divergence made the manifest
+# equality check below fail for EVERY scan, so this guard returned ERR and
+# could never run on a Windows host. Normalizing rg's output to `/` is gated
+# on Windows only: on POSIX rg already emits `/`, and a literal backslash is
+# a legal character in a POSIX filename, so rewriting it there would corrupt
+# real paths. The Unix code path is byte-for-byte unchanged.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) RT_WIN_SEPS=1 ;;
+  *) RT_WIN_SEPS=0 ;;
+esac
+
+# There is a SECOND Windows divergence beyond separators: ripgrep is a native
+# Win32 binary, so it resolves an MSYS virtual path to its real Windows form
+# (`/tmp/x` -> `C:/Users/.../Temp/x`, `/c/Users/...` -> `C:/Users/...`) while
+# MSYS `find` keeps the virtual form. Both the manifest comparison and the
+# allowlist `rel=` derivation need rg's paths mapped back to the shell's view.
+# rt_win_native_root prints the native form rg will emit for a shell path.
+rt_win_native_root() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# rt_normalize_seps <file> <shell-root> <native-root> <nul|nl>
+# Rewrites `\` to `/` and maps the native root prefix back to the shell root,
+# in place, on Windows only. Deliberately NOT a pipe on the rg invocation:
+# `rg ... | tr` would make `$?` report tr's status and silently launder a
+# scanner error into a pass.
+rt_normalize_seps() {
+  [ "$RT_WIN_SEPS" = "1" ] || return 0
+  [ -f "$1" ] || return 0
+  awk -v shroot="$2" -v natroot="$3" -v rs="$4" '
+    BEGIN { if (rs == "nul") { RS = "\0"; ORS = "\0" } }
+    {
+      gsub(/\\/, "/")
+      if (natroot != "" && index($0, natroot) == 1) {
+        $0 = shroot substr($0, length(natroot) + 1)
+      }
+      print
+    }
+  ' "$1" > "$1.norm" || return 1
+  mv -f "$1.norm" "$1" || return 1
+  return 0
+}
+
 # scan_dir <repo-root> <scan-root> <allowlist-file> [offender-output]
 # stdout: "scanned direct allowed forbidden declarations" counts.
 # <repo-root> is used only to compute repo-relative paths for allowlist
@@ -69,6 +117,7 @@ DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
 scan_dir() {
   sd_repo_root="$1"; sd_scan_root="$2"; sd_allow="$3"; sd_off="${4:-}"
   sd_scanned=0; sd_allowed=0; sd_forbidden=0; sd_decls=0
+  sd_native_root=$(rt_win_native_root "$sd_scan_root")
   if ! command -v rg >/dev/null 2>&1; then
     echo "ERR"
     return
@@ -91,6 +140,7 @@ scan_dir() {
   fi
   rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
   st=$?
+  rt_normalize_seps "$tmp_rg_raw" "$sd_scan_root" "$sd_native_root" nul || st=99
   # `rg --files` uses 1 for an empty but successful traversal.
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
@@ -109,6 +159,10 @@ scan_dir() {
   fi
   rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
   st=$?
+  # The count outputs feed $f -> rel -> allowlist prefix matching, whose
+  # entries are `/`-separated. Normalizing only the manifest above would
+  # reclassify every allowlisted provider as forbidden.
+  rt_normalize_seps "$tmp_matches" "$sd_scan_root" "$sd_native_root" nl || st=99
   # rg exit 1 means no matches; >1 is a scanner error.
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
@@ -117,6 +171,7 @@ scan_dir() {
   fi
   rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
   st=$?
+  rt_normalize_seps "$tmp_decls" "$sd_scan_root" "$sd_native_root" nl || st=99
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"; rmdir "$tmp_scan"
     echo "ERR"
