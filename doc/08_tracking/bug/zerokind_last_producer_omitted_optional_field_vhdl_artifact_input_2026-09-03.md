@@ -179,3 +179,60 @@ bootstrap CLI and exposes neither `test` nor `lint`; and
 `bin/release/aarch64-apple-darwin/simple` cannot parse the current stdlib
 (`always_inline`). No bootstrap was run, per instruction. The next Stage-3 run
 is the verification, and the repaired probe is the instrument if it fails.
+
+---
+
+## Addendum 2026-09-03: the fix did NOT clear it, and the probe watches the wrong path
+
+### The `assurance_policy: nil` fix is landed and did not resolve the class
+
+Verified present in the build tree that ran (`grep -c 'assurance_policy: nil'` = 1
+in `driver_vhdl_artifact_build.spl`). Three subsequent Stage-3 runs on trees
+carrying it still raise `E-MIR-TYPE-ZeroKind`:
+
+| run | log bytes | zerokind |
+|---|---|---|
+| 5e93b8217ee | 8,961,364 | 6 |
+| 5e93b8217ee (repeat) | 8,922,206 | 2 |
+| 68c4b6cc165 | 8,922,496 | 2 |
+
+The count varies between 2 and 6 across runs on IDENTICAL source. That
+instability is itself unexplained and should not be hand-waved: it means the
+producer is order- or state-dependent, not a fixed set of source sites.
+
+The omitted-Optional site was a real instance of the shape and the explicit
+`nil` is correct on its own merits. It was not the blocker.
+
+### `probe lines=0` is a MEANINGFUL NEGATIVE, not a broken probe
+
+Three runs reported `probe lines=0`. Two distinct causes were found and fixed
+before the number could be trusted at all:
+
+1. **The variable never reached the worker.** Stage 3 builds its environment from
+   an explicit `env VAR=...` allowlist; `SIMPLE_MIR_TAG_PROBE` was absent, so an
+   exported value was silently dropped. Fixed in PR #327. (Second time this
+   allowlist swallowed this exact variable in this arc.)
+2. **The probe is instrumented on the wrong crossing.** It sits at
+   `function_lowering.spl:245`, inside the SIGNATURE-parameter path
+   (`param:{pmi}`, `signature_param_type`). The producer identified by this
+   record's own analysis is the STRUCT-CONSTRUCT fill path
+   (`lower_struct_construct` -> `ensure_option_handle` ->
+   `remember_local_hir_type`). The probe cannot see that site.
+
+Truncation was ruled out: the FULL 501,657-byte stderr file also contains zero
+probe lines, so the absence is real and not a logging artifact.
+
+**Therefore the correct reading of `probe lines=0` is: the kind-0 HirType does
+not arrive via a function signature parameter.** That is a genuine elimination,
+and it is consistent with the fill-path hypothesis rather than against it.
+
+### What the next investigation should do
+
+Instrument where the fatal is actually RAISED (inside `lower_type`, at the
+`kind == 0` detection) rather than at one suspected crossing — the raise site
+sees every producer, a crossing sees only its own. Print the enclosing
+construct/site identity there, bounded by fatal count.
+
+Do NOT re-run stage 3 to "see if the probe fires" without first confirming the
+probe is on the path under test. Three ~65-minute runs were spent on a probe
+that could not observe this defect.
