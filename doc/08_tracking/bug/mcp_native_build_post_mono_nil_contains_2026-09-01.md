@@ -222,3 +222,46 @@ Still not produced by THIS run — the build aborted at the first
 exists. A verification build with the fix is in flight; the count will be
 recorded when it lands. The last real full-build number remains **133**, and
 nothing in this record supersedes it.
+
+## Latent population: 16 MORE MirLowering fields are nil for the same reason
+
+Audited 2026-09-02 by diffing the struct's declared field names
+(`mir_lowering_types.spl`, 97 fields) against the argument names of its only
+constructor call (`module_lowering.spl:253`, 81 arguments after this fix). The
+16 below are declared with **no default** and passed by **no constructor
+argument**, so they are `Value::Nil` at runtime exactly as
+`global_statics_by_id` was:
+
+```
+finally_stack: [HirBlock]                 (line 56)
+type_transport_receipts: i64              (67)
+type_transport_owner: text                (68)
+type_transport_context: text              (69)
+type_transport_param_index: i64           (70)
+mcdc_mode: i64                            (75)
+mcdc_owner_bytes: i64                     (76)
+mcdc_global_bytes: i64                    (77)
+mcdc_include_csv: text                    (78)
+mcdc_exclude_csv: text                    (79)
+mcdc_next_runtime_id: i64                 (80)
+mcdc_active_decision_id: i64              (81)
+mcdc_active_decision_semantic: text       (82)
+mcdc_next_condition_ordinal: i64          (83)
+mcdc_active_dynamic_token: LocalId        (84)
+mcdc_active_tokens: [LocalId]             (85)
+```
+
+None was touched by this fix, deliberately: only the two that demonstrably
+aborted the build were changed, and blanket-initialising 16 fields (one of
+which, `mcdc_active_dynamic_token: LocalId`, has no obvious zero value) is a
+larger change than the blocker warranted. They are recorded here because they
+are the next candidates the moment MIR lowering reaches a function that reads
+one — most plausibly `finally_stack`, which any `try`/`finally` lowering would
+touch, and the `type_transport_*` group. The `mcdc_*` group is coverage
+instrumentation and is likely unreachable with MC/DC off.
+
+The general lesson, and the reason the generalization spec exists: a struct
+field with no default that no constructor argument names is silently nil, and
+NOTHING in the tree reports it — not construction, not the type checker. The
+audit above is a two-command diff and should be re-run whenever a field is added
+to this struct.
