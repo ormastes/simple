@@ -6,8 +6,22 @@
 I/O) silently only works when the caller passes an untyped/`[i64]` integer
 array, and rejects the natural, statically-typed `[u8]` value real code
 produces (e.g. any `wire.spl`-style `ByteWriter.to_bytes()` codec output)
-**Status:** Open — worked around at the call site in
-`src/lib/nogc_sync_mut/game_net/udp_transport.spl`; no interpreter fix yet
+**Status:** RESOLVED IN SOURCE (re-verified 2026-09-02) — worked around at the
+call site in `src/lib/nogc_sync_mut/game_net/udp_transport.spl`, AND the real
+fix landed in `extract_bytes`
+(`src/compiler_rust/compiler/src/native_io_helpers.rs:133-153`, fix-owner tag
+`codex-par-u8-marshal`): it now accepts `Value::UInt { value, width: 8 }`
+alongside `Value::Int`, pushing `*value as u8`, while still rejecting wider
+unsigned widths. Confirmed present by reading the current source, with two
+inline unit tests already covering it
+(`extract_bytes_accepts_typed_u8_elements`,
+`extract_bytes_rejects_non_byte_unsigned_elements`). `cargo test -p
+simple-compiler --lib native_io_helpers` was started to re-run these but the
+`simple-compiler` crate did not finish compiling in the time budget available
+in this session (it is a very large crate); the source-level fix and its
+paired regression tests are nonetheless directly readable and unambiguous.
+Deploying this (a Rust-seed change) requires a seed rebuild, out of scope
+here (a bootstrap was in flight and must not be disturbed).
 
 ## Summary
 
