@@ -28,6 +28,26 @@ elif [ -x "$root/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
 else
     simple_bin=$root/bin/simple
 fi
+
+# bin/simple is a shell WRAPPER on some hosts (macOS deploys one that execs the
+# real binary with an absolute argv0 — see the comment in that file). `nm` on a
+# shell script yields 0 symbols, so this audit aborted with
+#   "ERROR — nothing was checked: ... yielded 0 defined symbol(s) (floor 100);
+#    it is stripped or not a readable object for this nm"
+# and, because it is a dependency of the BLOCKING push-tier gate
+# push-sffi-v2-authority, every push from such a host failed. The pre-existing
+# fallback only knows one hardcoded path
+# (bin/release/x86_64-unknown-linux-gnu/simple), which no mac has.
+# Follow the wrapper instead of guessing more triples. Explicit SIMPLE_BIN still
+# wins, and a non-wrapper bin/simple is untouched.
+if [ -f "$simple_bin" ] && [ "$(head -c 2 "$simple_bin" 2>/dev/null)" = '#!' ]; then
+    _wrapped=$(sed -n 's/^exec "\$DIR\/\([^"]*\)".*/\1/p' "$simple_bin" | head -1)
+    if [ -n "$_wrapped" ]; then
+        _wrapdir=$(CDPATH= cd -- "$(dirname -- "$simple_bin")" 2>/dev/null && pwd -P)
+        [ -n "$_wrapdir" ] && [ -x "$_wrapdir/$_wrapped" ] && simple_bin="$_wrapdir/$_wrapped"
+    fi
+fi
+
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
