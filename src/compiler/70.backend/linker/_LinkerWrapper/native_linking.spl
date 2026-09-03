@@ -65,6 +65,7 @@ struct NativeLinkConfig:
     linker_abi: text = ""
     pie: bool
     debug: bool
+    strip_output: bool = false
     verbose: bool
     allow_duplicate_definitions: bool
     allow_cc_fallback: bool
@@ -79,6 +80,7 @@ impl NativeLinkConfig:
             runtime_path: "",
             pie: true,
             debug: false,
+            strip_output: false,
             verbose: false,
             allow_duplicate_definitions: true,
             allow_cc_fallback: true,
@@ -288,7 +290,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-dynamic-linker")
         args.push(crt.dynamic_linker)
 
-    for flag in native_direct_platform_flags(os, linker_type.to_string()):
+    for flag in native_direct_platform_flags(os, linker_type.to_string(), config.strip_output):
         args.push(flag)
     if config.allow_duplicate_definitions:
         for flag in unresolved_symbol_flags_for_unix_linker(os):
@@ -680,21 +682,31 @@ fn publish_darwin_link_tool_identity(tool_path: text) -> text:
         return "darwin-link-tool-identity-write-failed"
     ""
 
-fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
+pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
         var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
             "-z", "relro", "-z", "now", "--gc-sections"]
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
+        if strip_output: flags.push("--strip-all")
         return flags
-    if os == "macos" or os == "darwin": return ["-dead_strip"]
+    if os == "macos" or os == "darwin":
+        var flags = ["-dead_strip"]
+        if strip_output:
+            flags.push("-S")
+            flags.push("-x")
+        return flags
     []
 
-fn native_cc_platform_flags(os: text) -> [text]:
+pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
     if os == "macos" or os == "darwin" or os == "Darwin":
-        return ["-Wl,-dead_strip"]
+        var flags = ["-Wl,-dead_strip"]
+        if strip_output: flags.push("-Wl,-S,-x")
+        return flags
     if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
-        return ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
+        var flags = ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
+        if strip_output: flags.push("-Wl,--strip-all")
+        return flags
     []
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
@@ -765,7 +777,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        for flag in native_cc_platform_flags(os_name):
+        for flag in native_cc_platform_flags(os_name, config.strip_output):
             args.push(flag)
         for flag in ["-o", output]:
             args.push(flag)
@@ -800,6 +812,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
         args.push("-o")
         args.push(output)
         val (stdout, stderr, code) = process_run(cc, args)
@@ -837,6 +851,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
         if not hosted_cross:
             args.push("-Wl,--icf=safe")
         args.push("-o")
@@ -912,6 +928,8 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
         extra.push("/OPT:REF,ICF")
+    if config.strip_output:
+        extra.push("/DEBUG:NONE")
     # Runtime library and compiled objects may define the same symbol.
     # Missing symbols remain fatal.
     if config.allow_duplicate_definitions:
