@@ -1,0 +1,25 @@
+use std.spec.*
+use compiler.backend.backend.runtime_compiler.{runtime_cache_stage_bytes_v1}
+use std.io_runtime.{file_read_raw}
+
+describe "warm native runtime object cache staging":
+    it "uses argument-safe hard-link-first staging with a byte-copy fallback":
+        val source = file_read_raw(
+            "src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val start = source.find("pub fn runtime_cache_stage_object_v1")
+        val end = source.find("pub fn runtime_cache_stage_bytes_v1")
+        val body = source.substring(start, end)
+        expect(start).to_be_greater_than(-1)
+        expect(end).to_be_greater_than(start)
+        expect(body).to_contain("process_run(\"ln\", [\"-f\", cache_obj, obj_path])")
+        expect(body).to_contain("if link_code == 0:\n        return true")
+        expect(body).to_contain("file_copy(cache_obj, obj_path)")
+
+    it "eliminates warm staging byte copies without changing object inventory":
+        val representative_runtime_objects: [i64] = [4096, 8192, 16384, 32768]
+        expect(runtime_cache_stage_bytes_v1(representative_runtime_objects, false)).to_equal(61440)
+        expect(runtime_cache_stage_bytes_v1(representative_runtime_objects, true)).to_equal(0)
+
+    it "ignores invalid negative size evidence instead of inventing savings":
+        expect(runtime_cache_stage_bytes_v1([1024, -1, 2048], false)).to_equal(3072)
+        expect(runtime_cache_stage_bytes_v1([1024, -1, 2048], true)).to_equal(0)

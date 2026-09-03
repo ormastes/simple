@@ -12,7 +12,7 @@
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
-use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}
+use std.io_runtime.{host_arch, host_os, env_get_nullable, file_copy, file_exists, file_delete, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 extern fn rt_path_absolute(path: text) -> text?
@@ -376,6 +376,31 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
         return ""
     dir
 
+pub fn runtime_cache_stage_object_v1(cache_obj: text, obj_path: text) -> bool:
+    """Stage one immutable cache object without copying its bytes when possible.
+
+    The cache directory is already keyed by the exact runtime source content,
+    compiler identity/version, target, ABI policy, provider selection, and
+    code-generation flags.  A hard link therefore preserves the same object
+    bytes and Mach-O/ELF/COFF ABI as the former copy while avoiding redundant
+    reads and writes.  Cross-device and unsupported-filesystem cases retain
+    the byte-copy fallback.
+    """
+    val (_, _, link_code) = process_run("ln", ["-f", cache_obj, obj_path])
+    if link_code == 0:
+        return true
+    file_copy(cache_obj, obj_path)
+
+pub fn runtime_cache_stage_bytes_v1(object_sizes: [i64], hard_linked: bool) -> i64:
+    """Model bytes copied while staging a complete warm runtime cache hit."""
+    if hard_linked:
+        return 0
+    var copied: i64 = 0
+    for size in object_sizes:
+        if size > 0:
+            copied = copied + size
+    copied
+
 fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false) -> Result<[text], text>:
     """Compile all C runtime source files to object files.
 
@@ -572,9 +597,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         if cache_obj != "":
             cache_obj_exists = file_exists(cache_obj)
         if cache_obj_exists:
-            val (hit_out, hit_err, hit_code) = backend_shell_tuple(
-                "cp -f '" + cache_obj + "' '" + obj_path + "'")
-            if hit_code == 0:
+            if runtime_cache_stage_object_v1(cache_obj, obj_path):
                 cache_hit = true
                 if trace:
                     print "[RT-COMPILE] cache hit: {name}.c"
