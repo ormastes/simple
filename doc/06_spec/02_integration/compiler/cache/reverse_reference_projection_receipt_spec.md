@@ -1,7 +1,7 @@
 # M2 Immutable Reverse-reference Projection Receipts
 
 - Executable: `test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl`
-- Requirements:
+- Requirements: `MBH-REQ-003`, `MBH-REQ-004`, `MBH-REQ-006`
 - Evidence class: executable SPipe definition; no execution summary is embedded.
 
 ## Scenarios
@@ -25,6 +25,11 @@
 - uses the production receipt reader to select the causal consumer.
 - attributes a conservative closure rebuild when registry state is unknown.
 - does not leak facts across sequential compilation owners or workspaces.
+- keeps an ordinary `dependencies=[provider]` consumer reusable after a
+  private-body edit while recompiling/emitting the provider and invalidating
+  its proven relocation/link action;
+- invalidates explicitly proven SCC peers after a private-body edit.
+- follows exact semantic consumers after an exported-interface edit.
 - computes the transitive causal closure through dependent consumers.
 - reaches a stable SCC closure without dropping cycle members.
 
@@ -35,6 +40,6 @@
 - This scenario has no additional user-selected policy beyond its listed requirements.
 
 ## Freshness
-- Requirement IDs and scenario names mirror the executable source as of 2026-09-02.
+- Requirement IDs and scenario names mirror the executable source as of 2026-09-03.
 - The executable contains no `pass_todo` or tautological `expect(true).to_equal(true)` evidence.
 - Runtime execution was not available in this audit because the admitted self-hosted `bin/simple` lacks `test`; no runtime PASS is claimed.

@@ -5,6 +5,10 @@ use compiler.driver.cache.package_tldr_metadata.{
 }
 use compiler.driver.cache.package_module_index.{PackageModuleIndexGenerationV1}
 use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_register_source_alias_v1,
+    reverse_reference_register_module_scc_peer_v1
+}
 
 struct PackageSccGroupV1:
     identity: text
@@ -381,7 +385,33 @@ fn package_scc_consume_index_schedule_v1(
         waves = waves.push(wave_packages)
         for package_identity in wave_packages:
             package_order = package_order.push(package_identity)
+    package_scc_publish_reverse_reference_peers_v1(
+        generation, group_ids)
     PackageIndexScheduleConsumptionV1(true, "ok", package_order, waves)
+
+fn package_scc_publish_reverse_reference_peers_v1(
+    generation: PackageModuleIndexGenerationV1, scheduled_sccs: [text]
+):
+    # This is the production package-index SCC authority. Publish source-level
+    # peers only after the declared condensation schedule has validated.
+    for scc_identity in scheduled_sccs:
+        var sources: [text] = []
+        for entry in generation.entries:
+            if entry.scc_identity == scc_identity:
+                reverse_reference_owner_register_source_alias_v1(
+                    entry.module_identity, entry.source_identity)
+                reverse_reference_owner_register_source_alias_v1(
+                    entry.package_identity, entry.source_identity)
+                sources = sources.push(entry.source_identity)
+        sources = package_scc_sorted_unique_v1(sources)
+        var encoded = "simple/module-scc-reverse-reference/v1|{scc_identity.len()}:{scc_identity}|{sources.len()}"
+        for source in sources:
+            encoded = encoded + "|{source.len()}:{source}"
+        val scc_digest = sha256_text(encoded)
+        for subject in sources:
+            for consumer in sources:
+                reverse_reference_register_module_scc_peer_v1(
+                    subject, consumer, scc_digest)
 
 export PackageSccGroupV1, PackageSccWaveV1, PackageCompileScheduleV1
 export PackageCompileResultV1, PackagePublicationBatchV1

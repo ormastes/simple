@@ -3,6 +3,12 @@ use compiler.driver.driver_build.incremental.{
     build_cache_record_entry_at, build_cache_entry_is_valid_at,
     incremental_detect_changes_at, incremental_reverse_reference_fallback_reason_v1
 }
+use compiler.driver.cache.package_scc_scheduler.{
+    package_scc_consume_index_schedule_v1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
+}
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
     ReverseReferenceGenerationReceiptV1, reverse_reference_read_current_v1,
@@ -514,6 +520,75 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(reverse_reference_owner_begin_v1()).to_equal(false)
         reverse_reference_owner_end_v1()
 
+    it "keeps an ordinary dependency reusable after a private-body edit":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val provider = "{root}/private-provider.spl"
+        val semantic_consumer = "{root}/semantic-consumer.spl"
+        val link_action = "{root}/link-action.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
+        rt_file_write_text(link_action, "export fn link_action() -> i64: 3\n")
+        rt_file_write_text("{root}/provider.o", "provider")
+        rt_file_write_text("{root}/consumer.o", "consumer")
+        rt_file_write_text("{root}/linked-output", "linked")
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        declaration_lowering_publish_annotation_consumer_v1(
+            provider, semantic_consumer, "semantic-only")
+        symbol_analysis_publish_relocation_v1(
+            provider, link_action, "provider-relocation-v1")
+        expect(build_cache_record_entry_at(
+            cache, provider, [], ["{root}/provider.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(
+            cache, semantic_consumer, [provider], ["{root}/consumer.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(
+            cache, link_action, [], ["{root}/linked-output"])).to_equal(true)
+
+        rt_file_write_text(provider, "export fn answer() -> i64: 99\n")
+        val changes = incremental_detect_changes_at(
+            cache, [provider, semantic_consumer, link_action])
+        expect(changes.files.contains(provider)).to_equal(true)
+        expect(changes.files.contains(link_action)).to_equal(true)
+        expect(changes.files.contains(semantic_consumer)).to_equal(false)
+        expect(build_cache_entry_is_valid_at(cache, semantic_consumer)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
+    it "follows exact semantic consumers after an exported-interface edit":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val provider = "{root}/interface-provider.spl"
+        val semantic_consumer = "{root}/interface-consumer.spl"
+        val unrelated = "{root}/unrelated.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
+        rt_file_write_text(unrelated, "export fn unrelated() -> i64: 3\n")
+        for path in [provider, semantic_consumer, unrelated]:
+            rt_file_write_text(path + ".o", path)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        declaration_lowering_publish_annotation_consumer_v1(
+            provider, semantic_consumer, "semantic-only")
+        expect(build_cache_record_entry_at(cache, provider, [], [provider + ".o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, semantic_consumer, [], [semantic_consumer + ".o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, unrelated, [], [unrelated + ".o"])).to_equal(true)
+
+        rt_file_write_text(provider, "export fn answer() -> text: \"changed\"\n")
+        val changes = incremental_detect_changes_at(
+            cache, [provider, semantic_consumer, unrelated])
+        expect(changes.files.contains(provider)).to_equal(true)
+        expect(changes.files.contains(semantic_consumer)).to_equal(true)
+        expect(changes.files.contains(unrelated)).to_equal(false)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
     it "computes the transitive causal closure through dependent consumers":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
@@ -541,7 +616,7 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(changes.files.contains(source_b)).to_equal(true)
         expect(changes.files.contains(source_c)).to_equal(true)
 
-    it "reaches a stable SCC closure without dropping cycle members":
+    it "invalidates a proven SCC peer after a private-body edit":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
         val root = fixture_root()
@@ -554,8 +629,21 @@ describe "M2 immutable reverse-reference projection receipts":
         rt_file_write_text(source_b, "export fn b(): 2\n")
         rt_file_write_text("{root}/a.o", "a")
         rt_file_write_text("{root}/b.o", "b")
-        register_real_owner_publication_seams(source_a, source_b)
-        register_real_owner_publication_seams(source_b, source_a)
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        val digest = sha256_text("fixture")
+        val entry_a = PackageModuleIndexEntryV1(
+            "pkg-a", "mod-a", source_a, digest, digest, digest, digest,
+            digest, digest, digest, digest, "cycle-a-b-scc-v1", ["mod-b"], ["mod-b"])
+        val entry_b = PackageModuleIndexEntryV1(
+            "pkg-b", "mod-b", source_b, digest, digest, digest, digest,
+            digest, digest, digest, digest, "cycle-a-b-scc-v1", ["mod-a"], ["mod-a"])
+        val generation = PackageModuleIndexGenerationV1(
+            1, digest, "root-v1", "revision-v1", "commit-v1", "tree-v1",
+            digest, [entry_a, entry_b])
+        val scheduled = package_scc_consume_index_schedule_v1(
+            generation, ["pkg-a", "pkg-b"])
+        expect(scheduled.valid).to_equal(true)
         expect(build_cache_record_entry_at(cache, source_a, [source_b], ["{root}/a.o"])).to_equal(true)
         expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
         rt_file_write_text(source_a, "export fn a(): 7\n")
