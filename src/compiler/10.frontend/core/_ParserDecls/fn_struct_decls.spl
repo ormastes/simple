@@ -951,6 +951,14 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 continue
             lex_snapshot_rollback(lf_snap)
             parser_tok_restore(lf_tok_nums, lf_tok_text)
+            # Any OTHER member-position decorator (`@unsafe(...)` and friends)
+            # is parsed as metadata by the module-decl loop's twin arm; without
+            # this the loop fell through to "unexpected token in class body"
+            # and no self-hosted build could parse the 310 annotated stdlib
+            # methods. B1 of
+            # doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md
+            if parser_parse_member_attribute():
+                continue
 
         # Associated types: type Item = T (skip for now, just parse and ignore).
         # `type: T` is instead a keyword-named field, as in the canonical Rust
@@ -994,6 +1002,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 if class_member_is_pub:
                     decl_set_visibility_text(sm_id, "pub")
                 class_method_ids.push(sm_id)
+                parser_record_unsafe_annotation(decl_get_name(sm_id))
+            parser_reset_pending_unsafe()
             continue
         if par_kind_get() == 20:
             val fm_id = parse_class_body_method(struct_name, false, false)
@@ -1001,6 +1011,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 if class_member_is_pub:
                     decl_set_visibility_text(fm_id, "pub")
                 class_method_ids.push(fm_id)
+                parser_record_unsafe_annotation(decl_get_name(fm_id))
+            parser_reset_pending_unsafe()
             continue
         if par_kind_get() == 34:
             val mm_id = parse_class_body_method(struct_name, false, true)
@@ -1008,6 +1020,8 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 if class_member_is_pub:
                     decl_set_visibility_text(mm_id, "pub")
                 class_method_ids.push(mm_id)
+                parser_record_unsafe_annotation(decl_get_name(mm_id))
+            parser_reset_pending_unsafe()
             continue
 
         # Field prefixes: `val name: T` / `var name: T`.  A colon immediately
