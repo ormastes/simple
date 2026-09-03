@@ -37,6 +37,12 @@ Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
 and qualifying measurement receipt exist.
+REQ-KPF-008 worker-wire follow-up (2026-09-03): the canonical schema compiler
+now generates a package-specific fixed worker-envelope projection containing
+the schema digest, dense interface/operation slots, required-operation policy,
+and overflow-safe frame bounds checks. Focused generator and generated-fixture
+tests pass. The broader four-language malformed native-layout corpus remains a
+separate open gate.
 The selected LLVM+Cranelift, ABI v1, `simple.sdn`, and atomic APK-only policy
 set is structurally complete: defaults and admission bind those choices and
 reject alternate policy inputs. Runtime/native rows remain blocked. The Stage3
