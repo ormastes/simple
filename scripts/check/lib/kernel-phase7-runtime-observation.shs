@@ -30,12 +30,28 @@ observe_admitted_runtime() {
   fi
 
   parity=$evidence_dir/backend-parity.tsv
+  parity_source=$evidence_dir/backend-parity-main.spl
+  cat >"$parity_source" <<'EOF'
+fn main():
+    print 42
+EOF
   printf 'backend\texit_status\tstdout_sha256\tstderr_sha256\n' >"$parity"
   for backend in llvm cranelift; do
+    binary=$evidence_dir/parity-$backend
+    build_log=$evidence_dir/parity-$backend.build.log
     out=$evidence_dir/parity-$backend.stdout err=$evidence_dir/parity-$backend.stderr
     set +e
-    SIMPLE_EXECUTION_MODE=$backend "$candidate_path" -c 'print(6*7)' >"$out" 2>"$err"
-    parity_status=$?
+    SIMPLE_NO_STUB_FALLBACK=1 "$candidate_path" native-build "$parity_source" --backend="$backend" \
+      --output="$binary" --cache-dir="$evidence_dir/cache-$backend" >"$build_log" 2>&1
+    build_status=$?
+    if [ "$build_status" -eq 0 ] && [ -x "$binary" ]; then
+      "$binary" >"$out" 2>"$err"
+      parity_status=$?
+    else
+      : >"$out"
+      : >"$err"
+      parity_status=$build_status
+    fi
     set -e
     output_sha=$(hash_file "$out")
     printf '%s\t%s\t%s\t%s\n' "$backend" "$parity_status" "$output_sha" "$(hash_file "$err")" >>"$parity"
