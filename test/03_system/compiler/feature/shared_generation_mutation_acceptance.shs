@@ -17,9 +17,12 @@ run_probe() {
     (cd "$workspace" &&
         SIMPLE_CACHE_DIR="$workspace/.cache"
         SIMPLE_BUILD_DIR="$workspace/build"
+        SIMPLE_WORKTREE_STORAGE_ROOT="$workspace/.simple/storage"
+        SIMPLE_USER_STORAGE_ROOT="$workspace/.home/.simple/storage"
         HOME="$workspace/.home"
         TMPDIR="$workspace/.tmp"
-        export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR HOME TMPDIR
+        export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR SIMPLE_WORKTREE_STORAGE_ROOT
+        export SIMPLE_USER_STORAGE_ROOT HOME TMPDIR
         "$RUNTIME" test "$SPEC" --mode=interpreter) >"$output" 2>&1
     status=$?
     set -e
@@ -34,9 +37,12 @@ run_native_acceptance() {
         (cd "$workspace" &&
             SIMPLE_CACHE_DIR="$workspace/.cache"
             SIMPLE_BUILD_DIR="$workspace/build"
+            SIMPLE_WORKTREE_STORAGE_ROOT="$workspace/.simple/storage"
+            SIMPLE_USER_STORAGE_ROOT="$workspace/.home/.simple/storage"
             HOME="$workspace/.home"
             TMPDIR="$workspace/.tmp"
-            export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR HOME TMPDIR
+            export SIMPLE_CACHE_DIR SIMPLE_BUILD_DIR SIMPLE_WORKTREE_STORAGE_ROOT
+            export SIMPLE_USER_STORAGE_ROOT HOME TMPDIR
             "$RUNTIME" native-build --source src/compiler --source src/lib \
                 --source test/03_system/compiler/feature --entry-closure \
                 --entry "test/03_system/compiler/feature/$fixture.spl" \
@@ -69,12 +75,13 @@ fi
 grep -Fq 'MBH-NFR006-PASS:overflow-current-pin' "$clean_log"
 grep -Fq 'MBH-NFR006-PASS:prepublication-bound' "$clean_log"
 grep -Fq 'MBH-NFR006-PASS:gc-protection' "$clean_log"
+grep -Fq 'MBH-NFR006-PASS:identical-writer' "$clean_log"
 if ! run_native_acceptance "$clean"; then
     printf '%s\n' 'STATUS: BLOCKED — native crash/concurrency acceptance unavailable'
     exit 2
 fi
 
-for mutation in overflow current pin gc; do
+for mutation in overflow current pin gc identical; do
     mutant=$(mktemp -d "${TMPDIR:-/tmp}/simple-mbh-nfr006-${mutation}.XXXXXX")
     copy_fixture "$mutant"
     source_file="$mutant/src/compiler/80.driver/cache/shared_generation_store.spl"
@@ -93,8 +100,13 @@ for mutation in overflow current pin gc; do
             begin_marker='MBH-NFR006-BEGIN:gc-protection'
             pass_marker='MBH-NFR006-PASS:gc-protection'
             ;;
+        identical)
+            perl -0pi -e 's/if current == generation and\n                shared_generation_matches_encoded_v1\(root, generation, encoded\):/if false:/' "$source_file"
+            begin_marker='MBH-NFR006-BEGIN:identical-writer'
+            pass_marker='MBH-NFR006-PASS:identical-writer'
+            ;;
     esac
-    if [ "$mutation" != gc ]; then
+    if [ "$mutation" != gc ] && [ "$mutation" != identical ]; then
         begin_marker='MBH-NFR006-BEGIN:overflow-current-pin'
         pass_marker='MBH-NFR006-PASS:overflow-current-pin'
     fi
@@ -119,4 +131,4 @@ for mutation in overflow current pin gc; do
     mutant=
 done
 
-printf '%s\n' 'STATUS: PASS — MBH-NFR-006 executable acceptance and 4/4 mutations red'
+printf '%s\n' 'STATUS: PASS — MBH-NFR-006 executable acceptance and 5/5 mutations red'
