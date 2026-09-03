@@ -1,0 +1,173 @@
+"""
+As a caret-suite operator I open the `cs` dashboard, see every pane my session
+owns, switch the pane I want to talk to, and maximize the pane that is taking my
+command so its output fills the terminal.
+
+The dashboard must be honest about the host it runs on: on a machine with tmux
+it drives real panes, and on a machine without one (Windows, or a POSIX box with
+no tmux installed) it says so and refuses rather than showing me panes that do
+not exist.
+"""
+
+use std.spec.{step, skip}
+
+use app.llm_caret.pane_backend.{pane_send_literal_argv, pane_send_enter_argv, Pane, PANE_FORMAT, pane_parse_line,
+    pane_parse_lines, pane_list_argv, pane_select_argv, pane_zoom_argv,
+    pane_kill_argv, pane_backend_name, pane_available, pane_list, pane_select,
+    pane_zoom, pane_spawn, pane_kill}
+
+describe "cs pane backend reads tmux pane lines":
+
+    it "types a chat message literally and submits it as a separate keystroke":
+        """
+        `send-keys -l` is what stops a message containing tmux key names —
+        "Enter", "C-c" — from being interpreted as keys instead of typed. The
+        submitting Enter is therefore its own call, which also means a failed
+        literal write can be detected before anything is submitted.
+        """
+        step("Build the literal-write argv")
+        expect(pane_send_literal_argv("%3", "say Enter please")).to_equal(
+            ["send-keys", "-t", "%3", "-l", "say Enter please"])
+
+        step("Build the submit argv")
+        expect(pane_send_enter_argv("%3")).to_equal(["send-keys", "-t", "%3", "Enter"])
+    it "turns a realistic list-panes line into a fully populated Pane":
+        step("parse one active, unzoomed pane line emitted by tmux")
+        val panes = pane_parse_line("%3 48211 1 0 claude-worker")
+        expect(panes.len()).to_equal(1)
+        expect(panes[0].pane_id).to_equal("%3")
+        expect(panes[0].pid).to_equal(48211)
+        expect(panes[0].title).to_equal("claude-worker")
+        assert_true(panes[0].active)
+        assert_false(panes[0].zoomed)
+
+    it "keeps a multi-word pane title intact":
+        step("titles carry spaces, so they are the trailing columns")
+        val panes = pane_parse_line("%12 991 0 1 caret agent two")
+        expect(panes.len()).to_equal(1)
+        expect(panes[0].title).to_equal("caret agent two")
+        assert_false(panes[0].active)
+        assert_true(panes[0].zoomed)
+
+    it "accepts a pane whose title tmux left empty":
+        step("an untitled pane is still a real pane")
+        val panes = pane_parse_line("%0 7 1 0")
+        expect(panes.len()).to_equal(1)
+        expect(panes[0].title).to_equal("")
+        expect(panes[0].pid).to_equal(7)
+
+    it "yields no Pane at all for a malformed line":
+        step("fail closed: garbage must never become a Pane with garbage fields")
+        expect(pane_parse_line("").len()).to_equal(0)
+        expect(pane_parse_line("garbage").len()).to_equal(0)
+        expect(pane_parse_line("3 48211 1 0 title").len()).to_equal(0)
+        expect(pane_parse_line("%3 notapid 1 0 title").len()).to_equal(0)
+        expect(pane_parse_line("%3 48211 yes 0 title").len()).to_equal(0)
+        expect(pane_parse_line("%3 48211 1 maybe title").len()).to_equal(0)
+
+    it "drops only the bad line when a block mixes good and bad":
+        step("one corrupt line must not lose the healthy panes around it")
+        val panes = pane_parse_lines("%1 100 1 0 alpha\nrubbish\n%2 200 0 1 beta\n")
+        expect(panes.len()).to_equal(2)
+        expect(panes[0].pane_id).to_equal("%1")
+        expect(panes[1].pane_id).to_equal("%2")
+        assert_true(panes[1].zoomed)
+
+describe "cs pane backend builds the right tmux commands":
+    it "asks tmux for the pane fields the parser expects":
+        step("the list argv must carry the session and the documented format")
+        val argv = pane_list_argv("caret")
+        expect(argv[0]).to_equal("list-panes")
+        expect(argv).to_contain("caret")
+        expect(argv).to_contain(PANE_FORMAT)
+        expect(PANE_FORMAT).to_contain("#{{pane_id}}")
+        expect(PANE_FORMAT).to_contain("#{{pane_title}}")
+
+    it "switches the active pane with select-pane on the pane id":
+        step("pane ids are globally unique, so -t takes the id alone")
+        val argv = pane_select_argv("%7")
+        expect(argv.len()).to_equal(3)
+        expect(argv[0]).to_equal("select-pane")
+        expect(argv[1]).to_equal("-t")
+        expect(argv[2]).to_equal("%7")
+
+    it "maximizes with resize-pane -Z so the zoom toggles":
+        step("-Z is tmux's toggle for pane zoom")
+        val argv = pane_zoom_argv("%7")
+        expect(argv[0]).to_equal("resize-pane")
+        expect(argv).to_contain("-Z")
+        expect(argv[argv.len() - 1]).to_equal("%7")
+
+    it "kills a pane with kill-pane on the pane id":
+        step("teardown targets the same pane id")
+        val argv = pane_kill_argv("%7")
+        expect(argv[0]).to_equal("kill-pane")
+        expect(argv[argv.len() - 1]).to_equal("%7")
+
+describe "cs pane backend is honest about the host":
+    it "names a backend that matches what the host can actually do":
+        step("the name is a probe result, never an assumption")
+        val name = pane_backend_name()
+        assert_true(name == "tmux" or name == "windows" or name == "none")
+        if pane_available():
+            expect(name).to_equal("tmux")
+        else:
+            assert_true(name == "windows" or name == "none")
+
+    it "refuses pane operations that were given no target":
+        step("an empty session or pane id is a caller bug, not a no-op success")
+        assert_false(pane_select("caret", ""))
+        assert_false(pane_zoom("", "%1"))
+        assert_false(pane_kill("caret", ""))
+        expect(pane_spawn("", "t", "sh", []).pane_id).to_equal("")
+
+    it "returns no panes rather than fabricating them when tmux is absent":
+        step("a degraded backend reports nothing, never invented panes")
+        if pane_available():
+            skip("returns no panes rather than fabricating them when tmux is absent",
+                "tmux is present on this host; the absent-backend branch cannot be exercised")
+        else:
+            expect(pane_list("caret").len()).to_equal(0)
+            assert_false(pane_select("caret", "%1"))
+            assert_false(pane_zoom("caret", "%1"))
+
+describe "cs pane backend drives a live tmux session":
+    it "spawns, lists, selects, maximizes and kills a real pane":
+        step("end-to-end against a disposable session, never the operator's own")
+        if not pane_available():
+            skip("spawns, lists, selects, maximizes and kills a real pane",
+                "tmux is not installed on this host (sosix_which(\"tmux\") is empty)")
+        else:
+            val session = "cs-pane-backend-spec"
+            val first = pane_spawn(session, "spec-pane-one", "sh", ["-c", "sleep 30"])
+            expect(first.pane_id).to_contain("%")
+            expect(first.pid).to_be_greater_than(0)
+
+            val second = pane_spawn(session, "spec-pane-two", "sh", ["-c", "sleep 30"])
+            expect(second.pane_id).to_contain("%")
+            expect(pane_list(session).len()).to_be_greater_than(1)
+
+            assert_true(pane_select(session, second.pane_id))
+            var selected = false
+            for pane in pane_list(session):
+                if pane.pane_id == second.pane_id and pane.active:
+                    selected = true
+            assert_true(selected)
+
+            assert_true(pane_zoom(session, second.pane_id))
+            var zoomed = false
+            for pane in pane_list(session):
+                if pane.pane_id == second.pane_id and pane.zoomed:
+                    zoomed = true
+            assert_true(zoomed)
+
+            assert_true(pane_zoom(session, second.pane_id))
+            var still_zoomed = false
+            for pane in pane_list(session):
+                if pane.pane_id == second.pane_id and pane.zoomed:
+                    still_zoomed = true
+            assert_false(still_zoomed)
+
+            assert_true(pane_kill(session, second.pane_id))
+            assert_true(pane_kill(session, first.pane_id))
+            expect(pane_list(session).len()).to_equal(0)

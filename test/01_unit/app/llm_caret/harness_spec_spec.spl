@@ -1,0 +1,181 @@
+"""
+## Purpose and audience
+Purpose: Prove that the `cs` caret-suite launcher understands the SHORT
+launch-spec grammar `harness[:provider][/model]`, so I can name just a harness
+and get its default model, or name a provider and model explicitly, and get a
+specific error instead of a silent misfire when I mistype one.
+Audience: compiler and tooling engineers who maintain the caret-suite launcher.
+"""
+# @req: REQ-APP-LLM-CARET-HARNESS-SPEC-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use app.llm_caret.harness_spec.{
+    HarnessSpec, parse_harness_spec, harness_spec_display,
+    harness_is_cli, harness_agent_provider,
+    known_harnesses, known_caret_providers
+}
+
+describe "cs short launch-spec grammar":
+
+    it "reads a bare CLI harness as that harness with its default model":
+        step("parse the bare CLI harness names")
+        val claude = parse_harness_spec("claude")
+        assert_true(claude.valid)
+        expect(claude.harness).to_equal("claude")
+        expect(claude.provider).to_equal("")
+        expect(claude.model).to_equal("")
+        expect(claude.error).to_equal("")
+
+        val codex = parse_harness_spec("codex")
+        assert_true(codex.valid)
+        expect(codex.harness).to_equal("codex")
+        expect(codex.model).to_equal("")
+
+        val kimi = parse_harness_spec("kimi")
+        assert_true(kimi.valid)
+        expect(kimi.harness).to_equal("kimi")
+        expect(kimi.provider).to_equal("")
+
+    it "reads an explicit model after the slash":
+        step("parse claude/opus")
+        val spec = parse_harness_spec("claude/opus")
+        assert_true(spec.valid)
+        expect(spec.harness).to_equal("claude")
+        expect(spec.provider).to_equal("")
+        expect(spec.model).to_equal("opus")
+
+    it "reads a caret provider after the colon":
+        step("parse caret:kimi and caret:deepseek")
+        val kimi = parse_harness_spec("caret:kimi")
+        assert_true(kimi.valid)
+        expect(kimi.harness).to_equal("caret")
+        expect(kimi.provider).to_equal("kimi")
+        expect(kimi.model).to_equal("")
+
+        val deepseek = parse_harness_spec("caret:deepseek")
+        assert_true(deepseek.valid)
+        expect(deepseek.harness).to_equal("caret")
+        expect(deepseek.provider).to_equal("deepseek")
+        expect(deepseek.model).to_equal("")
+
+    it "reads a caret provider and model together":
+        step("parse caret:glm/glm-4.6 and caret:slang/deepseek-v3")
+        val glm = parse_harness_spec("caret:glm/glm-4.6")
+        assert_true(glm.valid)
+        expect(glm.harness).to_equal("caret")
+        expect(glm.provider).to_equal("glm")
+        expect(glm.model).to_equal("glm-4.6")
+
+        val slang = parse_harness_spec("caret:slang/deepseek-v3")
+        assert_true(slang.valid)
+        expect(slang.harness).to_equal("caret")
+        expect(slang.provider).to_equal("slang")
+        expect(slang.model).to_equal("deepseek-v3")
+
+    it "round-trips every accepted spec back to the same short form":
+        step("display(parse(x)) == x for each accepted example")
+        expect(harness_spec_display(parse_harness_spec("claude"))).to_equal("claude")
+        expect(harness_spec_display(parse_harness_spec("claude/opus"))).to_equal("claude/opus")
+        expect(harness_spec_display(parse_harness_spec("codex"))).to_equal("codex")
+        expect(harness_spec_display(parse_harness_spec("kimi"))).to_equal("kimi")
+        expect(harness_spec_display(parse_harness_spec("opencode"))).to_equal("opencode")
+        expect(harness_spec_display(parse_harness_spec("gemini"))).to_equal("gemini")
+        expect(harness_spec_display(parse_harness_spec("caret"))).to_equal("caret")
+        expect(harness_spec_display(parse_harness_spec("caret:kimi"))).to_equal("caret:kimi")
+        expect(harness_spec_display(parse_harness_spec("caret:deepseek"))).to_equal("caret:deepseek")
+        expect(harness_spec_display(parse_harness_spec("caret:glm/glm-4.6"))).to_equal("caret:glm/glm-4.6")
+        expect(harness_spec_display(parse_harness_spec("caret:slang/deepseek-v3"))).to_equal("caret:slang/deepseek-v3")
+
+    it "rejects an empty launch spec with a specific error":
+        step("parse the empty string")
+        val spec = parse_harness_spec("")
+        assert_false(spec.valid)
+        assert_true(spec.error != "")
+        expect(spec.error).to_contain("empty launch spec")
+
+    it "rejects an unknown harness naming the offending token":
+        step("parse foo")
+        val spec = parse_harness_spec("foo")
+        assert_false(spec.valid)
+        assert_true(spec.error != "")
+        expect(spec.error).to_contain("unknown harness")
+        expect(spec.error).to_contain("foo")
+
+    it "rejects a provider on a CLI harness because only caret takes one":
+        step("parse claude:glm")
+        val spec = parse_harness_spec("claude:glm")
+        assert_false(spec.valid)
+        assert_true(spec.error != "")
+        expect(spec.error).to_contain("does not take a provider")
+        expect(spec.error).to_contain("claude")
+
+    it "rejects an empty right-hand side after the separator":
+        step("parse caret: and claude/")
+        val caret = parse_harness_spec("caret:")
+        assert_false(caret.valid)
+        assert_true(caret.error != "")
+        expect(caret.error).to_contain("empty provider")
+
+        val claude = parse_harness_spec("claude/")
+        assert_false(claude.valid)
+        assert_true(claude.error != "")
+        expect(claude.error).to_contain("empty model")
+
+    it "rejects more than one separator of either kind":
+        step("parse caret:glm:extra and claude/opus/4")
+        val colons = parse_harness_spec("caret:glm:extra")
+        assert_false(colons.valid)
+        assert_true(colons.error != "")
+        expect(colons.error).to_contain("at most one ':'")
+
+        val slashes = parse_harness_spec("claude/opus/4")
+        assert_false(slashes.valid)
+        assert_true(slashes.error != "")
+        expect(slashes.error).to_contain("at most one '/'")
+
+    it "rejects an unknown caret provider":
+        step("parse caret:nosuch")
+        val spec = parse_harness_spec("caret:nosuch")
+        assert_false(spec.valid)
+        assert_true(spec.error != "")
+        expect(spec.error).to_contain("unknown caret provider")
+
+    it "rejects a colon that follows the slash":
+        step("parse caret/glm:4")
+        val spec = parse_harness_spec("caret/glm:4")
+        assert_false(spec.valid)
+        assert_true(spec.error != "")
+        expect(spec.error).to_contain("must precede")
+
+    it "separates the CLI harnesses from the caret TUI harness":
+        step("classify each accepted harness")
+        assert_true(harness_is_cli(parse_harness_spec("claude")))
+        assert_true(harness_is_cli(parse_harness_spec("codex")))
+        assert_true(harness_is_cli(parse_harness_spec("kimi")))
+        assert_true(harness_is_cli(parse_harness_spec("opencode")))
+        assert_true(harness_is_cli(parse_harness_spec("gemini")))
+        assert_false(harness_is_cli(parse_harness_spec("caret:kimi")))
+        assert_false(harness_is_cli(parse_harness_spec("foo")))
+
+    it "maps each CLI harness onto the token the agent runtime expects":
+        step("map harnesses to agent runtime provider tokens")
+        expect(harness_agent_provider(parse_harness_spec("claude"))).to_equal("claude")
+        expect(harness_agent_provider(parse_harness_spec("codex"))).to_equal("codex")
+        expect(harness_agent_provider(parse_harness_spec("kimi"))).to_equal("kimi")
+        expect(harness_agent_provider(parse_harness_spec("gemini"))).to_equal("gemini")
+        expect(harness_agent_provider(parse_harness_spec("opencode"))).to_equal("opencode_cli")
+        expect(harness_agent_provider(parse_harness_spec("caret:glm"))).to_equal("")
+        expect(harness_agent_provider(parse_harness_spec("foo"))).to_equal("")
+
+    it "publishes the harness and caret provider vocabularies":
+        step("read the advertised vocabularies")
+        val harnesses = known_harnesses()
+        expect(harnesses.len()).to_equal(6)
+        expect(harnesses).to_contain("caret")
+        expect(harnesses).to_contain("opencode")
+
+        val providers = known_caret_providers()
+        expect(providers).to_contain("glm")
+        expect(providers).to_contain("slang")
+        expect(providers).to_contain("deepseek")
+        expect(providers).to_contain("local_torch")

@@ -1,0 +1,197 @@
+# Toolchain build-log optimizers — dynamically loaded plugin descriptors.
+#
+# The ctx mimic already smart-truncates program output, but truncation is
+# blind: a 40k ninja log is 95% progress lines and the one `error:` that
+# matters can sit past the cap. These plugins classify lines instead, so the
+# error survives and the noise does not reach the model.
+#
+# A plugin is ONE SDN file under `config/log_opt/` (override with
+# SIMPLE_LOG_OPT_DIR). Its name is the file's basename. Drop a new file in
+# and it is live on the next call — no code change, no rebuild:
+#
+#   log_opt | kind, pattern |
+#       detect, ninja: build stopped
+#       keep,   error:
+#       drop,   ^[
+#
+#   detect  any match claims the log for this plugin (highest hit count wins)
+#   keep    line is always retained — checked BEFORE drop
+#   drop    line is removed
+#
+# Patterns are plain substrings; a leading `^` anchors to the line start.
+# Deliberately not regex: a descriptor is data a user edits by hand, and a
+# bad regex in a log filter fails the whole capture.
+#
+# ponytail: substring/anchor matching only. Upgrade to the std regex engine
+# when a real toolchain needs alternation that `detect` rows cannot express.
+
+use std.io_runtime.{env_get, file_read, file_exists, dir_list}
+use std.database.core.{parse_sdn_table}
+use .main_lazy_telemetry.{tok_record}
+
+const LOG_OPT_FEATURE: text = "logopt"
+
+struct LogOptPlugin:
+    name: text
+    detect: [text]
+    keep: [text]
+    drop: [text]
+
+fn log_opt_dir() -> text:
+    val override = env_get("SIMPLE_LOG_OPT_DIR") ?? ""
+    if override != "":
+        return override
+    "config/log_opt"
+
+# A leading '^' anchors; everything else is a substring test.
+fn log_opt_match(pattern: text, line: text) -> bool:
+    if pattern == "":
+        return false
+    if pattern.starts_with("^"):
+        return line.starts_with(pattern.substring(1, pattern.len()))
+    line.contains(pattern)
+
+fn log_opt_any(patterns: [text], line: text) -> bool:
+    for p in patterns:
+        if log_opt_match(p, line):
+            return true
+    false
+
+fn log_opt_parse(name: text, content: text) -> LogOptPlugin?:
+    val table = parse_sdn_table(content)
+    var detect: [text] = []
+    var keep: [text] = []
+    var drop: [text] = []
+    match table:
+        Some(t):
+            for row in t.rows:
+                val kind = (row.get("kind") ?? "").trim()
+                val pattern = (row.get("pattern") ?? "").trim()
+                if pattern == "":
+                    continue
+                if kind == "detect":
+                    detect.push(pattern)
+                elif kind == "keep":
+                    keep.push(pattern)
+                elif kind == "drop":
+                    drop.push(pattern)
+        nil:
+            return nil
+    if detect.len() == 0:
+        return nil
+    LogOptPlugin(name: name, detect: detect, keep: keep, drop: drop)
+
+fn _log_opt_basename(entry: text) -> text:
+    val parts = entry.split("/")
+    var name = parts[parts.len() - 1]
+    if name.ends_with(".sdn"):
+        return name.substring(0, name.len() - 4)
+    name
+
+fn log_opt_load_plugins() -> [LogOptPlugin]:
+    var out: [LogOptPlugin] = []
+    val dir = log_opt_dir()
+    if not file_exists(dir):
+        return out
+    for entry in dir_list(dir):
+        if not entry.ends_with(".sdn"):
+            continue
+        val path = if entry.contains("/"): entry else: dir + "/" + entry
+        if not file_exists(path):
+            continue
+        match log_opt_parse(_log_opt_basename(entry), file_read(path)):
+            Some(p):
+                out.push(p)
+            nil:
+                pass
+    out
+
+# How many detect rows this plugin hits — the selector, so a log that looks
+# like two toolchains (cmake driving ninja) goes to the stronger match.
+fn log_opt_score(p: LogOptPlugin, lines: [text]) -> i64:
+    var n: i64 = 0
+    for line in lines:
+        if log_opt_any(p.detect, line):
+            n = n + 1
+    n
+
+fn log_opt_select(plugins: [LogOptPlugin], lines: [text]) -> LogOptPlugin?:
+    var best: LogOptPlugin? = nil
+    var best_score: i64 = 0
+    for p in plugins:
+        val s = log_opt_score(p, lines)
+        if s > best_score:
+            best_score = s
+            best = p
+    best
+
+# Keep wins over drop; consecutive identical retained lines collapse.
+fn log_opt_apply(p: LogOptPlugin, lines: [text]) -> ([text], i64):
+    var out: [text] = []
+    var dropped: i64 = 0
+    var prev = ""
+    # `prev` alone cannot mean "nothing emitted yet": a log whose FIRST retained
+    # line is empty would compare equal to the initial "" and be collapsed as a
+    # repeat of a line that was never emitted.
+    var has_prev = false
+    var repeat: i64 = 0
+    for line in lines:
+        if not log_opt_any(p.keep, line) and log_opt_any(p.drop, line):
+            dropped = dropped + 1
+            continue
+        if has_prev and line == prev:
+            repeat = repeat + 1
+            dropped = dropped + 1
+            continue
+        if repeat > 0:
+            out.push("    ... previous line repeated " + str(repeat) + " more time(s)")
+            repeat = 0
+        out.push(line)
+        prev = line
+        has_prev = true
+    if repeat > 0:
+        out.push("    ... previous line repeated " + str(repeat) + " more time(s)")
+    (out, dropped)
+
+# Returns (optimized_text, plugin_name, dropped_lines). plugin_name is "" when
+# no descriptor claims the log — the caller then keeps the text untouched.
+fn log_opt_optimize(raw: text) -> (text, text, i64):
+    if raw == "":
+        return ("", "", 0)
+    val lines = raw.split("\n")
+    val plugins = log_opt_load_plugins()
+    match log_opt_select(plugins, lines):
+        Some(p):
+            val (kept, dropped) = log_opt_apply(p, lines)
+            if dropped == 0:
+                return (raw, p.name, 0)
+            var body = kept.join("\n")
+            body = body + "\n[log-opt " + p.name + "] " + str(dropped) + " noise line(s) removed of " + str(lines.len())
+            return (body, p.name, dropped)
+        nil:
+            pass
+    (raw, "", 0)
+
+# Same, and records the saving under feature `logopt` / tool `logopt:<name>`
+# so `simple_token_burn` attributes it per plugin without extra bookkeeping.
+fn log_opt_optimize_recorded(raw: text) -> text:
+    val (body, name, dropped) = log_opt_optimize(raw)
+    if name != "" and dropped > 0:
+        tok_record(LOG_OPT_FEATURE, "logopt:" + name, raw.len(), body.len(), false)
+    body
+
+fn log_opt_plugins_text() -> text:
+    val plugins = log_opt_load_plugins()
+    var lines: [text] = []
+    lines.push("log-opt plugin dir: " + log_opt_dir())
+    if plugins.len() == 0:
+        lines.push("(no descriptors found — drop a <name>.sdn there to add one)")
+        return lines.join("\n")
+    for p in plugins:
+        lines.push(p.name + ": detect=" + str(p.detect.len()) + " keep=" + str(p.keep.len()) + " drop=" + str(p.drop.len()))
+    lines.join("\n")
+
+export LogOptPlugin, LOG_OPT_FEATURE
+export log_opt_dir, log_opt_match, log_opt_any, log_opt_parse, log_opt_load_plugins
+export log_opt_score, log_opt_select, log_opt_apply, log_opt_optimize
+export log_opt_optimize_recorded, log_opt_plugins_text

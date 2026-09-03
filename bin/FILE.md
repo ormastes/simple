@@ -8,6 +8,9 @@ Executables, wrappers, and MCP server launchers.
 |---|---|
 | `bb` | Bug tool |
 | `bug` | Bug report tool |
+| `caret` | LLM Caret launcher |
+| `cs` | Caret suite (multi-agent session view) |
+| `cs.cmd` | Windows caret-suite wrapper |
 | `jira` | Jira CLI |
 | `mail` | Email CLI |
 | `release` | Release directory |
