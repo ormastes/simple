@@ -16,16 +16,29 @@ pub fn simple_lint_adapter_result(
     warning_count: u32,
     infrastructure_failed: bool = false
 ) -> SimpleLintAdapterResult:
-    val completed_phases: u64 = if completed_units == requested_units and requested_units > 0: 1 else: 0
+    var impossible_coverage = (
+        not_analyzed_units > requested_units or
+        completed_units > requested_units or
+        completed_rules > requested_rules)
+    if not impossible_coverage:
+        impossible_coverage = not_analyzed_units > requested_units - completed_units
+    var admitted_units: u32 = 0
+    var partial_units: u32 = 0
+    var skipped_rules: u32 = 0
+    if not impossible_coverage:
+        admitted_units = requested_units - not_analyzed_units
+        partial_units = requested_units - completed_units - not_analyzed_units
+        skipped_rules = requested_rules - completed_rules
+    val completed_phases: u64 = if not impossible_coverage and completed_units == requested_units and requested_units > 0: 1 else: 0
     val coverage = AnalysisCoverageV1(
         requested_unit_count: requested_units,
-        admitted_unit_count: requested_units - not_analyzed_units,
+        admitted_unit_count: admitted_units,
         completed_unit_count: completed_units,
-        partial_unit_count: if completed_units > 0 and completed_units < requested_units: requested_units - completed_units - not_analyzed_units else: 0,
+        partial_unit_count: partial_units,
         not_analyzed_unit_count: not_analyzed_units,
         requested_rule_count: requested_rules,
         completed_rule_count: completed_rules,
-        skipped_rule_count: requested_rules - completed_rules,
+        skipped_rule_count: skipped_rules,
         requested_phase_bits: 1,
         completed_phase_bits: completed_phases,
         provider_receipt_digest: kpf_digest256_zero(),
@@ -33,9 +46,9 @@ pub fn simple_lint_adapter_result(
     )
     val result = lint_run_result(
         coverage, diagnostic_count, error_count, warning_count,
-        false, infrastructure_failed)
+        false, infrastructure_failed or impossible_coverage)
     var exit_code: i64 = 0
-    if error_count > 0 or not_analyzed_units > 0 or infrastructure_failed or requested_units == 0:
+    if error_count > 0 or not_analyzed_units > 0 or infrastructure_failed or impossible_coverage or requested_units == 0:
         exit_code = 1
     SimpleLintAdapterResult(exit_code: exit_code, kernel_result: result)
 
