@@ -1,0 +1,43 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
+use app.io.cli_ops.{cli_release_runtime_must_not_use_repo_wrapper}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_public_interpret_bridge.{interpret_bridge_result}
+
+describe "source execution failure diagnostics":
+    it "uses the in-process interpreter instead of a source-tree subprocess bridge":
+        val source = read_file("src/app/io/_CliCommands/run_commands.spl")
+        expect(source).to_contain("use compiler.driver.driver_api_interpret.{interpret_file}")
+        expect(source.contains("use compiler.driver.driver_api_core.{interpret_file}")).to_equal(false)
+
+    it "rejects a repository launcher from an already deployed release runtime":
+        expect(cli_release_runtime_must_not_use_repo_wrapper(
+            "bin/simple",
+            "/repo/bin/release/macos-arm64/simple"
+        )).to_equal(true)
+        expect(cli_release_runtime_must_not_use_repo_wrapper(
+            "/repo/bin/simple",
+            "/repo/bin/release/aarch64-apple-darwin-macho/simple"
+        )).to_equal(true)
+        expect(cli_release_runtime_must_not_use_repo_wrapper(
+            "src/compiler_rust/target/bootstrap/simple",
+            "/repo/bin/release/macos-arm64/simple"
+        )).to_equal(false)
+
+    it "preserves a nonzero external interpreter exit as a typed failure":
+        val result = interpret_bridge_result("bin/simple", "", "unknown command 'run'", 1)
+        match result:
+            case CompileResult.RuntimeError(message):
+                expect(message).to_contain("exit code 1")
+                expect(message).to_contain("unknown command 'run'")
+            case _:
+                expect(false).to_equal(true)
+
+    it "reports a nonzero silent external interpreter exit":
+        val result = interpret_bridge_result("bin/simple", "", "", 127)
+        match result:
+            case CompileResult.RuntimeError(message):
+                expect(message).to_contain("exit code 127")
+                expect(message).to_contain("produced no diagnostic")
+            case _:
+                expect(false).to_equal(true)
