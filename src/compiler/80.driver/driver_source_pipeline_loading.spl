@@ -35,9 +35,11 @@ use compiler.driver.cache.route_capability_scope.{
     route_capability_scope_register_v1
 }
 use compiler.hir.archive.interface_action_archive.{
+    SemanticContext, CompileActionRegistry,
+    RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1,
     interface_action_archive_decode_v1, route_archive_install_begin_v1,
-    route_archive_install_stage_v1, route_archive_install_commit_v1,
-    route_archive_install_rollback_v1
+    route_archive_install_stage_owned_v1, route_archive_install_commit_owned_v1,
+    route_archive_install_rollback_owned_v1
 }
 use compiler.driver.action_graph.demand_compile_integration.{
     demand_archive_action_id_v1, demand_compile_begin_v1,
@@ -327,7 +329,8 @@ impl CompilerDriver:
             for admission in route.archive_admissions:
                 if admission.load.receipt == nil:
                     _ = route_capability_scope_close_all_v1(&capability_scope)
-                    route_archive_install_rollback_v1(&mut archive_transaction)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
                     self.ctx.add_error(
                         "package archive receipt unavailable: {admission.package_identity}")
                     driver_entry_scan_cache_release()
@@ -337,7 +340,8 @@ impl CompilerDriver:
                     admission.load.receipt!)
                 if opened.is_err():
                     _ = route_capability_scope_close_all_v1(&capability_scope)
-                    route_archive_install_rollback_v1(&mut archive_transaction)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
                     self.ctx.add_error(
                         "package archive pin failed: {admission.package_identity}")
                     driver_entry_scan_cache_release()
@@ -346,7 +350,8 @@ impl CompilerDriver:
                 if route_capability_scope_register_v1(
                         &capability_scope, capability).is_err():
                     _ = route_capability_scope_close_all_v1(&capability_scope)
-                    route_archive_install_rollback_v1(&mut archive_transaction)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
                     self.ctx.add_error(
                         "package archive capability ownership failed: {admission.package_identity}")
                     driver_entry_scan_cache_release()
@@ -355,7 +360,8 @@ impl CompilerDriver:
                     capability, admission.load.receipt!)
                 if decoded.is_err():
                     _ = route_capability_scope_close_all_v1(&capability_scope)
-                    route_archive_install_rollback_v1(&mut archive_transaction)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
                     self.ctx.add_error(
                         "package archive decode failed: {admission.package_identity}")
                     driver_entry_scan_cache_release()
@@ -363,11 +369,13 @@ impl CompilerDriver:
                 self.ctx.demand_compile_execution = Some(
                     demand_compile_section_reads_v1(
                         self.ctx.demand_compile_execution!, 3))
-                val staged = route_archive_install_stage_v1(
-                    &mut archive_transaction, decoded.unwrap())
-                if staged.is_err():
+                val staged = route_archive_install_stage_owned_v1(
+                    archive_transaction, decoded.unwrap())
+                archive_transaction = staged.transaction
+                if staged.result.is_err():
                     _ = route_capability_scope_close_all_v1(&capability_scope)
-                    route_archive_install_rollback_v1(&mut archive_transaction)
+                    archive_transaction = route_archive_install_rollback_owned_v1(
+                        archive_transaction)
                     self.ctx.add_error(
                         "package archive install failed: {admission.package_identity}")
                     driver_entry_scan_cache_release()
@@ -384,10 +392,13 @@ impl CompilerDriver:
                         admission.load.receipt!.producer_digest,
                         admission.load.receipt!.variant_digest,
                         demand_snapshot))
-            val committed = route_archive_install_commit_v1(
-                &mut archive_transaction, &mut self.ctx.archive_semantic_owner,
-                &mut self.ctx.archive_action_owner)
-            if committed.is_err():
+            val committed = route_archive_install_commit_owned_v1(
+                archive_transaction, self.ctx.archive_semantic_owner,
+                self.ctx.archive_action_owner)
+            archive_transaction = committed.transaction
+            self.ctx.archive_semantic_owner = committed.semantic_owner
+            self.ctx.archive_action_owner = committed.action_owner
+            if committed.result.is_err():
                 _ = route_capability_scope_close_all_v1(&capability_scope)
                 self.ctx.add_error("package archive route commit failed")
                 driver_entry_scan_cache_release()

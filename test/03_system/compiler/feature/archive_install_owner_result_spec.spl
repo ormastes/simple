@@ -1,0 +1,38 @@
+use std.spec.*
+use compiler.hir.archive.interface_action_archive.{
+    CompileActionRegistry, InterfaceActionArchiveV1, InterfaceArchiveSymbolV1,
+    CompileArchiveActionV1, SemanticContext, route_archive_install_begin_v1,
+    route_archive_install_stage_owned_v1, route_archive_install_commit_owned_v1,
+    route_archive_install_rollback_owned_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+
+fn test_variant_v1() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1("test", "test", [], "test", "v1", [], [])
+
+describe "archive install owner-result lifecycle":
+    it "returns one transaction owner through stage and rollback":
+        val archive = InterfaceActionArchiveV1(
+            "pkg", test_variant_v1(), "producer", [], "interface", "actions",
+            [], [])
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), archive)
+        expect(staged.result.is_ok()).to_be(true)
+        val rolled_back = route_archive_install_rollback_owned_v1(
+            staged.transaction)
+        expect(rolled_back.closed).to_be(true)
+        expect(rolled_back.archives.len()).to_equal(0)
+
+    it "publishes both owners only through commit":
+        val archive = InterfaceActionArchiveV1(
+            "pkg", test_variant_v1(), "producer", [], "interface", "actions",
+            [], [])
+        val staged = route_archive_install_stage_owned_v1(
+            route_archive_install_begin_v1(), archive)
+        val committed = route_archive_install_commit_owned_v1(
+            staged.transaction, SemanticContext([], []),
+            CompileActionRegistry([], []))
+        expect(committed.result.is_ok()).to_be(true)
+        expect(committed.transaction.closed).to_be(true)
+        expect(committed.semantic_owner.archive_package_keys).to_contain("pkg")
+        expect(committed.action_owner.archive_package_keys).to_contain("pkg")
