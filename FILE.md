@@ -45,8 +45,17 @@ FILE.md files) are allowed.
 | `.spipe` | SPipe state files |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
+| `.claude-plugin` | Claude Code plugin manifest |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
+| `docs` | Generated spec samples (INDEX/README/test-spec); distinct from `doc/` |
+| `assets` | Fonts and other binary assets consumed by tests and packaging |
+| `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
+| `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
+| `var` | Runtime sample state for web-stack integration specs |
+| `variants` | Platform variant overlays (see `variants/FILE.md`) |
+| `target` | `gc-boundary-check-tests` fixture read by `driver/src/cli/check.rs` |
+| `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
 
 **No other files at root.**
 
