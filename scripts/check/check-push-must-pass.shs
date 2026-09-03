@@ -150,7 +150,7 @@ validate_ledger_text() {
     # implementation launched awk/sed/tr once per field per row (roughly 400
     # processes for the current ledger), dominating the supposedly light hook.
     awk -F, -v want_fp="$_want_fp" -v allow_unpromoted="$ALLOW_UNPROMOTED_LEDGER" \
-        -v required="$REQUIRED_BOOTSTRAP_IDS" '
+        -v required="$(printf '%s' "$REQUIRED_BOOTSTRAP_IDS" | tr '\n' ' ')" '
         function trim(v) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); return v }
         function unquote(v) { v=trim(v); sub(/^"/, "", v); sub(/"$/, "", v); return v }
         function fail() { bad=1 }
@@ -189,7 +189,13 @@ validate_ledger_text() {
             unpromoted=(fingerprint == "unrecorded" && allow_unpromoted == 1)
             if (!unpromoted && fingerprint != want_fp) fail()
             if (manifest_count != ledger_count) fail()
-            required_count=split(required, required_ids, "\n")
+            # Split on runs of space OR newline. `required` is handed in
+            # newline-flattened because a literal newline inside an awk -v
+            # assignment is a hard error on BSD awk (macOS): the whole guard died
+            # with "awk: newline in string compiler-stage1\ncomp... at source
+            # line 1" and every push from a mac was rejected as "ledger is
+            # malformed". gawk accepted it, which is why it went unnoticed.
+            required_count=split(required, required_ids, /[ \n]+/)
             for (i=1; i<=required_count; i++)
                 if (required_ids[i] != "" && !(required_ids[i] in manifest_seen)) fail()
             for (id in ledger_seen) if (!(id in manifest_seen)) fail()
