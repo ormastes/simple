@@ -19,6 +19,12 @@ Decision source: user-final-performance-authority-2026-09-02
   native-build owners, hash every semantic field, and reject unknown or omitted
   schema fields; representative no-mangle, package-index, safety/type-profile,
   backend/linker, provider, and bootstrap controls shall be mutation-tested.
+  When environment enumeration is available, identity shall additionally hash
+  a sorted presence-aware snapshot of every present `SIMPLE_*` control. A
+  repository-wide owned-code registry audit shall fail when any new literal
+  environment read appears before its compile impact is reviewed. Only
+  diagnostics/cache destinations and temporary staging locations proven not to
+  affect artifact bytes may omit explicit absent rows.
 - **MBH-NFR-003 — Bounded residency.** Evidence shall record wall time, CPU,
   peak/retained RSS, cache counts, and critical path. Each architecture shall
   supply an admitted baseline receipt bound to that architecture, its baseline

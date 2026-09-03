@@ -1,5 +1,6 @@
 use simple_compiler::hir;
 use simple_parser::Parser;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,6 +31,57 @@ fn assert_environment_reads_classified(repository: &PathBuf, relative: &str, sch
             }
         }
     }
+}
+
+fn owned_environment_read_registry(repository: &PathBuf) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut pending = vec![
+        repository.join("src/compiler"),
+        repository.join("src/lib"),
+        repository.join("src/runtime"),
+        repository.join("src/app/cli"),
+        repository.join("src/app/io/_CliCompile"),
+    ];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(&path).expect("read owned-code directory") {
+                let child = entry.expect("read owned-code entry").path();
+                if child.to_string_lossy().contains("/vendor/") {
+                    continue;
+                }
+                pending.push(child);
+            }
+            continue;
+        }
+        let extension = path.extension().and_then(|value| value.to_str());
+        if extension != Some("spl") && extension != Some("c") {
+            continue;
+        }
+        let source = fs::read_to_string(path).expect("read owned-code source");
+        for prefix in ["env_get(\"", "env_get_opt(\"", "env_get_nullable(\"", "getenv(\""] {
+            let mut remainder = source.as_str();
+            while let Some(start) = remainder.find(prefix) {
+                remainder = &remainder[start + prefix.len()..];
+                let end = remainder.find('\"').expect("terminated environment read");
+                let name = &remainder[..end];
+                if !name.is_empty() && name.bytes().all(|byte|
+                    byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit()) {
+                    names.insert(name.to_string());
+                }
+                remainder = &remainder[end + 1..];
+            }
+        }
+    }
+    names
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 14_695_981_039_346_656_037_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash
 }
 
 fn parse_and_lower(repository: &PathBuf, relative: &str) {
@@ -135,6 +187,13 @@ fn native_zero_work_admission_precedes_every_compiler_phase() {
         &repository, "src/compiler/80.driver", &environment_schema);
     assert_environment_reads_classified(
         &repository, "src/app/io/_CliCompile/compile_targets.spl", &environment_schema);
+    let registry = owned_environment_read_registry(&repository);
+    assert_eq!(registry.len(), 373,
+        "owned-code environment registry changed; classify the new field before updating evidence");
+    let registry_text = registry.into_iter().collect::<Vec<_>>().join("\n") + "\n";
+    assert_eq!(format!("{:016x}", fnv1a64(registry_text.as_bytes())),
+        "d3c4842dba7bbc90",
+        "owned-code environment registry digest changed; review compile impact before updating");
     parse_and_lower(&repository, "src/compiler/80.driver/cache/native_noop_admission.spl");
     parse_and_lower(&repository, "src/compiler/80.driver/cache/native_build_environment_identity.spl");
     parse_and_lower(&repository, "src/compiler/80.driver/perf/compiler_work_counters.spl");
