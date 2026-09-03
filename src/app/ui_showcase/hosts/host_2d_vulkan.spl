@@ -48,6 +48,7 @@ class Screen2dVulkanHost:
     var last_pixels: [u32]
     var last_receipt: text
     var last_rejection: text
+    var host_valid: bool
 
     static fn open(w: i32, h: i32, script: text) -> Screen2dVulkanHost?:
         if w <= 0 or h <= 0:
@@ -59,7 +60,8 @@ class Screen2dVulkanHost:
         Screen2dVulkanHost(
             w: w, h: h, engine: engine,
             queue: screen_2d_parse_script(script), cursor: 0,
-            last_pixels: [], last_receipt: "", last_rejection: "not-rendered"
+            last_pixels: [], last_receipt: "", last_rejection: "not-rendered",
+            host_valid: true
         )
 
     me _reject(reason: text) -> bool:
@@ -101,12 +103,19 @@ class Screen2dVulkanHost:
             "backend_handle={result.backend_handle} device_identity={result.device_identity} " +
             "checksum={result.readback_checksum} rendered={result.rendered_command_count} " +
             "font_target={result.font_execution_target} font_identity={result.font_identity} " +
-            "font_batch={result.font_batch_identity} font_source={result.font_readback_source}"
+            "font_batch={result.font_batch_identity} font_source={result.font_readback_source} " +
+            "font_device_checksum={result.font_device_checksum} " +
+            "font_oracle_checksum={result.font_oracle_checksum} " +
+            "font_nonblank={result.font_readback_nonblank_pixels} " +
+            "font_atlas_sha256={result.font_atlas_payload_sha256} " +
+            "font_parity={result.font_parity}"
         )
         self.last_rejection = ""
         true
 
     me present_composition(composition: DrawIrComposition) -> bool:
+        if not self.host_valid:
+            return self._reject("vulkan-resize-rejected")
         self._accept_fresh_device_result(composition)
 
     me pixels() -> [u32]: self.last_pixels
@@ -125,6 +134,24 @@ impl ScreenHost for Screen2dVulkanHost:
             return nil
         val event = self.queue[self.cursor]
         self.cursor = self.cursor + 1
+        match event:
+            HostInputEvent.Resize(resize_w, resize_h):
+                if resize_w > 0 and resize_h > 0:
+                    val replacement = Engine2D.create_with_backend_fast(
+                        resize_w, resize_h, "vulkan")
+                    if replacement.backend_name() != "vulkan":
+                        replacement.shutdown()
+                        self.host_valid = false
+                    else:
+                        self.engine.shutdown()
+                        self.engine = replacement
+                        self.w = resize_w
+                        self.h = resize_h
+                        self.last_pixels = []
+                        self.last_receipt = ""
+                        self.last_rejection = "not-rendered-after-resize"
+            _:
+                pass
         event
 
     me shutdown():
@@ -151,7 +178,8 @@ fn showcase_run_with_backend(host: Screen2dVulkanHost, prefix: text,
         frames = frames + 1
         var event = host.poll_input()
         while event != nil:
-            state = showcase_apply(state, event!, w, h)
+            val (event_w, event_h) = host.size()
+            state = showcase_apply(state, event!, event_w, event_h)
             event = host.poll_input()
     showcase_report(state, host.host_name(), frames)
 
