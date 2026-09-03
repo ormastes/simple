@@ -512,14 +512,36 @@ fn emu_draw_circle_thick(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colo
     val r_inner = _emu_max(r - thickness, 0)
     val r_outer_sq = r_outer * r_outer
     val r_inner_sq = r_inner * r_inner
+    # Span form of the same annulus test. The old body scanned the whole
+    # (2r+1)^2 bounding box and emitted a 1x1 rect per covered pixel; on a GPU
+    # backend a 1x1 draw_rect_filled is a COMPUTE DISPATCH, so an r=35 ring
+    # cost ~1021 dispatches (measured 9.1-10.0 ms on vulkan vs 0.12 ms on cpu).
+    # See doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md
+    #
+    # Each row of an annulus is at most TWO horizontal runs, and the run bounds
+    # are exact integers, so coverage is pixel-identical to the per-pixel test:
+    #   included iff px*px + py*py <= r_outer_sq AND >= r_inner_sq
+    #   outer: |px| <= ho where ho = floor(sqrt(r_outer_sq - py*py))
+    #   inner: excluded iff px*px < d, d = r_inner_sq - py*py, i.e. |px| <= hi
+    #          where hi is the largest integer with hi*hi < d
     var py: i32 = -r_outer
     while py <= r_outer:
-        var px: i32 = -r_outer
-        while px <= r_outer:
-            val dist_sq = px * px + py * py
-            if dist_sq <= r_outer_sq and dist_sq >= r_inner_sq:
-                core.draw_rect_filled(cx + px, cy + py, 1, 1, color)
-            px = px + 1
+        val outer_rem = r_outer_sq - py * py
+        if outer_rem >= 0:
+            val ho = _emu_isqrt(outer_rem)
+            val d = r_inner_sq - py * py
+            if d <= 0:
+                core.draw_rect_filled(cx - ho, cy + py, 2 * ho + 1, 1, color)
+            else:
+                var hi = _emu_isqrt(d)
+                if hi * hi >= d:
+                    hi = hi - 1
+                if hi >= ho:
+                    pass
+                else:
+                    val run = ho - hi
+                    core.draw_rect_filled(cx - ho, cy + py, run, 1, color)
+                    core.draw_rect_filled(cx + hi + 1, cy + py, run, 1, color)
         py = py + 1
 
 # ============================================================================
