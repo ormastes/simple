@@ -9,6 +9,10 @@ use std.nogc_async_mut_noalloc.kernel_plugin.fixed_arena.{
     KpfFixedArena,
     KpfFixedArenaStatus,
 }
+use std.nogc_async_mut_noalloc.kernel_plugin.allocation_probe.{
+    KpfAllocationProbe,
+    KpfRuntimeAllocationStatus,
+}
 
 pub enum KpfNoallocPhase:
     Configuring
@@ -64,6 +68,7 @@ pub class KpfFixedRuntime:
     requests: [KpfFixedRequestSlot]
     open_session_count_value: i32
     inflight_request_count_value: i32
+    allocation_probe: KpfAllocationProbe
 
     pub static fn create(config: KpfFixedRuntimeConfig) -> Result<KpfFixedRuntime, KpfNoallocStatus>:
         if not kpf_validate_memory_contract_v1(config.memory).accepted():
@@ -104,12 +109,14 @@ pub class KpfFixedRuntime:
             requests: requests,
             open_session_count_value: 0,
             inflight_request_count_value: 0,
+            allocation_probe: KpfAllocationProbe.create(),
         ))
 
     pub me activate() -> KpfNoallocStatus:
         if self.phase_value != KpfNoallocPhase.Configuring:
             return KpfNoallocStatus.InvalidPhase
         self.arena.activate()
+        self.allocation_probe.activate()
         self.phase_value = KpfNoallocPhase.Active
         KpfNoallocStatus.Ok
 
@@ -225,6 +232,12 @@ pub class KpfFixedRuntime:
 
     pub fn arena_high_water_bytes() -> u64:
         self.arena.high_water()
+
+    pub fn post_activation_allocation_count() -> u64:
+        self.allocation_probe.allocation_count()
+
+    pub fn allocation_proof_status() -> KpfRuntimeAllocationStatus:
+        self.allocation_probe.status()
 
     fn session_valid(handle: KpfSessionHandle) -> bool:
         handle.slot >= 0 and handle.slot < self.sessions.len and

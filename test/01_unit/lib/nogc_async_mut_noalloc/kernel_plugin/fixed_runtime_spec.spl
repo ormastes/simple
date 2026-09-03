@@ -10,6 +10,7 @@ use std.nogc_async_mut_noalloc.kernel_plugin.fixed_runtime.{
     KpfNoallocPhase,
     KpfNoallocStatus,
 }
+use std.nogc_async_mut_noalloc.kernel_plugin.allocation_probe.KpfAllocationProofStatus
 use std.spec.step
 
 fn memory_contract(maximum_sessions: u32, maximum_inflight: u32) -> KpfMemoryContractV1:
@@ -77,18 +78,43 @@ describe "strict fixed-capacity KPF projection":
     it "accounts arena bytes exactly across the active lifecycle":
         step("Exercise valid open submit complete close arena reservations")
         var value = runtime(28u64, 1u32, 1u32, 1)
-        expect(value.activate()).to_equal(KpfNoallocStatus.Ok)
-        expect(value.arena_used_bytes()).to_equal(8u64)
+        val activation_status = value.activate()
+        val initial_used_bytes = value.arena_used_bytes()
         val session = value.open_session()
-        expect(session.status).to_equal(KpfNoallocStatus.Ok)
-        expect(value.arena_used_bytes()).to_equal(24u64)
+        val session_used_bytes = value.arena_used_bytes()
         val request = value.submit(session.handle)
+        val request_used_bytes = value.arena_used_bytes()
+        val high_water_bytes = value.arena_high_water_bytes()
+        val complete_status = value.complete(request.handle)
+        val close_status = value.close_session(session.handle)
+        val final_used_bytes = value.arena_used_bytes()
+        val observed_count = value.post_activation_allocation_count()
+        val observed_status = value.allocation_proof_status()
+        expect(activation_status).to_equal(KpfNoallocStatus.Ok)
+        expect(initial_used_bytes).to_equal(8u64)
+        expect(session.status).to_equal(KpfNoallocStatus.Ok)
+        expect(session_used_bytes).to_equal(24u64)
         expect(request.status).to_equal(KpfNoallocStatus.Ok)
-        expect(value.arena_used_bytes()).to_equal(28u64)
-        expect(value.arena_high_water_bytes()).to_equal(28u64)
-        expect(value.complete(request.handle)).to_equal(KpfNoallocStatus.Ok)
-        expect(value.close_session(session.handle)).to_equal(KpfNoallocStatus.Ok)
-        expect(value.arena_used_bytes()).to_equal(8u64)
+        expect(request_used_bytes).to_equal(28u64)
+        expect(high_water_bytes).to_equal(28u64)
+        expect(complete_status).to_equal(KpfNoallocStatus.Ok)
+        expect(close_status).to_equal(KpfNoallocStatus.Ok)
+        expect(final_used_bytes).to_equal(8u64)
+        expect(observed_count).to_equal(0u64)
+        expect(observed_status).to_equal(KpfRuntimeAllocationStatus.Clean)
+
+    it "detects a real runtime heap allocation after activation":
+        step("Non-vacuity guard: an actual growing array allocation must break the proof")
+        var value = runtime(64u64, 1u32, 1u32, 1)
+        value.activate()
+        var allocated_after_activation: [i64] = []
+        allocated_after_activation.push(41)
+        allocated_after_activation.push(42)
+        val observed_count = value.post_activation_allocation_count()
+        val observed_status = value.allocation_proof_status()
+        expect(allocated_after_activation.len).to_equal(2)
+        expect(observed_count).to_be_greater_than(0u64)
+        expect(observed_status).to_equal(KpfRuntimeAllocationStatus.AllocationDetected)
 
     it "fails closed at the exact arena boundary without changing accounting":
         step("Mutation guard: reducing arena capacity by one rejects the request")

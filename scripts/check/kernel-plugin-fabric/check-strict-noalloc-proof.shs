@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+root=${1:-.}
+probe="$root/src/lib/nogc_async_mut_noalloc/kernel_plugin/allocation_probe.spl"
+runtime="$root/src/lib/nogc_async_mut_noalloc/kernel_plugin/fixed_runtime.spl"
+spec="$root/test/01_unit/lib/nogc_async_mut_noalloc/kernel_plugin/fixed_runtime_spec.spl"
+
+fail() {
+    echo "KPF_STRICT_NOALLOC_PROOF: FAIL $1" >&2
+    exit 1
+}
+
+test -f "$probe" || fail missing-probe
+test -f "$runtime" || fail missing-runtime
+test -f "$spec" || fail missing-spec
+
+grep -Fq 'extern fn rt_heap_registry_count() -> i64' "$probe" || fail missing-runtime-counter
+grep -Fq 'self.baseline_count = rt_heap_registry_count()' "$probe" || fail missing-activation-snapshot
+grep -Fq 'if current_count != self.baseline_count:' "$probe" || fail missing-delta-check
+grep -Fq 'KpfRuntimeAllocationStatus.AllocationDetected' "$probe" || fail missing-fail-closed-status
+grep -Fq 'self.allocation_probe.activate()' "$runtime" || fail runtime-not-instrumented
+grep -Fq 'self.allocation_probe.allocation_count()' "$runtime" || fail count-not-observable
+grep -Fq 'allocated_after_activation.push(42)' "$spec" || fail missing-real-allocation-fixture
+grep -Fq 'to_be_greater_than(0u64)' "$spec" || fail nonvacuity-count-not-asserted
+grep -Fq 'KpfRuntimeAllocationStatus.AllocationDetected' "$spec" || fail nonvacuity-status-not-asserted
+
+echo "KPF_STRICT_NOALLOC_PROOF: PASS runtime_counter=rt_heap_registry_count negative_fixture=real_array_growth"
