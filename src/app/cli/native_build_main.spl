@@ -4,7 +4,7 @@ use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_delete}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
@@ -245,6 +245,18 @@ fn output_path_arg(args: [text]) -> text:
             return a.substring(2)
         i = i + 1
     ""
+
+pub fn native_build_strict_stub_evidence(output: text) -> bool:
+    output.contains("stub functions for unresolved symbols") or
+        output.contains("Unresolved symbol preview:") or
+        output.contains("fabricated as weak stubs") or
+        output.contains("fabricated stub") or
+        output.contains("stub fallback")
+
+pub fn native_build_strict_stub_violation(strict_no_stub: bool, stdout: text, stderr: text) -> bool:
+    strict_no_stub and
+        (native_build_strict_stub_evidence(stdout) or
+            native_build_strict_stub_evidence(stderr))
 
 # Keep the front-end cache beside the explicitly selected native-build cache.
 # Parse shards inherit this environment, so an isolated bootstrap worktree can
@@ -673,6 +685,14 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)
+    val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
+        if output_ok:
+            file_delete(output_path)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        eprint "error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence."
+        eprint "  The worker reported success, but strict mode forbids publishing or caching a fabricated binary."
+        return 1
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
