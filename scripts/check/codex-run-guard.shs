@@ -149,7 +149,7 @@ if [ -n "$ROLLOUT" ]; then
     # A direct/legacy launch has no repo lock. Catch it before starting another
     # writer; guarded peers are already serialized by flock above.
     LIVE_RESUME_PID=$(ps -eo pid=,args= 2>/dev/null | awk -v sid="$SID" -v guard="$$" '
-        $1 != guard && $0 !~ /codex-run-guard/ {
+        $1 != guard {
             line = $0
             pattern = "(^|[/[:space:]])codex[[:space:]]+resume[[:space:]]+" sid "([[:space:]]|$)"
             if (line ~ pattern) { print $1; exit }
@@ -186,7 +186,10 @@ fi
 # --- launch codex (foreground) + sibling watchdog -------------------------------
 if [ "$MAX_SECONDS" -le 0 ] 2>/dev/null && [ "$MAX_RSS_MB" -le 0 ] 2>/dev/null \
    && [ "$MAX_SESSION_TOKENS" -le 0 ] 2>/dev/null; then
-    exec "$REAL_CODEX" "$@"            # no runtime caps active: hand off cleanly
+    RC=0
+    "$REAL_CODEX" "$@" 9>&- || RC=$?
+    cleanup_run_scratch
+    exit "$RC"
 fi
 
 GUARD_PID=$$
@@ -299,6 +302,6 @@ trap 'kill "$WD" 2>/dev/null || true; cleanup_run_scratch' EXIT INT TERM
 # codex runs in the FOREGROUND so the TUI keeps the controlling terminal (no
 # SIGTTIN); the backgrounded watchdog kills the tree on a wall-clock/RSS breach.
 RC=0
-"$REAL_CODEX" "$@" || RC=$?
+"$REAL_CODEX" "$@" 9>&- || RC=$?
 kill "$WD" 2>/dev/null || true
 exit $RC
