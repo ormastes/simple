@@ -1,0 +1,66 @@
+# @req REQ-KPF-004 REQ-KPF-005 REQ-KPF-007 REQ-KPF-009
+# @cover src/lib/nogc_async_mut/kernel_plugin 80%
+# @tag: unit, kernel_plugin, bounded, generational
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.status.KpfStatus
+use std.nogc_async_mut.kernel_plugin.runtime.*
+
+fn session() -> KpfSessionHandleV1:
+    KpfSessionHandleV1(generation: 1, slot: 0, epoch: 1)
+
+fn request(sequence: i64) -> KpfRequestEnvelopeV1:
+    KpfRequestEnvelopeV1(
+        handle: KpfRequestHandleV1(generation: 1, session_slot: 0, request_slot: sequence, request_epoch: 1),
+        operation_slot: 7,
+        batch_id: sequence)
+
+describe "KPF bounded async runtime":
+    it "uses fixed submission capacity and deterministic FIFO wraparound":
+        step("fill, drain, and wrap the preallocated submission ring")
+        val ring = KpfSubmissionRingV1.create(2)
+        assert_equal(ring.values.len(), 2)
+        assert_equal(ring.offer(request(10)).label(), "Accepted")
+        assert_equal(ring.offer(request(11)).label(), "Accepted")
+        assert_equal(ring.offer(request(12)).label(), "WouldBlock")
+        assert_equal(ring.poll().value.batch_id, 10)
+        assert_equal(ring.offer(request(12)).label(), "Accepted")
+        assert_equal(ring.poll().value.batch_id, 11)
+        assert_equal(ring.poll().value.batch_id, 12)
+        assert_equal(ring.poll().status.label(), "Empty")
+        assert_equal(ring.values.len(), 2)
+        assert_equal(ring.high_water, 2)
+
+    it "bounds completion storage without growing after creation":
+        step("fill and drain a preallocated completion ring")
+        val ring = KpfCompletionRingV1.create(1)
+        val completion = KpfCompletionEnvelopeV1(handle: request(1).handle, status: KpfStatus.Ok)
+        assert_equal(ring.offer(completion).label(), "Accepted")
+        assert_equal(ring.offer(completion).label(), "WouldBlock")
+        assert_equal(ring.poll().value.status.code(), KpfStatus.Ok.code())
+        assert_equal(ring.poll().status.label(), "Empty")
+        assert_equal(ring.values.len(), 1)
+
+    it "rejects stale session and request handles after slot reuse":
+        step("reuse slots with incremented epochs")
+        val sessions = KpfSessionTableV1.create(1)
+        val first_session = sessions.open(1)
+        assert_equal(sessions.close(first_session).label(), "Accepted")
+        val second_session = sessions.open(2)
+        assert_equal(second_session.slot, first_session.slot)
+        assert_equal(sessions.validate(first_session).label(), "KPF-E-STALE-HANDLE")
+        assert_equal(sessions.validate(second_session).label(), "Accepted")
+        val requests = KpfRequestTableV1.create(1)
+        val first_request = requests.reserve(second_session)
+        assert_equal(requests.release(first_request).label(), "Accepted")
+        val second_request = requests.reserve(second_session)
+        assert_equal(second_request.request_slot, first_request.request_slot)
+        assert_equal(requests.validate(first_request).label(), "KPF-E-STALE-HANDLE")
+        assert_equal(requests.validate(second_request).label(), "Accepted")
+        val forged_generation = KpfRequestHandleV1(
+            generation: 99,
+            session_slot: second_request.session_slot,
+            request_slot: second_request.request_slot,
+            request_epoch: second_request.request_epoch)
+        assert_equal(requests.validate(forged_generation).label(), "KPF-E-STALE-HANDLE")

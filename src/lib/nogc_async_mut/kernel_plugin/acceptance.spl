@@ -1,0 +1,138 @@
+use common.kernel_plugin.ids.*
+use common.kernel_plugin.schema_header.*
+use common.kernel_plugin.status.KpfStatus
+use std.nogc_async_mut.kernel_plugin.runtime.*
+
+pub struct KpfAcceptanceSubmitV1:
+    code: text
+    capacity: i64
+
+pub struct KpfAcceptancePollV1:
+    error_code: text
+
+pub struct KpfMalformedDescriptorResultV1:
+    error_code: text
+    published_generation: i64
+
+pub struct KpfLintCoverageResultV1:
+    requested_checks: i64
+    completed_checks: i64
+    verdict: text
+
+pub enum KpfLintCoverageVerdictV1:
+    Complete
+    Incomplete
+
+impl KpfLintCoverageVerdictV1:
+    pub fn label() -> text:
+        match self:
+            case Complete: "COMPLETE"
+            case Incomplete: "INCOMPLETE"
+
+pub struct KpfStaticParityResultV1:
+    direct_provider_calls: i64
+    table_provider_calls: i64
+    direct_values: [i64]
+    table_values: [i64]
+
+pub class KpfAcceptanceFixtureV1:
+    generation: i64
+    sessions: KpfSessionTableV1
+    requests: KpfRequestTableV1
+    submissions: KpfSubmissionRingV1
+
+impl KpfAcceptanceFixtureV1:
+    me submit(batch_id: i64) -> KpfAcceptanceSubmitV1:
+        val session = KpfSessionHandleV1(generation: self.generation, slot: 0, epoch: 1)
+        val handle = self.requests.reserve(session)
+        if handle.request_slot < 0:
+            return KpfAcceptanceSubmitV1(code: KpfQueueStatus.WouldBlock.label(), capacity: self.submissions.capacity)
+        val status = self.submissions.offer(KpfRequestEnvelopeV1(handle: handle, operation_slot: 1, batch_id: batch_id))
+        if status != KpfQueueStatus.Accepted:
+            self.requests.release(handle)
+        KpfAcceptanceSubmitV1(code: status.label(), capacity: self.submissions.capacity)
+
+    me submission_high_water() -> i64:
+        self.submissions.high_water
+
+    me open_session() -> KpfSessionHandleV1:
+        self.sessions.open(self.generation)
+
+    me retire_and_publish_next() -> i64:
+        var index = 0
+        while index < self.sessions.capacity:
+            if self.sessions.active[index]:
+                val handle = KpfSessionHandleV1(
+                    generation: self.sessions.generations[index],
+                    slot: index,
+                    epoch: self.sessions.epochs[index])
+                self.sessions.close(handle)
+            index = index + 1
+        self.generation = self.generation + 1
+        self.generation
+
+    fn poll(handle: KpfSessionHandleV1) -> KpfAcceptancePollV1:
+        val status = self.sessions.validate(handle)
+        val error_code = if status == KpfQueueStatus.Accepted: "" else: status.label()
+        KpfAcceptancePollV1(error_code: error_code)
+
+pub fn acceptance_fixture(capacity: i64) -> KpfAcceptanceFixtureV1:
+    KpfAcceptanceFixtureV1(
+        generation: 1,
+        sessions: KpfSessionTableV1.create(1),
+        requests: KpfRequestTableV1.create(capacity),
+        submissions: KpfSubmissionRingV1.create(capacity))
+
+pub fn malformed_descriptor_fixture() -> KpfMalformedDescriptorResultV1:
+    val schema_id = KpfId128(hi: 1, lo: 2)
+    val digest = KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 4)
+    val header = KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE - 1,
+        schema_id: schema_id,
+        schema_major: 1,
+        schema_minor: 0,
+        schema_digest: digest,
+        reserved0: 0)
+    val requirement = KpfSchemaRequirementV1(
+        schema_id: schema_id,
+        schema_major: 1,
+        minimum_minor: 0,
+        minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_digest: digest)
+    val status = kpf_validate_schema_header_v1(header, requirement)
+    val code = if status == KpfStatus.DescriptorTooShort: "KPF-E-MALFORMED-DESCRIPTOR" else: "KPF-E-UNEXPECTED-ADMISSION"
+    KpfMalformedDescriptorResultV1(error_code: code, published_generation: 0)
+
+pub fn zero_completed_lint_fixture() -> KpfLintCoverageResultV1:
+    val requested = 1
+    val completed = 0
+    val verdict = kpf_lint_coverage_verdict(requested, completed)
+    KpfLintCoverageResultV1(requested_checks: requested, completed_checks: completed, verdict: verdict.label())
+
+pub fn kpf_lint_coverage_verdict(requested: i64, completed: i64) -> KpfLintCoverageVerdictV1:
+    if requested <= 0 or completed < requested:
+        return KpfLintCoverageVerdictV1.Incomplete
+    KpfLintCoverageVerdictV1.Complete
+
+fn _execute_double_batch(values: [i64]) -> [i64]:
+    var result: [i64] = []
+    var index = 0
+    while index < values.len():
+        result.push(values[index] * 2)
+        index = index + 1
+    result
+
+fn _static_table_dispatch(operation_slot: i64, values: [i64]) -> [i64]:
+    if operation_slot == 1:
+        return _execute_double_batch(values)
+    []
+
+pub fn static_parity_fixture(values: [i64]) -> KpfStaticParityResultV1:
+    val direct = _execute_double_batch(values)
+    val table = _static_table_dispatch(1, values)
+    KpfStaticParityResultV1(
+        direct_provider_calls: 1,
+        table_provider_calls: 1,
+        direct_values: direct,
+        table_values: table)
