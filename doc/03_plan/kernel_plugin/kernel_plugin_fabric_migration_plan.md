@@ -7,7 +7,9 @@
 ## Published Implementation Baseline
 
 This plan is active on `wip/two-plan-optimizations-linear-20260902` at
-`3164fbc39376a2a543f5afa7fa92f1aca6d3d393`. Status terms are strict:
+`f34abe793c6a173921eeadd637c966a21f2695e3`. The requested starting point
+`3164fbc39376a2a543f5afa7fa92f1aca6d3d393` remains in its ancestry. Status
+terms are strict:
 
 - **Implemented** means production or test source is present in the published tree.
 - **Structurally checked** means focused source, import, layout, or shell checks passed.
@@ -18,11 +20,11 @@ This plan is active on `wip/two-plan-optimizations-linear-20260902` at
 |---|---|---|
 | 0 | Research, architecture/design/plans, executable acceptance scaffolding, K0g import-closure verifier | Implemented and structurally checked; acceptance scenarios that require later production modules remain intentionally non-green |
 | 1 | Deterministic schema compiler foundation, K0g contracts, canonical C ABI prefix, C/C++ examples, Rust SDK | Implemented; C11/C++17 ABI and SDK conformance plus Rust `cargo test` passed; complete four-language generated-schema parity remains open |
-| 2 | Fixed sync slots/generations/pins, bounded async runtime, strict noalloc projection, SMF admission, worker framing/supervision | Implemented and structurally checked; focused Simple runtime execution remains blocked; deadline, rollback, allocation instrumentation, and placement-parity gates are not yet fully proved |
+| 2 | Fixed sync slots/generations/pins, bounded async runtime, strict noalloc projection, SMF admission, worker framing/supervision | Implemented and structurally checked, including exact active-generation pinning; focused Simple runtime execution remains blocked; deadline, rollback, allocation instrumentation, and placement-parity gates are not yet fully proved |
 | 3 | Backend KPF admission projection and retained native batch session | Implemented; native retained-session success/failure cleanup passed; full compiler/bootstrap parity and worker backend placement remain open |
-| 4 | Proof-carrying lint records/scheduler, legacy Simple projection, C++ worker contracts, Rust Cargo diagnostic adapter | Implemented and structurally checked; executable Simple tests, semantic `check` convergence, mixed-workspace parity, output adapters, and full rust-analyzer/clangd integration remain open |
-| 5 | Editor extension KPF compatibility facade with worker placement | Partially implemented; tooling workspace/session kernel and native/VS Code client cutovers are not published at this baseline |
-| 6 | Existing extended-enum foundations only | Not implemented for KPF sealing or MDSOC++ capsule composition |
+| 4 | Proof-carrying lint records/scheduler, legacy Simple projection, C++ worker contracts, Rust Cargo diagnostic adapter | Implemented and structurally checked, including typed Cargo JSON parsing and impossible-coverage underflow rejection; executable Simple tests, semantic `check` convergence, mixed-workspace parity, output adapters, and full rust-analyzer/clangd integration remain open |
+| 5 | Editor extension facade, generation-pinned `ToolingWorkspace`, immutable snapshots, and VS Code KPF projection | Implemented foundations; tooling and VS Code focused checks passed where reported, but native/SVIM/browser cutover and shared client conformance remain open |
+| 6 | Extended-enum KPF closure and deterministic MDSOC++ capsule sealer | Implemented and structurally checked; Simple runtime execution remains blocked, and the large-program pilot plus upgrade/rollback execution proof remain open |
 | 7 | Worker fault states and SDK examples provide partial groundwork | Not complete; signatures, fuzz/long-run/performance CI, shared-memory optimization, WIT/Wasm, and public migration guide remain open |
 
 The authoritative detailed evidence and remaining-work ledger is
@@ -78,7 +80,7 @@ Add canonical diagnostics, edits, coverage, verdicts, deterministic merge, gener
 
 ## Wave 5 — IDE Service Kernel
 
-**Progress:** Active; the editor compatibility facade is published. Shared tooling sessions and native/VS Code/browser product cutovers remain unpublished.
+**Progress:** Active; the editor compatibility facade, generation-pinned tooling workspace/document store, stale-result rejection, and VS Code contribution/service projection are published. Native/SVIM/browser cutover and shared cross-client conformance remain open.
 
 Adapt current extension manifests, commands, events, disposables, activation, permissions, and crashes to KPF. Add shared versioned tooling sessions, real worker execution, LSP/DAP/test adapters, generated VS Code contributions, and SVIM/native clients.
 
@@ -86,7 +88,7 @@ Adapt current extension manifests, commands, events, disposables, activation, pe
 
 ## Wave 6 — Extended Enum And MDSOC++
 
-**Progress:** Not started as a KPF integration lane. Existing dynamic-identity code is prerequisite evidence, not completion of this wave.
+**Progress:** Active; persistent constructor projection, required-operation completeness, deterministic dense tags, critical `Dyn` rejection, and the MDSOC++ capsule graph sealer are published. Their focused Simple tests remain runtime blocked, and no large-program pilot or executed upgrade/rollback proof is complete.
 
 Generate constructor operation-completeness tables and dense tags; enforce Static/Complete/Dyn policy. Add MDSOC++ capsule schema, dependency/authority/memory/concurrency checks, state migration, upgrade and rollback proof. Pilot one large userland subsystem.
 

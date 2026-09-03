@@ -6,7 +6,8 @@
 
 ## Published Lane Ledger
 
-Baseline: `wip/two-plan-optimizations-linear-20260902` at `3164fbc39376a2a543f5afa7fa92f1aca6d3d393`.
+Baseline: `wip/two-plan-optimizations-linear-20260902` at `f34abe793c6a173921eeadd637c966a21f2695e3`.
+The requested start `3164fbc39376a2a543f5afa7fa92f1aca6d3d393` is an ancestor.
 Published source is not equivalent to a closed gate; runtime-blocked Simple tests remain unverified.
 
 | Lane | Published state | Next owner action |
@@ -14,24 +15,27 @@ Published source is not equivalent to a closed gate; runtime-blocked Simple test
 | S0 | Complete for current architecture baseline | Maintain decision/status documents as contracts change |
 | S1 | Foundation published | Complete schema parsing/generation, compatibility corpus, Simple binding, and deterministic all-language regeneration |
 | A1 | K0g common contracts published | Add remaining receipt/descriptor coverage only through schema-owned evolution |
-| A2 | Fixed slots, exact pins, generations, static registry published | Prove atomic failed-candidate rollback and O(1) counters at runtime |
+| A2 | Fixed slots, exact active-generation pins, generations, static registry published | Prove atomic failed-candidate rollback and O(1) counters at runtime |
 | A3 | Async runtime and strict noalloc projection published | Add/execute deadline, cancellation-race, quiescence, arena, and allocation instrumentation gates |
 | A4 | SMF native admission and bounded worker transport published | Integrate real process execution, signatures/trust, crash-loop policy, and placement parity |
 | A5 | Rust raw/safe SDK published and runtime tested with Cargo | Keep aligned with the final generated ABI and compatibility matrix |
 | A6 | C/C++ examples and non-throwing RAII SDK published and runtime tested | Keep aligned with generated ABI; extend malformed/compatibility corpus |
 | A7 | Acceptance scaffolding and closure verifier published | Convert production-dependent red scenarios as modules land; preserve non-vacuity |
 | B1 | Backend admission and retained native batch session published; native fixtures passed | Prove bootstrap, static/dynamic/worker parity, production reachability, and rollback |
-| B2 | Not published | Implement KPF operation-completeness tables, sealed dense tags, and critical `Dyn` rejection |
+| B2 | Constructor ID projection, operation-completeness tables, sealed dense tags, and critical `Dyn` rejection published | Execute focused Simple tests and integrate the closure proof with the final schema authority |
 | B3 | Partial worker fault groundwork only | Add ABI fuzz, signature/trust, ABA, unload, and crash-loop acceptance corpus |
 | C0 | Common records and bounded scheduler published | Add normalized edits/output adapters, cache/invalidation, and full planner/merge behavior |
-| C1 | Legacy Simple proof projection and shared verdict published | Converge semantic `check`, generated rules, snapshots, and both CLI front doors |
-| C2 | Bounded Cargo/Clippy diagnostic adapter published | Add rust-analyzer live service and executable toolchain mismatch/cancellation corpus |
-| C3 | Compile-database/Clang worker contract published | Add real clangd/clang-tidy execution, exact toolchain admission, and cache behavior |
+| C1 | Legacy Simple proof projection, shared verdict, and impossible-count underflow rejection published | Converge semantic `check`, generated rules, snapshots, and both CLI front doors |
+| C2 | Bounded Cargo/Clippy adapter plus typed structured-JSON parsing fix published | Add rust-analyzer live service and executable toolchain mismatch/cancellation corpus |
+| C3 | Compile-database/Clang worker contract with exact TU receipts and typed fixes published | Add real clangd/clang-tidy execution, exact toolchain admission, and cache behavior |
 | C4 | Not published | Implement portable policies and mixed-workspace conflict fixtures |
 | D0 | Editor compatibility facade published | Complete manifest projection and production worker lifecycle integration |
-| D1 | Not published at baseline | Land tooling workspace/document/session kernel and protocol adapters |
-| D2-D5 | Not published | Implement native, desktop, browser clients and shared conformance corpus after D1 |
-| E1-E5 | Not published as complete lanes | Begin only after closure/runtime/product prerequisites; preserve final gates below |
+| D1 | Generation-pinned tooling workspace, immutable document store, bounded diagnostic publication, stale-result rejection, and disconnect lease release published | Add protocol adapters and execute focused Simple tests with a compatible runtime |
+| D2 | Not published | Implement native/SVIM client cutover and shared diagnostics/tests/commands |
+| D3 | VS Code KPF admission/service projection and generated contribution projection published; four focused tests and TypeScript compilation passed | Integrate the production desktop client and shared conformance corpus; retain explicit degraded behavior |
+| D4-D5 | Not published | Implement browser/Wasm client and editor-neutral conformance after D1/D3 integration |
+| E1 | Deterministic MDSOC++ capsule/facet sealer, budgets, lifecycle order, receipts, and migration compatibility published | Execute Simple tests and add the large-program pilot plus upgrade/rollback proof |
+| E2-E5 | Not published as complete lanes | Continue pilot, performance, Wasm, and public documentation only with prerequisite gates preserved |
 
 ## Coordination Contract
 
