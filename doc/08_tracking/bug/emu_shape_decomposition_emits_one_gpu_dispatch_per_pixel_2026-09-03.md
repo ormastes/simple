@@ -22,6 +22,14 @@ On the Engine2D **vulkan** backend, primitives that delegate to the shared
 Identical source, two orders of magnitude apart. That is the whole finding: the
 cost is not in the shape maths.
 
+**Scope, corrected.** This is NOT "vulkan is slower at everything" — an earlier
+draft said so, read off a top-by-ratio listing that showed only losers. By
+tier: GPU-native 12 primitives, vulkan **faster on 8 of 12** (`clear` 33x
+faster, `draw_triangle_filled` 27x, `draw_line` 7.5x); CPU `emu_*` 18
+primitives, vulkan slower on **18 of 18**, 42.7x in aggregate. The GPU lane is
+fast where it is implemented and catastrophic where `emu_*` decomposes to
+per-pixel dispatches — which is precisely this defect.
+
 ## Root cause
 
 `emu_*` does not write pixels. It decomposes a shape into calls back into the

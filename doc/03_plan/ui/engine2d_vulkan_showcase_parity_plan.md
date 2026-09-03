@@ -135,7 +135,29 @@ gate.
 
 ### P3 — per-primitive perf matrix: the systemic finding
 
-Every primitive is slower on the vulkan backend than on the cpu backend:
+**CORRECTION (2026-09-03, from the full 38-row table).** An earlier revision
+of this section said "every primitive is slower on the vulkan backend". That
+was wrong: it was read off a top-16-by-ratio listing, which by construction
+showed only the losers. The full table splits cleanly by tier, and the GPU
+WINS where it is actually used:
+
+| Tier | n | cpu total | vulkan total | ratio | vulkan faster on |
+|---|---|---|---|---|---|
+| GPU-native | 12 | 11,826 us | 19,062 us | 1.6x | **8 of 12** |
+| CPU `emu_*` | 18 | 5,408 us | 230,722 us | **42.7x** | 0 of 18 |
+| forced-readback | 6 | 20,312 us | 292,303 us | 14.4x | 3 of 6 |
+
+Examples of the GPU winning: `clear` 3,616 -> 108 us (33x faster),
+`draw_triangle_filled` 408 -> 15 us (27x), `draw_line` 128 -> 17 us (7.5x),
+`draw_circle_filled` 81 -> 19 us (4.3x), `draw_rect_filled` 99 -> 34 us (2.9x).
+
+So the finding is sharper than "vulkan is slow": **the GPU lane is fast for the
+13 primitives it actually implements and catastrophic for the 18 that decompose
+to per-pixel dispatches.** `submit_batch`+`present` (12 us cpu vs 347,071 us
+vulkan) is deferred execution, not a regression — it is where the batched
+dispatches actually run, so it must not be read as a per-primitive cost.
+
+The losers, all `emu_*` or forced-readback:
 
 | Primitive | cpu | vulkan | ratio |
 |---|---|---|---|
