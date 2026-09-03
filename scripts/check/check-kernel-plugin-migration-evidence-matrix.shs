@@ -17,6 +17,12 @@ require_text() {
     grep -Fq -- "$2" "$ROOT/$1" || fail "phase $phase implementation invariant failed: $2"
 }
 
+reject_text() {
+    if grep -Fq -- "$2" "$ROOT/$1"; then
+        fail "phase $phase forbidden implementation text remains: $2"
+    fi
+}
+
 kpm_admitted_runtime() {
     runtime=${KPM_SIMPLE_BINARY:-}
     if [ -z "$runtime" ]; then
@@ -493,16 +499,7 @@ phase6_acceptance_positive_probe() {
 
 phase8_runtime() {
     private_state=$1
-    case "$(uname -s):$(uname -m)" in
-        Darwin:arm64) default_runtime=$REPO_ROOT/bin/release/aarch64-apple-darwin/simple ;;
-        Darwin:x86_64) default_runtime=$REPO_ROOT/bin/release/x86_64-apple-darwin/simple ;;
-        Linux:aarch64) default_runtime=$REPO_ROOT/bin/release/aarch64-unknown-linux-gnu/simple ;;
-        Linux:x86_64) default_runtime=$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple ;;
-        *) default_runtime=$REPO_ROOT/bin/release/simple ;;
-    esac
-    runtime_source=${KPM_SIMPLE_BINARY:-$default_runtime}
-    [ -f "$runtime_source" ] && [ -x "$runtime_source" ] ||
-        blocked "phase 8 range/lock runtime source unavailable for host: $runtime_source"
+    runtime_source=$(kpm_admitted_runtime) || return $?
     mkdir -p "$private_state/runtime"
     private_runtime=$private_state/runtime/simple
     cp "$runtime_source" "$private_runtime" || blocked 'phase 8 private runtime copy failed'
@@ -542,7 +539,7 @@ phase8_range_lock_probe() {
     output=$2
     private_state=$3
     mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
-    runtime=$(phase8_runtime "$private_state")
+    runtime=$(phase8_runtime "$private_state") || return $?
     mkdir -p "$probe_root/bin"
     cp "$runtime" "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime copy failed'
     chmod 700 "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime permissions failed'
@@ -563,8 +560,15 @@ phase8_range_lock_positive_probe() {
     private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase8-positive.XXXXXX")
     trap 'rm -rf "$private_root"' EXIT HUP INT TERM
     phase8_workspace "$private_root/workspace"
-    if ! phase8_range_lock_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
-        cat "$private_root/output" >&2
+    set +e
+    phase8_range_lock_probe "$private_root/workspace" "$private_root/output" "$private_root/state"
+    probe_rc=$?
+    set -e
+    if [ "$probe_rc" -ne 0 ]; then
+        if [ "$probe_rc" -eq 2 ]; then
+            blocked 'phase 8 admitted runtime unavailable for executable range/lock probe'
+        fi
+        [ -f "$private_root/output" ] && cat "$private_root/output" >&2
         if grep -Fq 'HIR lowering error' "$private_root/output"; then
             blocked 'phase 8 copied runtime is incompatible with the current range/lock source closure'
         fi
@@ -673,6 +677,15 @@ probe_phase() {
             require_text "$seam" 'case Ok(base): satisfies_caret(version, base)'
             require_text "$seam" 'case Ok(base): satisfies_tilde(version, base)'
             require_text "$seam" 'provide.provider < current.provider'
+            require_text "$seam" 'plugin_manifest_location: "simple.sdn"'
+            require_text src/app/lock/main.spl 'fn run_lock_command(args: [text]) -> i64:'
+            require_text src/app/update/main.spl 'fn run_update_command(args: [text]) -> i64:'
+            require_text src/app/lock/main.spl 'file_atomic_write(lockfile_path, lock_content)'
+            require_text src/app/update/main.spl 'file_atomic_write(lockfile_path, lock_content)'
+            require_text src/app/cli/_CliMain/main_and_help.spl 'return run_lock_command(_cli_args_from(filtered_args, 1))'
+            require_text src/app/cli/_CliMain/main_and_help.spl 'return run_update_command(_cli_args_from(filtered_args, 1))'
+            reject_text src/app/cli/_CliMain/main_and_help.spl 'cli_run_file("src/app/lock/main.spl"'
+            reject_text src/app/cli/_CliMain/main_and_help.spl 'cli_run_file("src/app/update/main.spl"'
             phase8_range_lock_positive_probe
             ;;
         *) fail "unknown phase: $phase" ;;
