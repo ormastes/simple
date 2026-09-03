@@ -1,15 +1,43 @@
 # Phase 7 Startup and APK-only Evidence
 
-Status: **BLOCKED — implementation and host-independent gates are present;
-runtime qualification is not admitted on this worktree.**
+Status: **PARTIAL NATIVE OBSERVATION / PHASE 7 BLOCKED.**
 
-Structural review is not runtime evidence. No retained row proves APK-only
-coverage, one-binary, dynload, or the selected baseline-relative RSS gates. The
+The selected rows were executed exactly once on 2026-09-03 against the
+available admitted macOS arm64 runtime. The run proves native architecture,
+one-binary dependency shape, and real startup/process-RSS observations. It
+does not prove a producer-created Phase 7 candidate, LLVM/Cranelift parity,
+dynamic loading, child APK consumption, or resident-server RSS authority, so
+the result remains non-authorizing.
+
+Structural review is not runtime evidence. No retained row qualifies APK-only
+coverage, one-binary deployment, dynload, or the selected baseline-relative RSS gates. The
 user selected LLVM+Cranelift, ABI v1, `simple.sdn`, atomic APK-only coverage,
 and a baseline-relative 10% performance policy. No numeric value remains
 pending. This status is the evidence index for kernel migration Phase 7.
 
 ## Retained evidence
+
+- Runtime: `/Users/ormastes/simple/bin/release/macos-arm64/simple`, thin Mach-O
+  arm64, SHA-256
+  `277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767`.
+- Runtime admission receipt SHA-256:
+  `0d8cfcd5630c5da5963de1ab90655034c4fa4f5c879748c9938a573ca14aa424`.
+- One-binary observation: **PASS**. `otool -L` found no external
+  `backend_llvm`, `backend_cranelift`, or `simple_stage4_dynload` dependency.
+  Dependency evidence SHA-256:
+  `4a5c2ef257eb60ffd325c19d29784d93e5ee0bb5a2890eacfe3bda58adfd4b4f`.
+- One-binary startup observation, 20 independent native invocations: 19 ms
+  minimum, 20 ms p50, 21 ms maximum, 20.05 ms mean. Maximum RSS ranged from
+  10,764,288 to 10,797,056 bytes (32,768-byte observed range). Sample SHA-256:
+  `ebac59bb14bd91f90d5e8dd03450399fd6990d2e15d5b10448b64907b083f4aa`.
+- Dynload-row startup observation, 20 independent native invocations: 23 ms
+  minimum, 24 ms p50, 25 ms maximum, 23.95 ms mean. Maximum RSS ranged from
+  10,764,288 to 10,797,056 bytes (32,768-byte observed range). Sample SHA-256:
+  `cb29e174a25459bf11e2f6266a405d71c68bf8e94b5a4eff781967c950d342ec`.
+- The observation schema is
+  `simple-kernel-phase7-admitted-runtime-observation-v1`, always records
+  `deployment_authorization=DENY`, and cannot be consumed as the immutable
+  `simple-kernel-phase7-native-pass-v1` receipt.
 
 - Historical warm CLI baseline: 50 ms p50 from
   `doc/10_metrics/startup/startup_perf_check_2026-08-17.md`.
@@ -47,10 +75,12 @@ pending. This status is the evidence index for kernel migration Phase 7.
 
 | Row | Status | Missing authority | Resume command |
 |---|---|---|---|
-| APK-only coverage | BLOCKED | Admitted self-hosted `simple test` command | Run the selected `check-kernel-phase7-matrix.shs --execute` row |
-| Steady RSS / 20-request growth | BLOCKED | Admitted architecture-matched baseline, Phase-7 binary, and retained 20-request measurements | Run the selected native row with its admitted baseline receipt |
-| one-binary | BLOCKED | Admitted LLVM+Cranelift bootstrap binary | Selected Phase-7 one-binary qualification command |
-| dynload | BLOCKED | Admitted atomic APK-only dynamic runtime | Selected Phase-7 dynload qualification command |
+| APK-only coverage | BLOCKED | Producer-created Phase 7 candidate with child-owned APK activation evidence | Run `--execute` only after Rawls' Stage2/Stage3 producer chain is admitted |
+| Steady RSS / 20-request growth | BLOCKED | Architecture-matched admitted resident-server baseline and 20 correlated requests in one process | Supply the baseline and long-lived residency receipts to `--execute`; independent-process observations are not a substitute |
+| one-binary | OBSERVED PASS / QUALIFICATION BLOCKED | Native dependency shape passed; produced-candidate provenance, child APK, parity, and resident RSS authority are absent | Re-run `--execute` with the producer-created candidate |
+| LLVM/Cranelift parity | BLOCKED | Both requested backend executions returned status 1; no successful output parity exists | Qualify a produced runtime whose admitted backend operations execute successfully |
+| dynload | BLOCKED | `--dynsmf-status` did not reach the required fail-closed result; the dynload row terminated with status 133 | Qualify a produced atomic APK-only dynamic runtime |
+| startup delta `<2 ms` | BLOCKED | Real absolute startup samples exist, but no architecture-matched admitted baseline/candidate pair exists | Supply the produced candidate and admitted baseline to `--execute` |
 
 No startup or APK-only runtime PASS is claimed from synthetic samples. Atomic
 APK-only is the selected production path; dual coverage cannot authorize a
