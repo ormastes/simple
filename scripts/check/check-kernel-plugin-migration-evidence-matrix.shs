@@ -212,7 +212,15 @@ phase3_manifest_gate_positive_probe() {
         cat "$private_root/output" >&2
         blocked 'phase 3 unchanged manifest gate probe could not execute successfully'
     fi
-    echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=rejects an ABI mismatch with a named code'
+    grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 3 unchanged probe did not enter the exact ABI-mismatch assertion'
+    }
+    grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS expected=AbiDigestMismatch code=SMF-E-ABI-MISMATCH' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 3 unchanged probe lacked the exact ABI-mismatch PASS receipt'
+    }
+    echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=KPM_PHASE3_ABI_ASSERTION_RECEIPT_V1'
     echo 'KPM_PHASE3_MANIFEST_GATE_STATUS=PASS'
     rm -rf "$private_root"
     trap - EXIT HUP INT TERM
@@ -373,8 +381,6 @@ selftest() {
             sed 's/entry.abi_digest != expected_abi_digest/entry.abi_digest == expected_abi_digest/' \
                 "$REPO_ROOT/$seam" >"$tmp/root/$seam"
             cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 3 ABI-mismatch mutation did not change manifest gate implementation'
-            mutant_output=$tmp/phase3-mutant-output.txt
-            echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=rejects an ABI mismatch with a named code' >"$mutant_output"
             if phase3_manifest_gate_probe "$tmp/root" "$tmp/phase3-runtime-output.txt" "$tmp/phase3-state"; then
                 fail 'phase 3 ABI-mismatch mutation was accepted by manifest gate behavior probe'
             else
@@ -384,16 +390,20 @@ selftest() {
                 cat "$tmp/phase3-runtime-output.txt" >&2
                 blocked "phase 3 ABI-mismatch mutant returned infrastructure status $mutant_rc"
             }
-            grep -Fq 'rejects an ABI mismatch with a named code' "$tmp/phase3-runtime-output.txt" || {
+            grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=BEGIN expected=AbiDigestMismatch' "$tmp/phase3-runtime-output.txt" || {
                 cat "$tmp/phase3-runtime-output.txt" >&2
                 blocked 'phase 3 mutant did not reach the exact ABI-mismatch assertion sentinel'
             }
-            grep -Fq 'AbiDigestMismatch' "$tmp/phase3-runtime-output.txt" || {
+            grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=FAIL expected=AbiDigestMismatch actual=Admitted' "$tmp/phase3-runtime-output.txt" || {
                 cat "$tmp/phase3-runtime-output.txt" >&2
-                blocked 'phase 3 mutant lacked the ABI-mismatch assertion diagnostic'
+                blocked 'phase 3 mutant lacked the exact ABI-mismatch assertion-failure receipt'
             }
-            echo 'KPM_PHASE3_MANIFEST_GATE_STATUS=FAIL' >>"$mutant_output"
-            cat "$mutant_output"
+            if grep -Fq 'KPM_PHASE3_ABI_ASSERTION_RECEIPT case=abi-mismatch state=PASS' "$tmp/phase3-runtime-output.txt"; then
+                cat "$tmp/phase3-runtime-output.txt" >&2
+                blocked 'phase 3 mutant emitted contradictory ABI-mismatch PASS evidence'
+            fi
+            echo 'KPM_PHASE3_ABI_MISMATCH_SENTINEL=KPM_PHASE3_ABI_ASSERTION_RECEIPT_V1'
+            echo 'KPM_PHASE3_MANIFEST_GATE_STATUS=FAIL'
             echo 'KPM_PHASE3_ABI_MISMATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
             current=$((current + 1))
             continue
