@@ -351,6 +351,15 @@ pub fn skip_context(reason: text):
 use std.io_runtime.{env_get}
 use std.io_runtime.{file_write}
 use std.io_runtime.{process_run}
+# SELF-RECURSION FIX (2026-09-03): importing `is_windows` into a file that also
+# DEFINES `is_windows` makes the AOT lowering bind the alias to the LOCAL
+# definition -- a silent infinite self-call (stack overflow), which is what
+# killed the Windows MSVC stage 2 candidate. Import the underlying resolver
+# `detect_os`, whose bare name collides with nothing here; `env.platform`s
+# `is_windows` is literally `detect_os() == "windows"`, so semantics are
+# unchanged. Compiler defect:
+# doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md
+use std.nogc_sync_mut.env.platform.{detect_os as platform_detect_os}
 
 fn _shell_output_trim(command: text) -> text:
     val result = process_run("/bin/sh", ["-c", command])
@@ -361,12 +370,12 @@ fn _shell_output_trim(command: text) -> text:
     else:
         ""
 
+# FAIL-OPEN FIX (2026-09-02): read ONLY `OS` and returned false when unset --
+# a silent "not Windows" under a stripped environment (where a bootstrap runs).
+# Delegate to the single resolver in std.nogc_sync_mut.env.platform, which
+# consults the in-process rt_platform_name() primitive first.
 fn _is_windows_env() -> bool:
-    val os_env = env_get("OS")
-    if os_env == nil:
-        false
-    else:
-        os_env.lower().contains("windows")
+    platform_detect_os() == "windows"
 
 fn _get_host_os() -> text:
     if _is_windows_env():

@@ -338,7 +338,7 @@ impl<'a> Parser<'a> {
             }
             "clobber" => {
                 self.expect(&TokenKind::LParen)?;
-                let rc = self.expect_identifier()?;
+                let rc = self.expect_clobber_name()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(AsmConstraint {
                     span: Span::new(cs.start, self.previous.span.end, cs.line, cs.column),
@@ -465,7 +465,32 @@ impl<'a> Parser<'a> {
                             FStringPart::Literal(s) => text.push_str(s),
                             FStringPart::Expr(e) | FStringPart::ExprWithFormat(e, _) => {
                                 match Self::render_asm_placeholder(e) {
-                                    Some(rendered) => text.push_str(&rendered),
+                                    // `{name}` / `{0}` in an asm template is an OPERAND
+                                    // placeholder, not an interpolation — the same contract
+                                    // `expect_string_value` documents for the parenthesized
+                                    // form. The braces MUST survive parsing so MIR lowering
+                                    // can rewrite them to LLVM's `$N`
+                                    // (mir/asm_operands.rs::rewrite_asm_placeholders) and so
+                                    // the C sidecar, which cannot bind operands, can
+                                    // RECOGNISE an operand-bearing line and skip it.
+                                    //
+                                    // Flattening to the bare rendered token is what emitted
+                                    // `csrr 0, mcause`, `mv out, tp` and `invlpg [addr]`
+                                    // into the riscv64 WM translation unit — the assembler
+                                    // sees an operand INDEX or a Simple local name where a
+                                    // register belongs. See
+                                    // doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md
+                                    //
+                                    // `render_asm_placeholder` is still called (and still
+                                    // rejects unrenderable expressions loudly) so the
+                                    // 2026-08-17 `Identifier("stack_top")` Debug-format leak
+                                    // stays fixed: the key inside the braces is a plain
+                                    // token, never a `{:?}` rendering.
+                                    Some(rendered) => {
+                                        text.push('{');
+                                        text.push_str(&rendered);
+                                        text.push('}');
+                                    }
                                     None => {
                                         return Err(ParseError::syntax_error_with_span(
                                             format!(
@@ -548,6 +573,26 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RBracket)?;
         Ok(clobbers)
+    }
+
+    /// Clobber name inside the parenthesized asm form: `clobber(memory)` or
+    /// `clobber("memory")`. Both spellings are accepted because the two forms
+    /// of the design doc disagree on purpose: the braced form
+    /// (`asm volatile clobbers(rax, memory) { ... }`, design A.4) spells
+    /// register names as bare identifiers, while the parenthesized operand form
+    /// spells register-name arguments as STRINGS — `in("rax") arg`,
+    /// `clobber_abi("C")` in
+    /// `doc/05_design/language/language_features/syntax_features/inline_assembly_design.md`.
+    /// `clobber("memory")` is the string spelling of that same form, and before
+    /// this it was the only register-name argument in the parenthesized form
+    /// that rejected a string. Validation of the NAME still happens once, at HIR
+    /// lowering (`is_known_asm_clobber`, E-ASM-CLOBBER), where the target is
+    /// known; this helper only decides the surface spelling.
+    fn expect_clobber_name(&mut self) -> Result<String, ParseError> {
+        if self.is_asm_string_token() {
+            return self.expect_string_value();
+        }
+        self.expect_identifier()
     }
 
     fn expect_string_value(&mut self) -> Result<String, ParseError> {
@@ -645,12 +690,17 @@ mod tests {
     /// Rust's Debug formatting, so `"ldr r0, ={stack_top}"` emitted
     /// `ldr r0, =Identifier("stack_top")` into the assembler, which fails with
     /// `unknown token in expression`.
+    ///
+    /// The anti-regression property is that the AST is never Debug-formatted
+    /// into the template. The braces themselves are RETAINED (2026-09-01): a
+    /// `{...}` in an asm template is an operand placeholder, so the marker must
+    /// reach MIR lowering. `Identifier("stack_top")` must still never appear.
     #[test]
     fn test_asm_template_placeholder_renders_bare_identifier() {
         let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"ldr r0, ={stack_top}\"\n");
         assert_eq!(asm.instructions.len(), 1);
         let instr = &asm.instructions[0];
-        assert!(instr.contains("=stack_top"), "expected bare identifier, got {instr:?}");
+        assert_eq!(instr, "ldr r0, ={stack_top}");
         assert!(
             !instr.contains("Identifier("),
             "Debug-formatted AST leaked into asm: {instr:?}"
@@ -660,7 +710,43 @@ mod tests {
     #[test]
     fn test_asm_template_placeholder_renders_integer_literal() {
         let asm = parse_first_asm("fn test():\n    asm volatile:\n        \"mov r0, #{7}\"\n");
-        assert_eq!(asm.instructions, vec!["mov r0, #7".to_string()]);
+        assert_eq!(asm.instructions, vec!["mov r0, #{7}".to_string()]);
+    }
+
+    /// Reproduce for
+    /// `doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md`
+    /// defect 2. RED before the fix: the block form flattened the operand
+    /// placeholder to its bare token, so `src/lib/.../riscv/startup.spl`'s
+    /// `"csrr {0}, mcause"` reached the riscv64 assembler as `csrr 0, mcause`
+    /// ("invalid operand for instruction") and `src/os/kernel/arch/x86_32/
+    /// paging.spl`'s `"invlpg [{addr}]"` as `invlpg [addr]` ("unknown
+    /// operand"). Keeping the braces is what lets MIR bind them (`$N`) or the
+    /// C sidecar skip them.
+    #[test]
+    fn test_asm_block_form_keeps_operand_placeholder_braces() {
+        let asm = parse_first_asm(
+            "fn test():\n    asm volatile:\n        \"csrr {0}, mcause\"\n        \"invlpg [{addr}]\"\n        \"call {3}\"\n",
+        );
+        assert_eq!(
+            asm.instructions,
+            vec![
+                "csrr {0}, mcause".to_string(),
+                "invlpg [{addr}]".to_string(),
+                "call {3}".to_string(),
+            ]
+        );
+    }
+
+    /// The parenthesized form already preserved braces; the block form must now
+    /// agree with it. A single contract, not two.
+    #[test]
+    fn test_asm_block_and_paren_forms_agree_on_placeholder_spelling() {
+        let block = parse_first_asm("fn test():\n    asm volatile:\n        \"csrr {v}, mepc\"\n");
+        let paren = parse_first_asm(
+            "fn test(x: u64):\n    asm volatile(\n        \"csrr {v}, mepc\",\n        v = out(reg) x\n    )\n",
+        );
+        assert_eq!(block.instructions, paren.instructions);
+        assert_eq!(block.instructions, vec!["csrr {v}, mepc".to_string()]);
     }
 
     /// A placeholder the assembler has no spelling for must be a loud parse
@@ -776,6 +862,56 @@ mod tests {
     fn test_asm_volatile_paren_constraints() {
         let source = "fn test(op: u32, pp: u32):\n    var result: i64 = 0\n    asm volatile(\n        \"mov r0, {op}\",\n        \"bkpt #0xAB\",\n        op = in(reg) op,\n        params = in(reg) pp,\n        result = out(reg) result,\n        clobber_abi(\"C\")\n    )\n";
         parse_succeeds(source);
+    }
+
+    /// Reproduce for
+    /// `doc/08_tracking/bug/riscv64_wm_closure_unbuildable_asm_clobber_string_2026-09-01.md`.
+    /// RED before the fix: `expect_identifier()` in the `clobber` arm rejected
+    /// the string with `expected identifier, found FString([Literal("memory")])`,
+    /// which made every riscv64 entry reaching `os.kernel.arch.riscv64.display`
+    /// unbuildable at discovery (`src/os/kernel/arch/riscv64/cpu.spl:150`).
+    #[test]
+    fn test_asm_volatile_paren_clobber_string_literal() {
+        let asm = parse_first_asm(
+            "fn test(v: u64):\n    asm volatile(\n        \"csrw sstatus, {operand}\",\n        operand = in(reg) v,\n        clobber(\"memory\")\n    )\n",
+        );
+        let clobbers: Vec<&str> = asm
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber))
+            .filter_map(|c| c.reg_class.as_deref())
+            .collect();
+        assert_eq!(clobbers, vec!["memory"]);
+    }
+
+    /// The x86 backend spells the same form with register names rather than the
+    /// `memory` pseudo-register (`src/compiler/70.backend/backend/x86_asm.spl`).
+    #[test]
+    fn test_asm_volatile_paren_clobber_string_registers() {
+        let asm = parse_first_asm(
+            "fn test():\n    asm volatile(\n        \"cpuid\",\n        clobber(\"eax\"),\n        clobber(\"ebx\")\n    )\n",
+        );
+        let clobbers: Vec<&str> = asm
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber))
+            .filter_map(|c| c.reg_class.as_deref())
+            .collect();
+        assert_eq!(clobbers, vec!["eax", "ebx"]);
+    }
+
+    /// The bare-identifier spelling must keep working — this fix widens the
+    /// grammar, it does not move it.
+    #[test]
+    fn test_asm_volatile_paren_clobber_bare_identifier_still_parses() {
+        let asm = parse_first_asm(
+            "fn test(v: u64):\n    asm volatile(\n        \"csrw sstatus, {operand}\",\n        operand = in(reg) v,\n        clobber(memory)\n    )\n",
+        );
+        assert!(asm
+            .constraints
+            .iter()
+            .any(|c| matches!(c.kind, crate::ast::AsmConstraintKind::Clobber)
+                && c.reg_class.as_deref() == Some("memory")));
     }
 
     #[test]

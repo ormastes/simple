@@ -1,0 +1,223 @@
+"""
+# Toolchain Log Optimizers and the Code-Burn Report
+
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/01_research/app/mcp/context_mode_ponytail_originals_vs_mimic_2026-08-28.md
+
+## Overview
+
+Two surfaces are covered here.
+
+`app.mcp.main_lazy_log_opt` filters a build log through a *plugin
+descriptor* — one SDN file per toolchain under `config/log_opt/`
+(`SIMPLE_LOG_OPT_DIR` overrides the directory). A descriptor declares
+`detect` rows that claim a log, `keep` rows that are never removed, and
+`drop` rows that are. Adding a toolchain means dropping a new `.sdn` file
+in the directory; no code changes and no rebuild.
+
+`app.mcp.main_lazy_telemetry.tok_burn_text` answers the other half of the
+token question: not "how much did the mimic save" but "where did the budget
+actually go", by ranking every feature/tool pair on the bytes it returned to
+the model, with the saving against the unoptimized original beside it.
+
+## Behavior
+
+- A ninja-shaped log is claimed by the `ninja` descriptor, its `[n/m]`
+  progress lines are dropped, and the `FAILED:` line survives.
+- A `keep` row beats a `drop` row that matches the same line.
+- Consecutive identical lines collapse into a repeat marker.
+- A leading blank line survives (it is not a repeat of nothing).
+- A log no descriptor recognises is returned byte-for-byte unchanged.
+- The shipped descriptors for clang, rust, ninja, cmake and simple all load.
+- The burn report ranks the heaviest tool first and reports its share.
+"""
+
+# @feature mcp_log_opt
+# tag: unit
+
+use std.spec
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, file_write, time_now_unix_micros}
+use app.mcp.main_lazy_log_opt.{log_opt_parse, log_opt_load_plugins, log_opt_select, log_opt_apply, log_opt_optimize, log_opt_dir, log_opt_match}
+use app.mcp.main_lazy_telemetry.{tok_burn_rows, TokEvent}
+
+fn _ninja_log() -> text:
+    var lines: [text] = []
+    lines.push("[1/3] Building CXX object src/a.o")
+    lines.push("[2/3] Building CXX object src/b.o")
+    lines.push("[3/3] Linking CXX executable app")
+    lines.push("FAILED: src/b.o ")
+    lines.push("b.cpp:12:5: error: no member named 'frobnicate'")
+    lines.push("ninja: build stopped: subcommand failed.")
+    lines.join("\n")
+
+# Writes descriptors into a scratch dir so the repo's config/log_opt is
+# never the thing under test when a scenario needs a custom descriptor.
+fn _scratch_dir() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_logopt_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    dir
+
+fn _ninja_descriptor() -> text:
+    var l: [text] = []
+    l.push("log_opt | kind, pattern |")
+    l.push("    detect, ninja:")
+    l.push("    detect, ] Building")
+    l.push("    keep, FAILED:")
+    l.push("    keep, ninja: build stopped")
+    l.push("    drop, ] Building")
+    l.push("    drop, ] Linking")
+    l.push("    drop, ninja: no work to do")
+    l.join("\n") + "\n"
+
+fn _ev(feature: text, tool: text, captured: i64, returned: i64) -> TokEvent:
+    TokEvent(id: 0, feature: feature, tool: tool, ts: 0, captured: captured, returned: returned, hit: false)
+
+describe "Toolchain log optimizer plugins":
+
+    it "keeps the build failure and drops the progress lines of a ninja log":
+        """
+        An operator pipes a failing ninja build through the optimizer. The
+        error and the `FAILED:` line — the only two lines that carry
+        information — must survive; the per-object progress lines must not.
+        """
+        step("Install a ninja descriptor in a scratch plugin directory")
+        val dir = _scratch_dir()
+        file_write(dir + "/ninja.sdn", _ninja_descriptor())
+        env_set("SIMPLE_LOG_OPT_DIR", dir)
+
+        step("Run a failing ninja log through the optimizer")
+        val (out, name, dropped) = log_opt_optimize(_ninja_log())
+
+        step("The ninja descriptor claimed the log")
+        expect(name).to_equal("ninja")
+
+        step("Progress lines are gone, the failure and the error are not")
+        expect(out).to_contain("FAILED: src/b.o")
+        expect(out).to_contain("no member named")
+        expect(out).to_contain("ninja: build stopped")
+        expect(out.contains("] Building CXX object src/a.o")).to_equal(false)
+        expect(out.contains("] Linking CXX executable app")).to_equal(false)
+        expect(dropped).to_be_greater_than(2)
+
+    it "retains a line that a keep row and a drop row both match":
+        """
+        `keep` is checked before `drop` precisely so a descriptor can drop a
+        whole noisy family and rescue the one member that matters.
+        """
+        step("Build a descriptor whose keep and drop rows overlap")
+        val p = log_opt_parse("t", "log_opt | kind, pattern |\n    detect, X\n    keep, X-important\n    drop, X\n")
+        val lines = ["X-noise", "X-important", "plain"]
+        match p:
+            Some(plugin):
+                step("Apply it")
+                val (kept, dropped) = log_opt_apply(plugin, lines)
+                expect(kept).to_contain("X-important")
+                expect(kept).to_contain("plain")
+                expect(kept.contains("X-noise")).to_equal(false)
+                expect(dropped).to_equal(1)
+            nil:
+                assert_true(false)
+
+    it "collapses a run of identical lines into one repeat marker":
+        step("Feed four identical lines through a descriptor that drops nothing")
+        val p = log_opt_parse("t", "log_opt | kind, pattern |\n    detect, same\n")
+        match p:
+            Some(plugin):
+                val (kept, dropped) = log_opt_apply(plugin, ["same", "same", "same", "same"])
+                expect(kept.len()).to_equal(2)
+                expect(kept[0]).to_equal("same")
+                expect(kept[1]).to_contain("repeated 3 more time(s)")
+                expect(dropped).to_equal(3)
+            nil:
+                assert_true(false)
+
+    it "keeps a leading blank line instead of collapsing it against nothing":
+        """
+        Regression: the repeat-collapser compared each line to a `prev` that
+        starts as the empty string, so a log whose first retained line was
+        blank matched a line that had never been emitted and was silently
+        dropped as a repeat. `has_prev` now gates that comparison.
+        """
+        step("A log whose first line is blank")
+        val p = log_opt_parse("t", "log_opt | kind, pattern |\n    detect, marker\n")
+        match p:
+            Some(plugin):
+                val (kept, dropped) = log_opt_apply(plugin, ["", "marker", "tail"])
+                expect(kept.len()).to_equal(3)
+                expect(kept[0]).to_equal("")
+                expect(kept[1]).to_equal("marker")
+                expect(dropped).to_equal(0)
+            nil:
+                assert_true(false)
+
+    it "returns an unrecognised log unchanged":
+        """
+        Fail-open is correct here and only here: an unclaimed log is data the
+        engine has no opinion about, so it must not be altered.
+        """
+        step("Point at a plugin directory holding a ninja descriptor only")
+        val dir = _scratch_dir()
+        file_write(dir + "/ninja.sdn", _ninja_descriptor())
+        env_set("SIMPLE_LOG_OPT_DIR", dir)
+
+        step("Optimize a log that matches no detect row")
+        val raw = "hello\nworld\n"
+        val (out, name, dropped) = log_opt_optimize(raw)
+        expect(name).to_equal("")
+        expect(dropped).to_equal(0)
+        expect(out).to_equal(raw)
+
+    it "anchors a pattern that starts with a caret and substring-matches otherwise":
+        expect(log_opt_match("^abc", "abcdef")).to_equal(true)
+        expect(log_opt_match("^bcd", "abcdef")).to_equal(false)
+        expect(log_opt_match("bcd", "abcdef")).to_equal(true)
+
+    it "loads the shipped clang, rust, ninja, cmake and simple descriptors":
+        """
+        The repo ships one descriptor per toolchain the user named. If a file
+        is malformed it is silently skipped by the loader, so this scenario is
+        what catches an SDN typo.
+        """
+        step("Read the real config/log_opt directory")
+        env_set("SIMPLE_LOG_OPT_DIR", "config/log_opt")
+        val plugins = log_opt_load_plugins()
+        var names: [text] = []
+        for p in plugins:
+            names.push(p.name)
+        expect(names).to_contain("clang")
+        expect(names).to_contain("rust")
+        expect(names).to_contain("ninja")
+        expect(names).to_contain("cmake")
+        expect(names).to_contain("simple")
+
+describe "Code-burn attribution":
+
+    it "ranks the tool that spent the most of the budget first":
+        """
+        The report answers "where did my tokens go". A tool that returned
+        9000 bytes outranks one that returned 100, regardless of how many
+        times either was called.
+        """
+        step("Three recorded calls across two tools")
+        val rows = tok_burn_rows([
+            _ev("ctx", "simple_ctx_search", 200, 100),
+            _ev("logopt", "logopt:ninja", 40000, 9000),
+            _ev("ctx", "simple_ctx_search", 200, 100)
+        ])
+
+        step("The heaviest tool leads and its two calls are merged")
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].key).to_equal("logopt/logopt:ninja")
+        expect(rows[0].returned).to_equal(9000)
+        expect(rows[1].key).to_equal("ctx/simple_ctx_search")
+        expect(rows[1].calls).to_equal(2)
+        expect(rows[1].returned).to_equal(200)
+
+        step("Saving vs the unoptimized original is (captured - returned) / 4")
+        expect(rows[0].saved).to_equal(7750)

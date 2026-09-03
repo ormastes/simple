@@ -59,3 +59,29 @@ hard errors (`jit.rs:157`). Whether it covers this path was not tested.
 
 Found incidentally while working the os/runtime slice; the reporting lane's scope
 did not cover the JIT, so it is filed rather than patched.
+
+---
+
+## Triage 2026-09-02 (aarch64-apple-darwin) — STAYS OPEN, not re-verifiable on this host
+
+The JIT lane cannot be exercised here at all, so no verdict about it was
+formed. Evidence, not inference: every program compiled by
+`src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B,
+2026-09-01 09:24) on this host — including a three-line hello world — prints
+
+```
+[jit-fallback] unresolved external symbol 'rt_struct_alloc': whole module
+dropped to the interpreter (expect ~100-1000x slowdown).
+[INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT
+compile: Module error: unresolved external symbol 'rt_struct_alloc' would
+NULL-jump in JIT; deferring to interpreter
+```
+
+so the module under test always runs on the tree-walk interpreter. A clean run
+on this host is therefore evidence about the INTERPRETER, never about the JIT,
+and reporting one as "not reproducible" would be a false close. `bin/simple`
+here is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`) and has no `run`
+command at all, so it is not an alternative lane.
+
+Status unchanged. Closing this row needs a host where the seed's Cranelift JIT
+resolves `rt_struct_alloc`.
