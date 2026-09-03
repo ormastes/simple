@@ -1,0 +1,150 @@
+"""Structured descendant paths for the frozen two-root storage policy."""
+
+use std.common.storage_roots.*
+use std.common.crypto.sha256.{sha256_text}
+
+@unsafe(reason: "resolves existing path components so storage containment cannot cross a symlink", capabilities: [ffi])
+extern fn rt_path_absolute(path: text) -> text
+@unsafe(reason: "checks whether an existing path component must be resolved", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+
+pub val STORAGE_PATH_SEGMENT_MAX_BYTES: i64 = 120
+
+fn _slash(path: text) -> text:
+    path.replace("\\", "/")
+
+fn _windows_absolute(path: text) -> bool:
+    path.len() >= 3 and path.substring(1, 2) == ":" and path.substring(2, 3) == "/"
+
+fn _canonical_lexical(path: text) -> text?:
+    val source = _slash(path.trim())
+    if source == "" or (not source.starts_with("/") and not _windows_absolute(source)):
+        return nil
+    val windows = _windows_absolute(source)
+    val prefix = if windows: source.substring(0, 3) else: "/"
+    val start = if windows: 3 else: 1
+    var parts: [text] = []
+    for part in source.substring(start).split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == "..":
+            if parts.len() == 0:
+                return nil
+            parts.pop()
+        else:
+            parts.push(part)
+    if parts.len() == 0:
+        return prefix
+    if prefix == "/": "/" + parts.join("/") else: prefix + parts.join("/")
+
+fn _join(base: text, segment: text) -> text:
+    if base.ends_with("/"): base + segment else: base + "/" + segment
+
+fn _portable_reserved(segment: text) -> bool:
+    val upper = segment.upper()
+    if upper == "CON" or upper == "PRN" or upper == "AUX" or upper == "NUL":
+        return true
+    for index in 1..10:
+        if upper == "COM{index}" or upper == "LPT{index}":
+            return true
+    false
+
+pub fn validate_storage_segment(segment: text) -> Result<text, StoragePathError>:
+    if segment == "":
+        return Err(StoragePathError.EmptySegment)
+    if segment.len() > STORAGE_PATH_SEGMENT_MAX_BYTES:
+        return Err(StoragePathError.SegmentTooLong)
+    if segment == "." or segment == ".." or segment != segment.trim():
+        return Err(StoragePathError.InvalidSegment)
+    if segment.contains("/") or segment.contains("\\") or segment.contains(":") or segment.contains("\0"):
+        return Err(StoragePathError.InvalidSegment)
+    if segment.ends_with(".") or _portable_reserved(segment):
+        return Err(StoragePathError.InvalidSegment)
+    Ok(segment)
+
+pub fn is_strict_storage_descendant(root: CanonicalPath, candidate: CanonicalPath) -> bool:
+    val canonical_root = _canonical_lexical(root.value)
+    val canonical_candidate = _canonical_lexical(candidate.value)
+    if canonical_root == nil or canonical_candidate == nil:
+        return false
+    val root_value = canonical_root!
+    val candidate_value = canonical_candidate!
+    val prefix = if root_value.ends_with("/"): root_value else: root_value + "/"
+    candidate_value.starts_with(prefix)
+
+pub fn validate_storage_containment(root: CanonicalPath, candidate: CanonicalPath) -> Result<CanonicalPath, StoragePathError>:
+    val raw_candidate = _slash(candidate.value)
+    for raw_segment in raw_candidate.split("/"):
+        if raw_segment == "." or raw_segment == "..":
+            return Err(StoragePathError.InvalidSegment)
+    val canonical_root = _canonical_lexical(root.value)
+    val canonical_candidate = _canonical_lexical(candidate.value)
+    if canonical_root == nil or canonical_candidate == nil:
+        return Err(StoragePathError.OutsideRoot)
+    val normalized_root = CanonicalPath(value: canonical_root!)
+    val normalized_candidate = CanonicalPath(value: canonical_candidate!)
+    if not is_strict_storage_descendant(normalized_root, normalized_candidate):
+        return Err(StoragePathError.OutsideRoot)
+
+    val resolved_root = unsafe(capabilities: [ffi]):
+        rt_path_absolute(normalized_root.value)
+    if _canonical_lexical(resolved_root) != Some(normalized_root.value):
+        return Err(StoragePathError.SymlinkEscape)
+
+    val relative = normalized_candidate.value.substring(normalized_root.value.len() + 1)
+    var prefix = normalized_root.value
+    for segment in relative.split("/"):
+        validate_storage_segment(segment)?
+        prefix = _join(prefix, segment)
+        val exists = unsafe(capabilities: [ffi]):
+            rt_file_exists(prefix)
+        if exists:
+            val resolved = unsafe(capabilities: [ffi]):
+                rt_path_absolute(prefix)
+            val canonical_resolved = _canonical_lexical(resolved)
+            if canonical_resolved == nil:
+                return Err(StoragePathError.SymlinkEscape)
+            val resolved_path = CanonicalPath(value: canonical_resolved!)
+            if resolved_path.value != normalized_root.value and not is_strict_storage_descendant(normalized_root, resolved_path):
+                return Err(StoragePathError.SymlinkEscape)
+    Ok(normalized_candidate)
+
+fn _derive(root: CanonicalPath, segments: [text]) -> Result<CanonicalPath, StoragePathError>:
+    var path = root.value
+    for segment in segments:
+        val valid = validate_storage_segment(segment)?
+        path = _join(path, valid)
+    validate_storage_containment(root, CanonicalPath(value: path))
+
+fn _key_shard(key: text) -> text:
+    sha256_text(key).substring(0, 2)
+
+pub fn derive_user_storage_path(roots: StorageRoots, request: UserPathRequest) -> Result<CanonicalPath, StoragePathError>:
+    match request.storage_class:
+        case StorageClass.ReusableCache:
+            _derive(roots.user_root, ["cache", request.producer, request.schema, _key_shard(request.key), request.key])
+        case StorageClass.Download:
+            _derive(roots.user_root, ["downloads", request.producer, request.key])
+        case StorageClass.Package:
+            _derive(roots.user_root, ["packages", request.producer, request.schema, request.key])
+        case StorageClass.Toolchain:
+            _derive(roots.user_root, ["toolchains", request.producer, request.schema, request.key])
+        case _:
+            Err(StoragePathError.InvalidSegment)
+
+pub fn derive_worktree_storage_path(roots: StorageRoots, request: WorktreePathRequest) -> Result<CanonicalPath, StoragePathError>:
+    val prefix = match request.storage_class:
+        case StorageClass.Ephemeral: "tmp"
+        case StorageClass.Build: "build"
+        case StorageClass.TestArtifact: "test-artifacts"
+        case StorageClass.Evidence: "evidence"
+        case StorageClass.ManagedWorktree: "worktrees"
+        case _: return Err(StoragePathError.InvalidSegment)
+    _derive(roots.worktree_root, [prefix, request.operation.value, request.session, request.item])
+
+pub fn storage_root_for_path(roots: StorageRoots, candidate: CanonicalPath) -> Result<StorageRootKind, StoragePathError>:
+    if validate_storage_containment(roots.user_root, candidate).is_ok():
+        return Ok(StorageRootKind.User)
+    if validate_storage_containment(roots.worktree_root, candidate).is_ok():
+        return Ok(StorageRootKind.Worktree)
+    Err(StoragePathError.OutsideRoot)

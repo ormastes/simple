@@ -1,0 +1,139 @@
+"""Versioned ownership markers for cleanup-managed storage roots."""
+
+use std.common.storage_roots.*
+use std.common.crypto.sha256.{sha256_text}
+
+@unsafe(reason: "exclusive marker creation prevents concurrent ownership replacement", capabilities: [ffi])
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+@unsafe(reason: "marker validation reads one bounded Simple-owned metadata file", capabilities: [ffi])
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+@unsafe(reason: "marker validation distinguishes an existing marker from first creation", capabilities: [ffi])
+extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "durably records marker contents before managed cleanup becomes legal", capabilities: [ffi])
+extern fn rt_file_fsync(path: text) -> bool
+
+use std.nogc_sync_mut.storage_roots.path_policy.{validate_storage_containment}
+
+pub val STORAGE_ROOT_MARKER_MAGIC_V1: text = "simple-storage-root-v1"
+pub val STORAGE_ROOT_MARKER_FILE_V1: text = ".simple-storage-root-v1"
+pub val STORAGE_ROOT_MARKER_MAX_BYTES: i64 = 4096
+
+pub struct StorageRootMarkerV1:
+    root_kind: StorageRootKind
+    canonical_root_digest: text
+    policy_version: u32
+    created_at: text
+    creator_build_digest: text
+    cleanup_classes: text
+
+pub enum StorageMarkerError:
+    OutsideRoot
+    SymlinkEscape
+    Missing
+    Malformed
+    Mismatch
+    AlreadyOwnedByAnotherRoot
+    WriteFailed
+    SyncFailed
+
+fn _kind_text(kind: StorageRootKind) -> text:
+    match kind:
+        case StorageRootKind.User: "user"
+        case StorageRootKind.Worktree: "worktree"
+
+fn _kind(value: text) -> StorageRootKind?:
+    if value == "user": return Some(StorageRootKind.User)
+    if value == "worktree": return Some(StorageRootKind.Worktree)
+    nil
+
+pub fn storage_root_identity(root: CanonicalPath) -> text:
+    sha256_text(STORAGE_ROOT_MARKER_MAGIC_V1 + "\n" + root.value)
+
+pub fn storage_root_marker_path(root: CanonicalPath) -> CanonicalPath:
+    CanonicalPath(value: root.value + "/" + STORAGE_ROOT_MARKER_FILE_V1)
+
+pub fn encode_storage_root_marker(marker: StorageRootMarkerV1) -> text:
+    [
+        "magic=" + STORAGE_ROOT_MARKER_MAGIC_V1,
+        "root_kind=" + _kind_text(marker.root_kind),
+        "canonical_root_digest=" + marker.canonical_root_digest,
+        "policy_version={marker.policy_version}",
+        "created_at=" + marker.created_at,
+        "creator_build_digest=" + marker.creator_build_digest,
+        "cleanup_classes=" + marker.cleanup_classes,
+        "",
+    ].join("\n")
+
+fn _value(lines: [text], key: text) -> text?:
+    val prefix = key + "="
+    for line in lines:
+        if line.starts_with(prefix):
+            return Some(line.substring(prefix.len()))
+    nil
+
+pub fn decode_storage_root_marker(content: text) -> Result<StorageRootMarkerV1, StorageMarkerError>:
+    if content.len() <= 0 or content.len() > STORAGE_ROOT_MARKER_MAX_BYTES:
+        return Err(StorageMarkerError.Malformed)
+    val lines = content.split("\n")
+    val magic = _value(lines, "magic")
+    val kind_text = _value(lines, "root_kind")
+    val root_digest = _value(lines, "canonical_root_digest")
+    val policy_text = _value(lines, "policy_version")
+    val created_at = _value(lines, "created_at")
+    val creator = _value(lines, "creator_build_digest")
+    val cleanup = _value(lines, "cleanup_classes")
+    if magic != Some(STORAGE_ROOT_MARKER_MAGIC_V1) or kind_text == nil or root_digest == nil or policy_text == nil or created_at == nil or creator == nil or cleanup == nil:
+        return Err(StorageMarkerError.Malformed)
+    val kind = _kind(kind_text!)
+    if kind == nil or root_digest! == "" or created_at! == "" or creator! == "" or cleanup! == "":
+        return Err(StorageMarkerError.Malformed)
+    val policy = int(policy_text!)
+    if policy != STORAGE_ROOT_POLICY_VERSION_V1.to_i64():
+        return Err(StorageMarkerError.Malformed)
+    Ok(StorageRootMarkerV1(
+        root_kind: kind!,
+        canonical_root_digest: root_digest!,
+        policy_version: policy.to_u32(),
+        created_at: created_at!,
+        creator_build_digest: creator!,
+        cleanup_classes: cleanup!,
+    ))
+
+pub fn validate_storage_root_marker(root: CanonicalPath, kind: StorageRootKind, marker: StorageRootMarkerV1) -> Result<(), StorageMarkerError>:
+    if marker.root_kind != kind or marker.policy_version != STORAGE_ROOT_POLICY_VERSION_V1 or marker.canonical_root_digest != storage_root_identity(root):
+        return Err(StorageMarkerError.Mismatch)
+    Ok(())
+
+pub fn ensure_storage_root_marker(root: CanonicalPath, kind: StorageRootKind, created_at: text, creator_build_digest: text, cleanup_classes: text) -> Result<StorageRootMarkerV1, StorageMarkerError>:
+    val path = storage_root_marker_path(root)
+    match validate_storage_containment(root, path):
+        case Err(StoragePathError.SymlinkEscape): return Err(StorageMarkerError.SymlinkEscape)
+        case Err(_): return Err(StorageMarkerError.OutsideRoot)
+        case Ok(_): pass
+    val marker = StorageRootMarkerV1(
+        root_kind: kind,
+        canonical_root_digest: storage_root_identity(root),
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        created_at: created_at,
+        creator_build_digest: creator_build_digest,
+        cleanup_classes: cleanup_classes,
+    )
+    val exists = unsafe(capabilities: [ffi]):
+        rt_file_exists(path.value)
+    if exists:
+        val existing = unsafe(capabilities: [ffi]):
+            rt_file_read_regular_no_follow_bounded(path.value, STORAGE_ROOT_MARKER_MAX_BYTES)
+        if existing == nil:
+            return Err(StorageMarkerError.AlreadyOwnedByAnotherRoot)
+        val parsed = decode_storage_root_marker(existing!)?
+        validate_storage_root_marker(root, kind, parsed)?
+        return Ok(parsed)
+    val created = unsafe(capabilities: [ffi]):
+        rt_file_create_excl(path.value, encode_storage_root_marker(marker))
+    if not created:
+        return Err(StorageMarkerError.WriteFailed)
+    val synced = unsafe(capabilities: [ffi]):
+        rt_file_fsync(path.value)
+    if not synced:
+        return Err(StorageMarkerError.SyncFailed)
+    Ok(marker)
