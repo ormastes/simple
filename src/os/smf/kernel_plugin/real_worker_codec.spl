@@ -1,0 +1,113 @@
+use os.smf.kernel_plugin.worker_protocol.*
+
+pub const KPF_REAL_WORKER_PREFIX_V1: text = "KPFW1|"
+pub const KPF_REAL_WORKER_MAX_FRAME_BYTES_V1: i64 = 4 * 1024 * 1024
+
+pub struct KpfRealWorkerDecodeV1:
+    outcome: KpfWorkerOutcome
+    frame: KpfWorkerFrameV1
+
+fn real_worker_kind_code(kind: KpfWorkerFrameKind) -> i64:
+    if kind == KpfWorkerFrameKind.Handshake: return 0
+    if kind == KpfWorkerFrameKind.HandshakeAccepted: return 1
+    if kind == KpfWorkerFrameKind.Submit: return 2
+    if kind == KpfWorkerFrameKind.Completion: return 3
+    if kind == KpfWorkerFrameKind.Cancel: return 4
+    if kind == KpfWorkerFrameKind.Quiesce: return 5
+    if kind == KpfWorkerFrameKind.Quiesced: return 6
+    if kind == KpfWorkerFrameKind.Close: return 7
+    8
+
+fn real_worker_kind(code: i64) -> KpfWorkerFrameKind?:
+    if code == 0: return KpfWorkerFrameKind.Handshake
+    if code == 1: return KpfWorkerFrameKind.HandshakeAccepted
+    if code == 2: return KpfWorkerFrameKind.Submit
+    if code == 3: return KpfWorkerFrameKind.Completion
+    if code == 4: return KpfWorkerFrameKind.Cancel
+    if code == 5: return KpfWorkerFrameKind.Quiesce
+    if code == 6: return KpfWorkerFrameKind.Quiesced
+    if code == 7: return KpfWorkerFrameKind.Close
+    if code == 8: return KpfWorkerFrameKind.Closed
+    nil
+
+fn real_worker_hex_digit(value: i64) -> text:
+    if value < 10: return "{value}"
+    if value == 10: return "a"
+    if value == 11: return "b"
+    if value == 12: return "c"
+    if value == 13: return "d"
+    if value == 14: return "e"
+    "f"
+
+fn real_worker_hex_nibble(code: i64) -> i64:
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 97 and code <= 102: return code - 97 + 10
+    -1
+
+fn real_worker_payload_hex(payload: [u8]) -> text:
+    var result = ""
+    var index = 0
+    while index < payload.len:
+        val value = payload[index] as i64
+        result = result + real_worker_hex_digit(value / 16)
+        result = result + real_worker_hex_digit(value % 16)
+        index = index + 1
+    result
+
+fn real_worker_decode_payload(value: text, expected_bytes: i64) -> [u8]?:
+    if (expected_bytes < 0 or not value.starts_with("x") or
+            value.len() != expected_bytes * 2 + 1):
+        return nil
+    var result: [u8] = []
+    var index = 1
+    while index < value.len():
+        val high = real_worker_hex_nibble(value.char_code_at(index))
+        val low = real_worker_hex_nibble(value.char_code_at(index + 1))
+        if high < 0 or low < 0: return nil
+        result.push((high * 16 + low) as u8)
+        index = index + 2
+    result
+
+pub fn kpf_real_worker_max_line_bytes_v1(maximum_frame_bytes: i64) -> i64:
+    if (maximum_frame_bytes < 0 or
+            maximum_frame_bytes > KPF_REAL_WORKER_MAX_FRAME_BYTES_V1):
+        return 0
+    192 + maximum_frame_bytes * 2
+
+pub fn kpf_real_worker_encode_frame_v1(frame: KpfWorkerFrameV1,
+        maximum_frame_bytes: i64) -> text:
+    if kpf_worker_validate_frame_v1(frame, maximum_frame_bytes) != KpfWorkerOutcome.Accepted:
+        return ""
+    KPF_REAL_WORKER_PREFIX_V1 + "{frame.protocol_version}|{real_worker_kind_code(frame.kind)}|" +
+        "{frame.generation}|{frame.session_epoch}|{frame.request_slot}|{frame.request_epoch}|" +
+        "{frame.capability_bits}|{frame.payload_length}|x{real_worker_payload_hex(frame.payload)}\n"
+
+pub fn kpf_real_worker_decode_line_v1(line: text,
+        maximum_frame_bytes: i64) -> KpfRealWorkerDecodeV1:
+    val empty = kpf_worker_empty_frame_v1()
+    if line.len() > kpf_real_worker_max_line_bytes_v1(maximum_frame_bytes):
+        return KpfRealWorkerDecodeV1(outcome: KpfWorkerOutcome.FrameTooLarge, frame: empty)
+    if not line.starts_with(KPF_REAL_WORKER_PREFIX_V1):
+        return KpfRealWorkerDecodeV1(outcome: KpfWorkerOutcome.MalformedFrame, frame: empty)
+    val fields = line.trim().split("|")
+    if fields.len() != 10 or fields[0] != "KPFW1":
+        return KpfRealWorkerDecodeV1(outcome: KpfWorkerOutcome.MalformedFrame, frame: empty)
+    val protocol_version = fields[1].to_i64() ?? -1
+    val kind = real_worker_kind(fields[2].to_i64() ?? -1)
+    val generation = fields[3].to_i64() ?? -1
+    val session_epoch = fields[4].to_i64() ?? -1
+    val request_slot = fields[5].to_i64() ?? -2
+    val request_epoch = fields[6].to_i64() ?? -1
+    val capability_bits = fields[7].to_i64() ?? -1
+    val payload_length = fields[8].to_i64() ?? -1
+    val payload = real_worker_decode_payload(fields[9], payload_length)
+    if (protocol_version < 0 or kind == nil or generation < 0 or session_epoch < 0 or
+            request_epoch < 0 or capability_bits < 0 or payload == nil):
+        return KpfRealWorkerDecodeV1(outcome: KpfWorkerOutcome.MalformedFrame, frame: empty)
+    val frame = KpfWorkerFrameV1(protocol_version: protocol_version as u32,
+        kind: kind.unwrap(), generation: generation, session_epoch: session_epoch,
+        request_slot: request_slot, request_epoch: request_epoch,
+        capability_bits: capability_bits as u64, payload_length: payload_length,
+        payload: payload.unwrap())
+    KpfRealWorkerDecodeV1(
+        outcome: kpf_worker_validate_frame_v1(frame, maximum_frame_bytes), frame: frame)

@@ -1,0 +1,177 @@
+use os.smf.kernel_plugin.real_worker_codec.*
+use os.smf.kernel_plugin.worker_protocol.*
+use std.nogc_sync_mut.io.process_ops.{
+    browser_renderer_spawn_sandboxed,
+    process_close_piped, process_is_piped_alive, process_kill,
+    process_read_stdout, process_spawn_piped, process_write_stdin_some
+}
+
+pub const KPF_REAL_WORKER_FILESYSTEM_CAPABILITY_V1: u64 = 1u64 << 62
+pub const KPF_REAL_WORKER_NETWORK_CAPABILITY_V1: u64 = 1u64 << 61
+
+pub struct KpfRealWorkerExitV1:
+    outcome: KpfWorkerOutcome
+    native_exit_code: i64
+    native_exit_code_known: bool
+    clean_protocol_close: bool
+
+pub class KpfRealWorkerProcessV1:
+    process_handle: i64
+    maximum_frame_bytes: i64
+    maximum_pending_bytes: i64
+    maximum_write_bytes_per_poll: i64
+    read_pending: text
+    write_pending: text
+    write_offset: i64
+    deadline_ns: i64
+    isolated: bool
+    var alive: bool
+    var terminated: bool
+    var closed: bool
+    var clean_protocol_close: bool
+    var output_high_water_bytes: i64
+
+impl KpfRealWorkerProcessV1:
+    pub static fn spawn(command: text, args: [text], maximum_frame_bytes: i64,
+            maximum_write_bytes_per_poll: i64,
+            granted_capability_bits: u64) -> KpfRealWorkerProcessV1:
+        KpfRealWorkerProcessV1.spawn_with_placement(command, args,
+            maximum_frame_bytes, maximum_write_bytes_per_poll,
+            granted_capability_bits, true)
+
+    pub static fn spawn_fixture_unisolated(command: text, args: [text],
+            maximum_frame_bytes: i64, maximum_write_bytes_per_poll: i64,
+            granted_capability_bits: u64) -> KpfRealWorkerProcessV1:
+        KpfRealWorkerProcessV1.spawn_with_placement(command, args,
+            maximum_frame_bytes, maximum_write_bytes_per_poll,
+            granted_capability_bits, false)
+
+    static fn spawn_with_placement(command: text, args: [text],
+            maximum_frame_bytes: i64, maximum_write_bytes_per_poll: i64,
+            granted_capability_bits: u64,
+            isolated: bool) -> KpfRealWorkerProcessV1:
+        val forbidden = KPF_REAL_WORKER_FILESYSTEM_CAPABILITY_V1 |
+            KPF_REAL_WORKER_NETWORK_CAPABILITY_V1
+        val valid = (command.starts_with("/") and maximum_frame_bytes > 0 and
+            maximum_frame_bytes <= KPF_REAL_WORKER_MAX_FRAME_BYTES_V1 and
+            maximum_write_bytes_per_poll > 0 and
+            (granted_capability_bits & forbidden) == 0)
+        val process_handle = if not valid:
+            -1
+        elif isolated:
+            browser_renderer_spawn_sandboxed(command, args)
+        else:
+            process_spawn_piped(command, args)
+        KpfRealWorkerProcessV1(process_handle: process_handle,
+            maximum_frame_bytes: maximum_frame_bytes,
+            maximum_pending_bytes: kpf_real_worker_max_line_bytes_v1(maximum_frame_bytes) * 2,
+            maximum_write_bytes_per_poll: maximum_write_bytes_per_poll,
+            read_pending: "", write_pending: "", write_offset: 0, deadline_ns: 0,
+            isolated: isolated,
+            alive: process_handle > 0, terminated: false, closed: false,
+            clean_protocol_close: false, output_high_water_bytes: 0)
+
+    me arm_deadline(deadline_ns: i64):
+        self.deadline_ns = deadline_ns
+
+    me send(frame: KpfWorkerFrameV1) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if not self.observe_alive(): return KpfWorkerOutcome.WorkerCrashed
+        if self.write_pending != "": return KpfWorkerOutcome.WouldBlock
+        val encoded = kpf_real_worker_encode_frame_v1(frame, self.maximum_frame_bytes)
+        if encoded == "":
+            return kpf_worker_validate_frame_v1(frame, self.maximum_frame_bytes)
+        self.write_pending = encoded
+        self.write_offset = 0
+        val flushed = self.flush_write()
+        if flushed == KpfWorkerOutcome.WorkerCrashed: return flushed
+        KpfWorkerOutcome.Accepted
+
+    me flush_write() -> KpfWorkerOutcome:
+        if self.write_pending == "": return KpfWorkerOutcome.Accepted
+        if not self.observe_alive(): return KpfWorkerOutcome.WorkerCrashed
+        val written = process_write_stdin_some(self.process_handle, self.write_pending,
+            self.write_offset, self.maximum_write_bytes_per_poll)
+        if written < 0:
+            self.mark_crashed()
+            return KpfWorkerOutcome.WorkerCrashed
+        if written == 0: return KpfWorkerOutcome.WouldBlock
+        self.write_offset = self.write_offset + written
+        if self.write_offset < self.write_pending.len(): return KpfWorkerOutcome.WouldBlock
+        self.write_pending = ""
+        self.write_offset = 0
+        KpfWorkerOutcome.Accepted
+
+    me receive(now_ns: i64) -> (KpfWorkerOutcome, KpfWorkerFrameV1):
+        val empty = kpf_worker_empty_frame_v1()
+        if self.closed: return (KpfWorkerOutcome.Closed, empty)
+        if self.deadline_ns > 0 and now_ns >= self.deadline_ns:
+            self.terminate()
+            return (KpfWorkerOutcome.TimedOut, empty)
+        val write_state = self.flush_write()
+        if write_state == KpfWorkerOutcome.WorkerCrashed:
+            return (write_state, empty)
+        val chunk = process_read_stdout(self.process_handle)
+        if chunk.len() > self.maximum_pending_bytes - self.read_pending.len():
+            self.terminate()
+            return (KpfWorkerOutcome.FrameTooLarge, empty)
+        self.read_pending = self.read_pending + chunk
+        if self.read_pending.len() > self.output_high_water_bytes:
+            self.output_high_water_bytes = self.read_pending.len()
+        val newline = self.read_pending.find("\n")
+        if newline < 0:
+            if not self.observe_alive(): return (KpfWorkerOutcome.WorkerCrashed, empty)
+            return (KpfWorkerOutcome.Empty, empty)
+        val line = self.read_pending.substring(0, newline)
+        self.read_pending = self.read_pending.substring(newline + 1, self.read_pending.len())
+        val decoded = kpf_real_worker_decode_line_v1(line, self.maximum_frame_bytes)
+        if decoded.outcome != KpfWorkerOutcome.Accepted:
+            self.terminate()
+            return (decoded.outcome, empty)
+        if decoded.frame.kind == KpfWorkerFrameKind.Closed:
+            self.clean_protocol_close = true
+        (KpfWorkerOutcome.Accepted, decoded.frame)
+
+    me observe_alive() -> bool:
+        if not self.alive: return false
+        if not process_is_piped_alive(self.process_handle):
+            self.alive = false
+        self.alive
+
+    me mark_crashed():
+        self.alive = false
+
+    me terminate():
+        if self.closed: return
+        if self.process_handle > 1:
+            process_kill(self.process_handle)
+            process_close_piped(self.process_handle)
+        self.alive = false
+        self.terminated = true
+        self.closed = true
+        self.read_pending = ""
+        self.write_pending = ""
+
+    me close() -> KpfRealWorkerExitV1:
+        if not self.closed:
+            if self.observe_alive(): process_close_piped(self.process_handle)
+            self.alive = false
+            self.closed = true
+        val outcome = if self.clean_protocol_close:
+            KpfWorkerOutcome.Closed
+        else:
+            KpfWorkerOutcome.WorkerCrashed
+        KpfRealWorkerExitV1(outcome: outcome, native_exit_code: -1,
+            native_exit_code_known: false,
+            clean_protocol_close: self.clean_protocol_close)
+
+    pub fn exit_status() -> KpfRealWorkerExitV1:
+        val outcome = if self.clean_protocol_close:
+            KpfWorkerOutcome.Closed
+        elif self.terminated:
+            KpfWorkerOutcome.TimedOut
+        else:
+            KpfWorkerOutcome.WorkerCrashed
+        KpfRealWorkerExitV1(outcome: outcome, native_exit_code: -1,
+            native_exit_code_known: false,
+            clean_protocol_close: self.clean_protocol_close)
