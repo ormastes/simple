@@ -1,0 +1,34 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use common.lint_kernel.mixed_language.LintLanguageResultV1
+use common.lint_kernel.model.LintVerdict
+use app.lint.provider.rust.worker.RustLintWorkerReceiptV1
+use app.lint.provider.rust.adapter.rust_result_verdict
+use app.lint.provider.cpp.model.{CppAnalysisState, CppToolResultV1}
+
+pub fn simple_lint_language_result_v1(language_id: KpfId128, provider_id: KpfId128, verdict: LintVerdict, completed_units: u32, completed_rules: u32, completed_phases: u64, diagnostic_count: u32, error_count: u32, warning_count: u32, receipt_digest: KpfDigest256) -> LintLanguageResultV1:
+    LintLanguageResultV1(language_id, provider_id, verdict, completed_units, completed_rules, completed_phases, diagnostic_count, error_count, warning_count, receipt_digest, true)
+
+pub fn rust_lint_language_result_v1(language_id: KpfId128, provider_id: KpfId128, receipt: RustLintWorkerReceiptV1, completed_rules: u32, completed_phases: u64, receipt_digest: KpfDigest256) -> LintLanguageResultV1:
+    val authoritative = receipt.metadata_valid and receipt.command_fingerprint != "" and receipt.result.identity.rustc_version != "" and receipt.result.identity.cargo_version != ""
+    var errors = 0u32
+    var warnings = 0u32
+    for diagnostic in receipt.result.diagnostics:
+        if diagnostic.level == "error": errors = errors + 1
+        elif diagnostic.level == "warning": warnings = warnings + 1
+    val completed_units = if authoritative and receipt.result.state == os.tooling.rust_analyzer_worker.model.RustAnalysisState.Complete: 1u32 else: 0u32
+    val actual_rules = if completed_units == 1: completed_rules else: 0u32
+    val actual_phases = if completed_units == 1: completed_phases else: 0u64
+    LintLanguageResultV1(language_id, provider_id, rust_result_verdict(receipt.result), completed_units, actual_rules, actual_phases, receipt.result.diagnostics.len(), errors, warnings, receipt_digest, authoritative)
+
+pub fn cpp_lint_language_result_v1(language_id: KpfId128, provider_id: KpfId128, result: CppToolResultV1, completed_rules: u32, completed_phases: u64, receipt_digest: KpfDigest256) -> LintLanguageResultV1:
+    val authoritative = result.state == CppAnalysisState.Complete and result.receipt != nil and result.toolchain.version != "" and result.toolchain.version != "unknown"
+    var errors = 0u32
+    var warnings = 0u32
+    for diagnostic in result.diagnostics:
+        if diagnostic.severity == "error": errors = errors + 1
+        elif diagnostic.severity == "warning": warnings = warnings + 1
+    val verdict = if not authoritative: LintVerdict.NotAnalyzed elif result.diagnostics.len() == 0: LintVerdict.CompleteClean else: LintVerdict.CompleteWithFindings
+    val completed_units = if authoritative: 1u32 else: 0u32
+    val actual_rules = if authoritative: completed_rules else: 0u32
+    val actual_phases = if authoritative: completed_phases else: 0u64
+    LintLanguageResultV1(language_id, provider_id, verdict, completed_units, actual_rules, actual_phases, result.diagnostics.len(), errors, warnings, receipt_digest, authoritative)
