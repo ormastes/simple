@@ -1,0 +1,81 @@
+use std.spec.*
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.lint_kernel.model.{ArtifactKeyV1, SourceSpanV1, DiagnosticV1}
+use std.tooling_kernel.ToolingDocumentSnapshotV1
+use app.toolingd.*
+
+fn id(value: u64) -> KpfId128:
+    KpfId128(hi: 0, lo: value)
+
+fn digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn snapshot(revision: u64, content: u64) -> ToolingDocumentSnapshotV1:
+    ToolingDocumentSnapshotV1(document_id: id(10), language_id: id(20), revision: revision, content_digest: digest(content))
+
+fn diagnostic(revision: u64) -> DiagnosticV1:
+    val artifact = ArtifactKeyV1(workspace_id: id(1), language_id: id(20), path_id: id(2), target_id: id(3), configuration_digest: digest(30))
+    DiagnosticV1(rule_id: id(4), provider_id: id(5), severity: 2, category: 1, primary_span: SourceSpanV1(artifact: artifact, revision: revision, start_byte: 1, end_byte: 3), message_id: id(6), fix_digest: digest(40))
+
+fn connected_daemon() -> (ToolingDaemonV1, ToolingConnectionHandleV1):
+    val daemon = ToolingDaemonV1.create(2, 4, 8, 8)
+    val connected = daemon.connect(tooling_protocol_version_v1())
+    (daemon, connected.connection)
+
+describe "KPF tooling daemon document-session protocol":
+    it "negotiates only the supported protocol major and minor":
+        step("Reject an unknown protocol major before allocating a connection")
+        val daemon = ToolingDaemonV1.create(1, 1, 1, 1)
+        val rejected = daemon.connect(ToolingProtocolVersionV1(major: 2, minor: 0))
+        expect(rejected.status).to_equal(ToolingDaemonStatusV1.UnsupportedProtocol)
+        expect(rejected.connection.slot).to_equal(-1)
+        step("Accept the exact version after the rejected handshake")
+        expect(daemon.connect(tooling_protocol_version_v1()).status).to_equal(ToolingDaemonStatusV1.Ok)
+
+    it "rejects stale document updates and stale analysis requests":
+        step("Open revision one through a versioned document session")
+        val (daemon, connection) = connected_daemon()
+        val opened = daemon.open_document(connection, ToolingOpenDocumentSessionV1(snapshot: snapshot(1, 100), provider_generation: 7))
+        expect(opened.status).to_equal(ToolingDaemonStatusV1.Ok)
+        step("Reject an update that does not advance the immutable revision")
+        expect(daemon.update_document(opened.document, snapshot(1, 101))).to_equal(ToolingDaemonStatusV1.RevisionStale)
+        step("Advance to revision two and reject a request for revision one")
+        expect(daemon.update_document(opened.document, snapshot(2, 102))).to_equal(ToolingDaemonStatusV1.Ok)
+        val stale = daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(100)))
+        expect(stale.status).to_equal(ToolingDaemonStatusV1.RevisionStale)
+
+    it "cancels superseded analysis and rejects its stale publication":
+        step("Begin analysis for the current document revision")
+        val (daemon, connection) = connected_daemon()
+        val opened = daemon.open_document(connection, ToolingOpenDocumentSessionV1(snapshot: snapshot(1, 200), provider_generation: 8))
+        val first = daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(200)))
+        expect(first.status).to_equal(ToolingDaemonStatusV1.Ok)
+        step("Publish a newer snapshot and observe cancellation of old work")
+        expect(daemon.update_document(opened.document, snapshot(2, 201))).to_equal(ToolingDaemonStatusV1.Ok)
+        expect(daemon.is_cancelled(first.ticket)).to_be(true)
+        val stale = daemon.publish_diagnostics(ToolingPublishDiagnosticsV1(ticket: first.ticket, diagnostics: [diagnostic(1)]))
+        expect(stale.status).to_equal(ToolingDaemonStatusV1.Cancelled)
+        expect(stale.accepted_count).to_equal(0)
+
+    it "supports explicit idempotent cancellation while accepting current results":
+        step("Cancel one request explicitly and keep cancellation idempotent")
+        val (daemon, connection) = connected_daemon()
+        val opened = daemon.open_document(connection, ToolingOpenDocumentSessionV1(snapshot: snapshot(1, 300), provider_generation: 9))
+        val cancelled = daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(300)))
+        expect(daemon.cancel(cancelled.ticket)).to_equal(ToolingDaemonStatusV1.Ok)
+        expect(daemon.cancel(cancelled.ticket)).to_equal(ToolingDaemonStatusV1.Ok)
+        expect(daemon.publish_diagnostics(ToolingPublishDiagnosticsV1(ticket: cancelled.ticket, diagnostics: [diagnostic(1)])).status).to_equal(ToolingDaemonStatusV1.Cancelled)
+        step("Begin fresh work and publish diagnostics for the exact snapshot")
+        val current = daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(300)))
+        val published = daemon.publish_diagnostics(ToolingPublishDiagnosticsV1(ticket: current.ticket, diagnostics: [diagnostic(1)]))
+        expect(published.status).to_equal(ToolingDaemonStatusV1.Ok)
+        expect(published.accepted_count).to_equal(1)
+
+    it "disconnects every owned document session and cancels in-flight work":
+        step("Disconnect a client with active analysis")
+        val (daemon, connection) = connected_daemon()
+        val opened = daemon.open_document(connection, ToolingOpenDocumentSessionV1(snapshot: snapshot(1, 400), provider_generation: 10))
+        val request = daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(400)))
+        expect(daemon.disconnect(connection)).to_equal(ToolingDaemonStatusV1.Ok)
+        expect(daemon.is_cancelled(request.ticket)).to_be(true)
+        expect(daemon.begin_analysis(ToolingBeginAnalysisV1(document: opened.document, revision: 1, content_digest: digest(400))).status).to_equal(ToolingDaemonStatusV1.ConnectionNotFound)
