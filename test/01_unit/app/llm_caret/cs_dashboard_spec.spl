@@ -1,0 +1,284 @@
+"""
+## Purpose and audience
+Purpose: Prove that running `cs` with no arguments gives me a usable multi-agent
+dashboard - I can see at a glance whether the agent manager is reachable and how
+many agents it holds, pick one out of the list and read its detail, switch or
+maximize its pane, and type into a command line that always sits on the bottom
+row. When something cannot be measured or reached, the dashboard must tell me so
+instead of showing me a comfortable zero.
+Audience: compiler and tooling engineers who maintain the caret-suite dashboard.
+"""
+# @req: REQ-APP-LLM-CARET-CS-DASHBOARD-001 — stable requirement identity for this spec.
+
+use std.spec.*
+use app.llm_caret.cs_dashboard.{cs_resolve_exe, 
+    CsAgent, CsDashboard, cs_dashboard_new, cs_refresh, cs_render,
+    cs_handle_command, cs_help_text, cs_launch_argv, cs_apply_action
+}
+
+fn _launched(session: text, specs: [text]) -> CsDashboard:
+    var d = cs_dashboard_new(session)
+    for s in specs:
+        val (next, _out) = cs_handle_command(d, "/launch " + s)
+        d = next
+    d
+
+fn _lines(rendered: text) -> [text]:
+    rendered.split("\n")
+
+describe "cs dashboard - launching agents":
+
+
+
+    it "resolves a launch command to a real executable before spawning a pane":
+        """
+        argv[0] is a NAME. The repo's Simple binary is not installed on PATH,
+        so launching the bare name spawned a pane that died instantly on exec
+        while the roster showed an agent that never existed. Resolution has to
+        happen before the pane is created.
+        """
+        step("A command that exists on PATH resolves to a path")
+        val sh = cs_resolve_exe("sh")
+        expect(sh).to_contain("sh")
+
+        step("A command that exists nowhere resolves to empty, not to itself")
+        expect(cs_resolve_exe("no-such-binary-xyz-9f2")).to_equal("")
+
+        step("'simple' resolves even though it is not on PATH, via the repo wrapper")
+        expect(cs_resolve_exe("simple")).to_contain("simple")
+    it "refuses a chat message for an agent that has no pane instead of dropping it":
+        """
+        A launched-but-unattached agent has no pane to type into. The message
+        must come back with a reason the operator can act on; silently
+        swallowing it is the failure mode this guards.
+        """
+        step("Launch an agent, which starts with no pane attached")
+        val d0 = cs_dashboard_new("cs-spec-session")
+        val (d1, launched) = cs_handle_command(d0, "/launch caret:glm")
+        expect(launched).to_contain("launch:")
+
+        step("A bare message produces a chat action aimed at that agent")
+        val (d2, action) = cs_handle_command(d1, "hello there")
+        expect(action).to_start_with("chat:")
+
+        step("Executing it reports the missing pane rather than succeeding")
+        val (d3, outcome) = cs_apply_action(d2, action)
+        expect(outcome).to_contain("has no pane yet")
+        expect(outcome.contains("sent to")).to_equal(false)
+
+    it "reports a malformed chat action rather than sending a partial line":
+        step("An action with no message body is rejected")
+        val d = cs_dashboard_new("cs-spec-session")
+        val (_, outcome) = cs_apply_action(d, "chat:a1")
+        expect(outcome).to_contain("malformed chat action")
+    it "adds an agent I can see when I launch a valid short spec":
+        step("start with an empty dashboard")
+        val empty = cs_dashboard_new("caret")
+        expect(empty.agents.len()).to_equal(0)
+        expect(empty.selected).to_equal(-1)
+
+        step("launch caret:glm/glm-4.6")
+        val (after, answer) = cs_handle_command(empty, "/launch caret:glm/glm-4.6")
+        expect(after.agents.len()).to_equal(1)
+        expect(after.agents[0].spec).to_equal("caret:glm/glm-4.6")
+        expect(after.selected).to_equal(0)
+        expect(answer).to_contain("launch:")
+        expect(answer).to_contain("caret:glm/glm-4.6")
+
+        step("the new agent is honestly marked as not yet launched")
+        expect(after.agents[0].status).to_contain("pending")
+        expect(after.agents[0].pid).to_equal(-1)
+        expect(after.agents[0].rss_mb).to_equal(-1)
+
+    it "tells me exactly what is wrong when I mistype a launch spec":
+        step("launch an unknown harness")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch claudee")
+        expect(after.agents.len()).to_equal(0)
+        expect(answer).to_contain("unknown harness")
+        expect(answer).to_contain("claudee")
+
+        step("a provider on a CLI harness is refused with the parser's own words")
+        val (after2, answer2) = cs_handle_command(d, "/launch claude:kimi")
+        expect(after2.agents.len()).to_equal(0)
+        expect(answer2).to_contain("does not take a provider")
+
+    it "builds a launch command line that matches the spec I typed":
+        step("a caret harness runs caret with its provider and model")
+        val caret_argv = cs_launch_argv("caret:glm/glm-4.6")
+        expect(caret_argv).to_contain("--provider")
+        expect(caret_argv).to_contain("glm")
+        expect(caret_argv).to_contain("glm-4.6")
+
+        step("a CLI harness runs its own binary with just the model")
+        val cli_argv = cs_launch_argv("claude/opus")
+        expect(cli_argv[0]).to_equal("claude")
+        expect(cli_argv).to_contain("opus")
+
+        step("an invalid spec yields no command at all")
+        expect(cs_launch_argv("claudee").len()).to_equal(0)
+
+describe "cs dashboard - selecting and maximizing panes":
+
+    it "moves the selection when I switch by number or by id":
+        val d = _launched("caret", ["claude", "codex", "kimi"])
+        expect(d.selected).to_equal(2)
+
+        step("switch by 1-based position")
+        val (by_num, _a) = cs_handle_command(d, "/switch 1")
+        expect(by_num.selected).to_equal(0)
+
+        step("switch by agent id")
+        val (by_id, _b) = cs_handle_command(d, "/switch a2")
+        expect(by_id.selected).to_equal(1)
+
+        step("switching to something that is not there changes nothing")
+        val (missing, answer) = cs_handle_command(d, "/switch a9")
+        expect(missing.selected).to_equal(2)
+        expect(answer).to_contain("no such agent")
+
+    it "maximizes the pane of the agent that is taking my commands":
+        step("give two agents real panes and select the second")
+        val base = _launched("caret", ["claude", "codex"])
+        val a1 = CsAgent(agent_id: "a1", spec: "claude", status: "running",
+            pid: 111, pane_id: "%1", cpu_pct: 1.0, rss_mb: 10, detail: "one")
+        val a2 = CsAgent(agent_id: "a2", spec: "codex", status: "running",
+            pid: 222, pane_id: "%2", cpu_pct: 2.0, rss_mb: 20, detail: "two")
+        val d = CsDashboard(session: base.session,
+            manager_status: base.manager_status, agents: [a1, a2],
+            selected: 1, input: "", log: [])
+
+        step("/max targets the SELECTED agent's pane, not the first one")
+        val (_after, answer) = cs_handle_command(d, "/max")
+        expect(answer).to_contain("pane:zoom")
+        expect(answer).to_contain("%2")
+
+        step("after switching to the first agent, /max targets its pane instead")
+        val (switched, select_answer) = cs_handle_command(d, "/switch a1")
+        expect(select_answer).to_contain("pane:select")
+        expect(select_answer).to_contain("%1")
+        val (_after2, answer2) = cs_handle_command(switched, "/max")
+        expect(answer2).to_contain("%1")
+
+    it "refuses to maximize when I have not selected anything":
+        val d = cs_dashboard_new("caret")
+        val (_after, answer) = cs_handle_command(d, "/max")
+        expect(answer).to_contain("no agent selected")
+
+describe "cs dashboard - the command line":
+
+    it "never silently drops a chat message I typed with nothing selected":
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "please summarize the plan")
+        expect(after.log.len()).to_equal(0)
+        expect(answer).to_contain("no agent selected")
+
+    it "routes bare text to the selected agent":
+        val d = _launched("caret", ["claude"])
+        val (after, answer) = cs_handle_command(d, "please summarize the plan")
+        expect(answer).to_contain("chat:a1")
+        expect(answer).to_contain("summarize")
+        expect(after.log.len()).to_equal(2)
+
+    it "names an unknown slash command instead of guessing":
+        val d = cs_dashboard_new("caret")
+        val (_after, answer) = cs_handle_command(d, "/frobnicate")
+        expect(answer).to_contain("unknown command")
+        expect(answer).to_contain("/help")
+
+    it "offers a short usage list covering every command":
+        val help = cs_help_text()
+        expect(help).to_contain("/launch")
+        expect(help).to_contain("/switch")
+        expect(help).to_contain("/max")
+        expect(help).to_contain("/kill")
+        expect(help).to_contain("/agents")
+        expect(help).to_contain("/quit")
+
+describe "cs dashboard - the rendered screen":
+
+    it "shows status, the roster, the selected agent's detail, and the input last":
+        val base = _launched("caret", ["claude", "codex"])
+        val a1 = CsAgent(agent_id: "a1", spec: "claude", status: "running",
+            pid: 111, pane_id: "%1", cpu_pct: 3.5, rss_mb: 42,
+            detail: "pane %1 title a1")
+        val a2 = CsAgent(agent_id: "a2", spec: "codex", status: "running",
+            pid: 222, pane_id: "%2", cpu_pct: 1.5, rss_mb: 21,
+            detail: "pane %2 title a2")
+        val d = CsDashboard(session: "caret",
+            manager_status: "connected: tmux session caret, 2 agent(s), 2 running",
+            agents: [a1, a2], selected: 1, input: "hello there", log: [])
+
+        step("render at 80x14")
+        val out = cs_render(d, 80, 14)
+        val lines = _lines(out)
+
+        step("the screen occupies exactly the rows it was given")
+        expect(lines.len()).to_equal(14)
+
+        step("the first row is the status header")
+        expect(lines[0]).to_contain("caret")
+        expect(lines[0]).to_contain("connected")
+        expect(lines[0]).to_contain("2 running")
+
+        step("both agents are listed")
+        expect(out).to_contain("a1")
+        expect(out).to_contain("a2")
+
+        step("the SELECTED agent's detail is shown")
+        expect(out).to_contain("DETAIL")
+        expect(out).to_contain("%2")
+        expect(out).to_contain("21")
+
+        step("the input line is the LAST row")
+        expect(lines[13]).to_contain("hello there")
+        assert_false(lines[12].contains("hello there"))
+
+    it "keeps the input on the bottom row even when the roster is long":
+        var agents: [CsAgent] = []
+        var i = 0
+        while i < 12:
+            agents = agents + [CsAgent(agent_id: "a" + (i + 1).to_text(),
+                spec: "claude", status: "running", pid: 100 + i,
+                pane_id: "%" + (i + 1).to_text(), cpu_pct: 1.0, rss_mb: 10,
+                detail: "d")]
+            i = i + 1
+        val d = CsDashboard(session: "caret", manager_status: "connected: tmux",
+            agents: agents, selected: 0, input: "tail", log: [])
+
+        step("render into fewer rows than the roster needs")
+        val lines = _lines(cs_render(d, 60, 8))
+        expect(lines.len()).to_equal(8)
+        expect(lines[7]).to_contain("tail")
+
+    it "says it has not polled yet rather than showing an empty screen as truth":
+        val fresh = cs_dashboard_new("caret")
+        expect(fresh.manager_status).to_contain("unknown")
+        expect(cs_render(fresh, 80, 6)).to_contain("unknown")
+
+describe "cs dashboard - honest state when nothing can be measured":
+
+    it "reports an honest manager status and no fabricated usage after a poll":
+        step("launch an agent that was never really started, then poll")
+        val d = _launched("cs-dashboard-spec-no-such-session", ["claude"])
+        val polled = cs_refresh(d)
+
+        step("the status names a real outcome, not the un-polled placeholder")
+        assert_false(polled.manager_status.contains("not polled"))
+        val reachable = polled.manager_status.starts_with("connected")
+        val unreachable = polled.manager_status.starts_with("disconnected")
+        assert_true(reachable or unreachable)
+
+        step("an unlaunched agent still reports no measurement, not zero")
+        expect(polled.agents.len()).to_equal(1)
+        expect(polled.agents[0].rss_mb).to_equal(-1)
+        assert_false(polled.agents[0].status == "running")
+
+        step("the rendered screen shows dashes where nothing was measured")
+        expect(cs_render(polled, 80, 12)).to_contain("cpu -")
+
+    it "refuses to pretend a message was delivered when it cannot be":
+        val d = _launched("cs-dashboard-spec-no-such-session", ["claude"])
+        val (_after, action) = cs_handle_command(d, "ping")
+        val (_after2, result) = cs_apply_action(d, action)
+        expect(result).to_contain("cannot deliver")

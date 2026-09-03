@@ -5,6 +5,23 @@ Date: 2026-07-07
 Production-quality features of the shipped `src/app/llm_caret` path. Pure-Simple;
 UI on the Simple TUI stdlib (`std.tui`).
 
+## Caret suite (`cs`)
+
+`cs` starts the **caret suite**: the read-only view of a multi-agent caret
+session — every tmux pane with its pid, status, CPU and memory, plus each
+pane's sub-agents. tmux owns every process; the suite view never spawns or
+respawns anything.
+
+```bash
+bin/cs                 # the default `caret` tmux session
+bin/cs my-session      # a named session
+simple cs              # same entry through the Simple CLI
+```
+
+`bin/cs` is a three-line wrapper: it sets `CARET_ENTRY` and re-execs
+`bin/caret`, reusing that script's runtime probe rather than duplicating it.
+Entry point: `src/app/llm_caret/agent_manager_view.spl`.
+
 ## Interactive chat UI (Simple TUI)
 
 The chat runs on Simple's own `std.tui` framework (ANSI, no ncurses/FFI):

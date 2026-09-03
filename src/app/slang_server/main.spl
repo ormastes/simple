@@ -1,0 +1,79 @@
+# slang OpenAI-compatible server — phase A6 entry point.
+#
+# Binds the transport-free dispatcher in
+# src/lib/gc_async_mut/slang/entrypoints/openai/ to the existing lightweight
+# HTTP server (std.nogc_sync_mut.http_server). No socket code is written here.
+#
+# Port 8721 is the default so `caret:slang/<model>` reaches it without any
+# client change (src/app/llm_caret/config.spl SLANG_BASE_URL).
+#
+# HONEST SCOPE: /v1/models is real — it lists the packs the phase-A1 loader can
+# read off disk. /v1/chat/completions is an ANNOUNCED STUB: slang has no
+# engine, worker, KV cache or attention kernel yet, so it answers 503
+# model_not_runnable with `"stub":true` instead of inventing a completion.
+#
+# Usage:
+#   simple run src/app/slang_server/main.spl -- --plaintext-development \
+#       --models=<dir> [--host=127.0.0.1] [--port=8721]
+
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_to_text, http_status_from_code, pure_text_to_i64}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.io_runtime.{get_args}
+
+# Handlers are plain function pointers, so the configured model root is held
+# here and set once by main() before the listener starts.
+var SLANG_MODEL_ROOT = "models"
+
+fn _dispatch(req: HttpRequest) -> HttpResponse:
+    val answer = slang_api_dispatch(http_method_to_text(req.method), req.path, req.body, SLANG_MODEL_ROOT)
+    HttpResponse(
+        status: http_status_from_code(answer.status),
+        headers: [("Content-Type", "application/json; charset=utf-8")],
+        body: answer.body
+    )
+
+fn build_router() -> Router:
+    var router = Router.new()
+    router.get("/v1/models", _dispatch)
+    router.post("/v1/chat/completions", _dispatch)
+    router.set_not_found(_dispatch)
+    router
+
+fn _arg_value(args: [text], prefix: text, fallback: text) -> text:
+    for a in args:
+        if a.starts_with(prefix):
+            return a.slice(prefix.len(), a.len())
+    fallback
+
+fn main():
+    val args = get_args()
+    var plaintext = false
+    for a in args:
+        if a == "--plaintext-development":
+            plaintext = true
+    SLANG_MODEL_ROOT = _arg_value(args, "--models=", "models")
+    val host = _arg_value(args, "--host=", "127.0.0.1")
+    var port = pure_text_to_i64(_arg_value(args, "--port=", "8721")).to_i32()
+    if port <= 0:
+        port = 8721
+
+    print "slang OpenAI-compatible server (phase A6 surface over a phase A1 engine)"
+    print "  model root: {SLANG_MODEL_ROOT}"
+    print "  GET  /v1/models           -> packs the A1 loader can read on disk"
+    print "  POST /v1/chat/completions -> 503 model_not_runnable (announced stub; no inference engine exists yet)"
+
+    if not plaintext:
+        print "Error: pass --plaintext-development explicitly; production startup requires TLS"
+        return
+
+    match plaintext_development_capability("slang local serving over loopback"):
+        Err(e):
+            print "Error: {e}"
+        Ok(capability):
+            var server = SimpleHttpServer.new(host, port, build_router())
+            server.with_policy(SecureServerPolicy.plaintext_dev(capability))
+            match server.start_plaintext(capability):
+                Err(e): print "Error: {e}"
+                Ok(_): pass
