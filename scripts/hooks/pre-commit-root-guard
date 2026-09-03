@@ -1,4 +1,13 @@
 #!/bin/sh
+# simple-repo-managed-hook: pre-commit-root-guard
+# ^ Identity marker. setup-hooks.shs matches on this line to recognise an OLDER
+#   copy of THIS file already installed at .git/hooks/pre-commit. Without it,
+#   editing this file would make the installer treat the previously-installed
+#   copy as a foreign local hook and preserve it as pre-commit.local — which
+#   this hook then CHAINS, giving an unbounded self-chain. Same failure the
+#   pre-push launcher's marker exists to prevent; never remove this line without
+#   updating that installer check.
+#
 # Minimal pre-commit: workspace root guard ONLY.
 #
 # The full scripts/hooks/pre-commit is deferred (it is blocked on the
@@ -10,15 +19,33 @@
 #
 # This hook is the smallest thing that closes that hole: it runs the root guard
 # on STAGED paths and nothing else, so it cannot be blocked by an unrelated
-# ratchet and needs no compiler. Install with scripts/setup/setup-hooks.shs.
+# ratchet and needs no compiler. Installed by scripts/setup/setup-hooks.shs.
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+# Clear the git env git exports into a hook, for exactly the reason spelled out
+# in scripts/hooks/pre-push-worktree-launcher: in a LINKED worktree the
+# inherited GIT_DIR names `<main>/.git/worktrees/<name>`, a gitdir with no
+# adjacent work tree, so `git rev-parse --show-toplevel` fails and any git
+# command that reinitialises config from it WRITES core.bare into the SHARED
+# config, corrupting every worktree at once.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
+
+# Resolve the ACTIVE worktree, not the one that last ran the installer. $0 is
+# the shared .git/hooks/pre-commit, so deriving the root from its path lands in
+# the main worktree and would audit the wrong tree from a linked one.
+ROOT_DIR=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-commit-root-guard: cannot locate active worktree root" >&2
+    exit 1
+}
 cd "$ROOT_DIR"
 
-# Chain whatever was here before (setup-hooks.shs preserves it as pre-commit.local).
-if [ -x "$ROOT_DIR/.git/hooks/pre-commit.local" ]; then
-    "$ROOT_DIR/.git/hooks/pre-commit.local" "$@"
+# Chain whatever was here before (setup-hooks.shs preserves it as
+# pre-commit.local, in the shared hooks dir — which is NOT $ROOT_DIR/.git/hooks
+# in a linked worktree).
+hooks_dir=$(git rev-parse --git-path hooks)
+case "$hooks_dir" in /*) ;; *) hooks_dir="$ROOT_DIR/$hooks_dir" ;; esac
+if [ -x "$hooks_dir/pre-commit.local" ]; then
+    "$hooks_dir/pre-commit.local" "$@"
 fi
 
 sh scripts/check-workspace-root-guard.shs audit --staged
