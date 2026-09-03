@@ -622,6 +622,88 @@ fn parser_record_unsafe_annotation(decl_name: text):
     if PENDING_UNSAFE == 1:
         UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
 
+fn parser_reset_pending_unsafe():
+    """Clear the pending `@unsafe` slots after they have been attached.
+
+    The module-decl loop clears these through
+    `parser_reset_pending_vhdl_decorators`, which also resets hardware/VHDL/
+    SFFI state that a class body never sets. Member-position attributes need
+    the narrow reset so one annotated method cannot leak its reason and
+    capabilities onto the next, unannotated one."""
+    PENDING_UNSAFE = 0
+    PENDING_UNSAFE_REASON = ""
+    PENDING_UNSAFE_CAPS = []
+
+fn parser_parse_member_attribute() -> bool:
+    """Parse ONE member-position `@name` / `@name(...)` attribute inside a
+    class, struct or trait body. Returns true when one was consumed.
+
+    Member-position decorators were only ever recognised as `@layer_field(...)`;
+    every other spelling fell through to `unexpected token in class body`, so
+    the 310 `@unsafe(reason: ..., capabilities: [...])` methods across
+    src/std/** and src/lib/** could not be parsed by the self-hosted frontend
+    at all (`src/std/nogc_sync_mut/atomic.spl:136` is the first one hit). The
+    module-decl loop in this file already accepts the same spelling on a
+    top-level `fn`; this is the member-position twin of that arm, capturing the
+    same metadata into the same PENDING_UNSAFE_* slots so
+    `parser_record_unsafe_annotation` still sees it.
+
+    Metadata-only, exactly like the top-level arm — no enforcement is added or
+    removed here (see the gap note on PENDING_UNSAFE above).
+
+    Refs: doc/08_tracking/bug/caret_suite_native_build_blocked_stage2_windows_2026-09-03.md (B1)"""
+    if par_kind_get() != 171:
+        return false
+    parser_advance()
+    if par_kind_get() != 6:
+        parser_error("expected attribute name after `@` in class body")
+        return true
+    val attr_name = par_text_get()
+    parser_advance()
+    var attr_reason = ""
+    var attr_caps: [text] = []
+    if par_kind_get() == 140:
+        parser_advance()
+        var depth = 1
+        while depth > 0:
+            val k = par_kind_get()
+            if k == 190:
+                # EOF inside the argument list: stop rather than spin. The
+                # surrounding member loop reports the real structural error.
+                break
+            if k == 140:
+                depth = depth + 1
+                parser_advance()
+                continue
+            if k == 141:
+                depth = depth - 1
+                parser_advance()
+                continue
+            if k == 6 and depth == 1:
+                val arg_name = par_text_get()
+                parser_advance()
+                if par_kind_get() == 161 or par_kind_get() == 100:
+                    parser_advance()
+                    if arg_name == "reason" and par_kind_get() == 3:
+                        attr_reason = parser_decorator_arg_text(par_text_get())
+                        parser_advance()
+                    elif arg_name == "capabilities" and par_kind_get() == 144:
+                        parser_advance()
+                        while par_kind_get() != 145 and par_kind_get() != 190:
+                            if par_kind_get() == 6:
+                                attr_caps.push(par_text_get())
+                            parser_advance()
+                        if par_kind_get() == 145:
+                            parser_advance()
+                continue
+            parser_advance()
+    if attr_name == "unsafe" or attr_name == "danger":
+        PENDING_UNSAFE = 1
+        PENDING_UNSAFE_REASON = attr_reason
+        PENDING_UNSAFE_CAPS = attr_caps
+    parser_skip_newlines_and_semicolons()
+    true
+
 fn parser_attr_token_text() -> text:
     """Text of the current token for decorator-argument capture.
 
