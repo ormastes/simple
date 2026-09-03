@@ -175,8 +175,13 @@ bool rt_dir_remove_all_cpath(const char* path) {
  * File Locking
  * ---------------------------------------------------------------- */
 
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    if (!path) return -1;
+int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
+    /* Raw (ptr, len) `text` ABI per runtime.h: rt_file_lock IS in
+     * text_arg_indices, so the caller splits `text` into two words. */
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return -1;
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = 0;  /* NUL-terminate */
 
     int fd = open(path, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return -1;
@@ -301,29 +306,37 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
-    if (!path || size <= 0 || offset < 0) return NULL;
+int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly) {
+    /* Tagged-value `text` contract per runtime.h: rt_mmap is ABSENT from
+     * text_arg_indices, so the caller passes ONE tagged value, not a C
+     * string. The old `const char*` shape never matched a generated caller. */
+    int64_t path_len = rt_string_len(path_value);
+    const uint8_t* path_ptr = rt_string_data(path_value);
+    if (!path_ptr || path_len <= 0 || path_len >= 4096 || size <= 0 || offset < 0) return 0;
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = 0;  /* NUL-terminate */
 
     int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
     int open_flags = readonly != 0 ? O_RDONLY : O_RDWR;
 
     int fd = open(path, open_flags);
-    if (fd < 0) return NULL;
+    if (fd < 0) return 0;
 
     void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
     close(fd);
 
-    if (addr == MAP_FAILED) return NULL;
-    return addr;
+    if (addr == MAP_FAILED) return 0;
+    return (int64_t)(intptr_t)addr;
 }
 
-bool rt_munmap(void* addr, int64_t size) {
+bool rt_munmap(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return munmap(addr, (size_t)size) == 0;
+    return munmap((void*)(intptr_t)addr, (size_t)size) == 0;
 }
 
-bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
     if (!addr || size <= 0) return false;
 
     /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
@@ -337,12 +350,12 @@ bool rt_madvise(void* addr, int64_t size, int64_t advice) {
         default: return false;
     }
 
-    return madvise(addr, (size_t)size, posix_advice) == 0;
+    return madvise((void*)(intptr_t)addr, (size_t)size, posix_advice) == 0;
 }
 
-bool rt_msync(void* addr, int64_t size) {
+bool rt_msync(int64_t addr, int64_t size) {
     if (!addr || size <= 0) return false;
-    return msync(addr, (size_t)size, MS_SYNC) == 0;
+    return msync((void*)(intptr_t)addr, (size_t)size, MS_SYNC) == 0;
 }
 
 /* ----------------------------------------------------------------

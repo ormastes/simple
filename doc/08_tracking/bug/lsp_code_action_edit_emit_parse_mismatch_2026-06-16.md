@@ -3,7 +3,7 @@
 - **ID:** lsp_code_action_edit_emit_parse_mismatch_2026-06-16
 - **Severity:** P2 (LSP quickfix/refactor actions surface but apply no edit)
 - **Area:** lsp / app
-- **Status:** open — root-caused, fix attempted and reverted (see Notes)
+- **Status:** RESOLVED 2026-09-02 (Defect 1 fixed in source; Defect 2 refuted by measurement; Defect 3 stays open under its own id -- see the RESOLVED section at the bottom). Was: open — root-caused, fix attempted and reverted (see Notes)
 - **Found during:** reliable-mode plan P1 / R3 (doc/03_plan/compiler/reliable_mode/reliable_mode_plan.md)
 
 ## Summary
@@ -64,3 +64,42 @@ build-via-concatenation workaround.
 1. Open a `.spl` file with a fixable construct (e.g. `Foo.new()`).
 2. Request a code action on that line; accept the offered quickfix.
 3. Observed: no text change. Expected: the constructor rewrite applies.
+
+---
+
+## RESOLVED 2026-09-02 — Defect 1 fixed in source; Defect 2 measured and refuted
+
+Host aarch64-apple-darwin. Binary: `src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B, 2026-09-01 09:24). `bin/simple` on this host is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`, `compile`/`native-build` only) and answers `unknown command 'run'`, so it is NOT the lane used below.
+
+**Defect 1 (parser reads flat keys nothing emits) -- FIXED.**
+`_parse_code_action` (`src/lib/nogc_sync_mut/lsp/lsp_handlers.spl:728-747`)
+now consumes the NESTED shape first: it extracts `newText` and the `range`
+object via `_extract_emitted_range` (:700-726, documented against the
+`edit.changes` shape `query_navigation.spl` actually emits) and rebuilds the
+edit with `jo2(jp("range", range_obj), jp("newText", js(new_text)))`. The flat
+`editLine`/`editCol` branch survives only as an explicitly-labelled
+"Fallback: legacy flat-key emitters" at :748. Emitter and parser are aligned.
+
+**Defect 2 (emitter brace imbalance) -- REFUTED by measurement, not by reading.**
+The four `ep.push` lines at `query_navigation.spl:145-148` are unchanged, so
+the static analysis in this doc still applies to the source text. Executing that
+exact sequence prints:
+
+```
+{"range":{"start":{"line":3,"character":7},"end":{"line":3,"character":9}},"newText":"NT"}
+```
+
+which is balanced and well-formed. The reason is Defect 3: `}}` really does
+collapse to a single `}` in a string literal on this tree (control measured in
+the same program: `"x}}y"` -> `x}y` len 3, `"x{{y"` -> `x{y` len 3). Push 3's
+trailing `}}` collapses to the single `}` that closes `end`, and push 4's
+leading `}` closes `range`. The emitter was written against that behaviour, so
+the "one closing brace too many" reading counts source characters the lexer
+never emits. There is no imbalance on the wire.
+
+Marking this record RESOLVED. **Defect 3 is a real, separate, still-open
+language bug and is NOT closed here** -- it remains tracked as
+`string_literal_double_brace_collapse_2026-06-16.md` (verified still open and
+still reproducing, above). Note the coupling that record already names: fixing
+the collapse WILL break this emitter, so `query_navigation.spl:147` must be
+converted to a single `}` in the same change.

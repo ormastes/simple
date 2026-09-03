@@ -1,0 +1,63 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Generalizing spec for the host-detection collapse landed 2026-09-02.
+# design: doc/05_design/platform/host_detection/platform_variation_minimization_2026-09-02.md
+
+use std.spec.step
+use std.spec.*
+
+use std.io_runtime.{read_file}
+
+# ============================================================================
+# The collapse is a SHORT-CIRCUIT, not a replacement.
+#
+# rt_platform_name() collapses every BSD to "unix", and this repo has a live
+# FreeBSD bootstrap lane, so detect_os() must still fall through to its
+# env + `uname -s` logic for anything that is not windows/macos/linux.
+#
+# That fall-through CANNOT BE EXECUTED from the Windows host these assertions
+# were authored on -- no BSD or POSIX machine is available here. So this spec
+# pins the fall-through STRUCTURALLY: it is a ratchet against a later cleanup
+# deleting the fallback because "rt_platform_name() already answers".
+#
+# It also pins the other half of the rule: a `uname` that queries a REMOTE or
+# GUEST machine is irreducible, and must not be converted to a host primitive.
+# ============================================================================
+
+describe "the BSD fall-through survives the short-circuit":
+    context "detect_os keeps its uname -s branches":
+        it "still maps every BSD sysname":
+            # @req REQ-SSPEC-UNIT
+            step("still maps every BSD sysname")
+            val src = read_file("src/lib/nogc_sync_mut/env/platform.spl")
+            expect(src.contains("if uname == \"FreeBSD\"")).to_equal(true)
+            expect(src.contains("return \"freebsd\"")).to_equal(true)
+            expect(src.contains("if uname == \"OpenBSD\"")).to_equal(true)
+            expect(src.contains("if uname == \"NetBSD\"")).to_equal(true)
+
+        it "short-circuits on exactly windows, macos and linux":
+            # @req REQ-SSPEC-UNIT
+            # "unix" must NOT be short-circuited -- that is the name every BSD
+            # arrives under, and returning it would lose the discrimination.
+            step("short-circuits on exactly windows, macos and linux")
+            val src = read_file("src/lib/nogc_sync_mut/env/platform.spl")
+            expect(src.contains("if rt_os == \"windows\"")).to_equal(true)
+            expect(src.contains("if rt_os == \"macos\"")).to_equal(true)
+            expect(src.contains("if rt_os == \"linux\"")).to_equal(true)
+            expect(src.contains("if rt_os == \"unix\"")).to_equal(false)
+
+        it "keeps the baremetal no-shell guard ahead of the shell-out":
+            # @req REQ-SSPEC-UNIT
+            step("keeps the baremetal no-shell guard ahead of the shell-out")
+            val src = read_file("src/lib/nogc_sync_mut/env/platform.spl")
+            expect(src.contains("if not file_exists(\"/bin/sh\")")).to_equal(true)
+
+    context "a remote uname is not host detection":
+        it "leaves the telnet uname shell-out in place":
+            # @req REQ-SSPEC-UNIT
+            # This uname runs on the machine at the far end of a telnet
+            # session. No host primitive can answer for another machine, so
+            # converting it would be a silent correctness bug.
+            step("leaves the telnet uname shell-out in place")
+            val src = read_file("src/lib/nogc_sync_mut/net/telnet.spl")
+            expect(src.contains("uname")).to_equal(true)

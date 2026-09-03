@@ -114,6 +114,23 @@ static uint16_t g_last_used_idx = 0;
 extern RuntimeValue spl_start(void);
 extern char _stack_top[];
 
+static void serial_puts(const char *s);
+static int g_rv_heap_exhausted_reported = 0;
+static void rv_report_heap_exhausted(void)
+{
+    if (g_rv_heap_exhausted_reported) return;
+    g_rv_heap_exhausted_reported = 1;
+    serial_puts("[rv64] FATAL bump heap exhausted (low half) - rv_alloc returned NULL\r\n");
+}
+#define RV_HEAP_EXHAUSTED_REPORT() rv_report_heap_exhausted()
+static size_t g_rv_heap_tick = 0;
+static void rv_heap_progress(size_t off)
+{
+    if (off < (g_rv_heap_tick + 1U) * (16U << 20)) return;
+    g_rv_heap_tick = off / (16U << 20);
+    serial_puts("[rv64] heap low-half consumed another 16MiB\r\n");
+}
+#define RV_HEAP_PROGRESS(off) rv_heap_progress(off)
 #define BAREMETAL_ENABLE_ALIGNED_ALLOC 1
 #include "../../common/baremetal_bump_heap.h"
 
@@ -185,19 +202,17 @@ static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
  * the riscv64 build-and-run row's failure read for a whole session. One line,
  * emitted once, turns that into a diagnosis. It does not change the return
  * value: callers still see NULL and fail exactly as before. */
-static int g_heap_exhausted_reported = 0;
 /* serial_puts is defined below and writes the UART directly. It is the only
  * printer usable here: serial_println() takes a RuntimeValue and would have to
  * ALLOCATE a RuntimeString to report that allocation just failed. */
 
 void *malloc(size_t size)
 {
-    void *p = rv_alloc(size);
-    if (!p && size != 0 && !g_heap_exhausted_reported) {
-        g_heap_exhausted_reported = 1;
-        serial_puts("[rv64] FATAL bump heap exhausted - malloc returned NULL\r\n");
-    }
-    return p;
+    /* The exhaustion report now lives at the single funnel, rv_alloc() in
+     * baremetal_bump_heap.h, via RV_HEAP_EXHAUSTED_REPORT above -- reporting it
+     * here only was fail-open for every caller that does not go through
+     * malloc(). */
+    return rv_alloc(size);
 }
 
 void free(void *ptr)
@@ -208,7 +223,12 @@ void free(void *ptr)
 void *calloc(size_t n, size_t size)
 {
     size_t total = n * size;
-    void *ptr = rv_alloc(total);
+    /* Route through malloc(), not rv_alloc() directly: malloc() carries the
+     * one-shot "bump heap exhausted" report. Calling rv_alloc() here bypassed
+     * it, so every allocation made through calloc/realloc/rt_alloc -- which is
+     * the whole Simple runtime object path -- exhausted the arena SILENTLY and
+     * faulted on the unchecked store, with no FATAL line to attribute it. */
+    void *ptr = malloc(total);
     if (ptr) {
         unsigned char *bytes = (unsigned char *)ptr;
         for (size_t i = 0; i < total; i++) bytes[i] = 0;
@@ -218,7 +238,7 @@ void *calloc(size_t n, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
-    void *next = rv_alloc(size);
+    void *next = malloc(size);
     if (!next || !ptr) return next;
     unsigned char *dst = (unsigned char *)next;
     const unsigned char *src = (const unsigned char *)ptr;

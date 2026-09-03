@@ -586,6 +586,21 @@ impl<'a> MirLowerer<'a> {
                 let receiver_val = self.lower_expr(receiver)?;
                 Ok(receiver_val)
             }
+            HirExprKind::Deref(inner) => {
+                // `*p = v`: the ADDRESS of the lvalue `*p` is simply the VALUE
+                // of `p`. Consistent with Local -> LocalAddr and
+                // FieldAccess -> GetElementPtr, both of which produce an
+                // address that the caller's Store writes through.
+                //
+                // Before this arm existed, every deref-assignment fell into the
+                // `_` catch-all below ("complex lvalue: Deref(...)"), which
+                // dropped the whole module to the interpreter. A freestanding
+                // kernel (riscv64 WM closure) has no interpreter to fall back
+                // to, so it surfaced as a hard native-build failure. See
+                // doc/08_tracking/bug/
+                // deref_assign_after_multiline_call_parsed_as_multiply_2026-09-01.md.
+                self.lower_expr(inner)
+            }
             HirExprKind::If { .. } => {
                 // TODO: model conditional lvalue properly.
                 // For now, lower as value to keep pipeline progressing.

@@ -96,3 +96,12 @@ green, but Stage 3/4 remain unadmitted, so do not advertise SPipe, deployment,
 or release admission. Current owner and resume condition:
 `doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md` and the
 canonical deployment plan.
+
+Phase-1 source loading owns closure COMPLETENESS, and its line cursor mixes
+units: `text.len()`/`text[a:b]` are byte-indexed, `char_code_at` is
+char-indexed. `_driver_line_end` now returns a `(byte, char)` pair and both of
+its callers advance both cursors together; do not reintroduce a single cursor.
+A truncated closure does not fail here — it fails much later in HIR as
+`unresolved type`, attributed to the wrong file. Verify closure size at
+`[build] source_closure N/N` before believing any HIR error attribution.
+See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`.
