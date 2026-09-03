@@ -26,36 +26,40 @@ phase1_runtime() {
 phase1_abi_behavior_probe() {
     probe_root=$1
     runtime=$(phase1_runtime)
-    output=${TMPDIR:-/tmp}/kpm-phase1-abi-output.$$
-    if ! (cd "$probe_root" && env SIMPLE_LIB="$probe_root/src" "$runtime" test \
+    private_root=${TMPDIR:-/tmp}/kpm-phase1-private.$$
+    output=$private_root/probe-output.txt
+    rm -rf "$private_root"
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    if ! (cd "$probe_root" && env \
+        HOME="$private_root/home" \
+        XDG_CACHE_HOME="$private_root/cache" \
+        TMPDIR="$private_root/tmp" \
+        SIMPLE_BUILD_DIR="$private_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        "$runtime" test \
         test/01_unit/compiler/interface_compat/compile_interface_spec.spl \
         --mode=interpreter) >"$output" 2>&1; then
         cat "$output" >&2
-        rm -f "$output"
+        rm -rf "$private_root"
         return 1
     fi
-    rm -f "$output"
+    rm -rf "$private_root"
+    echo 'KPM_PHASE1_FIELD_TYPE_ABI_ASSERTION_PASSED=1'
 }
 
-phase1_overlay() {
+phase1_workspace() {
     source_root=$1
-    overlay_root=$2
-    mkdir -p "$overlay_root"
-    for entry in "$source_root"/* "$source_root"/.[!.]* "$source_root"/..?*; do
-        [ -e "$entry" ] || continue
-        ln -s "$entry" "$overlay_root/$(basename "$entry")"
-    done
-    rm "$overlay_root/src"
-    mkdir "$overlay_root/src"
-    for entry in "$source_root/src"/*; do ln -s "$entry" "$overlay_root/src/$(basename "$entry")"; done
-    rm "$overlay_root/src/compiler"
-    mkdir "$overlay_root/src/compiler"
-    for entry in "$source_root/src/compiler"/*; do ln -s "$entry" "$overlay_root/src/compiler/$(basename "$entry")"; done
-    rm "$overlay_root/src/compiler/20.hir"
-    mkdir "$overlay_root/src/compiler/20.hir"
-    for entry in "$source_root/src/compiler/20.hir"/*; do ln -s "$entry" "$overlay_root/src/compiler/20.hir/$(basename "$entry")"; done
-    rm "$overlay_root/src/compiler/20.hir/abi_interface.spl"
-    cp "$source_root/src/compiler/20.hir/abi_interface.spl" "$overlay_root/src/compiler/20.hir/abi_interface.spl"
+    workspace_root=$2
+    mkdir -p "$workspace_root"
+    cp -RL "$source_root/src" "$workspace_root/src"
+    mkdir -p "$workspace_root/test/01_unit/compiler/interface_compat"
+    cp "$source_root/test/01_unit/compiler/interface_compat/compile_interface_spec.spl" \
+        "$workspace_root/test/01_unit/compiler/interface_compat/compile_interface_spec.spl"
+    [ ! -f "$source_root/targets.sdn" ] || cp "$source_root/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root/src" "$workspace_root/test" -type l -print -quit | grep -q .; then
+        fail 'phase 1 isolated workspace contains symlinks'
+    fi
 }
 
 probe_phase() {
@@ -186,13 +190,23 @@ selftest() {
         rm -rf "$tmp/root"; mkdir -p "$tmp/root/$(dirname "$seam")"
         if [ "$current" -eq 1 ]; then
             rm -rf "$tmp/root"
-            phase1_overlay "$REPO_ROOT" "$tmp/root"
+            phase1_workspace "$REPO_ROOT" "$tmp/root"
             sed '/canon_field("type", self.type_identity(field.type_)),/d' \
                 "$REPO_ROOT/$seam" > "$tmp/root/$seam"
             cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 1 field-type mutation did not change ABI implementation'
-            if phase1_abi_behavior_probe "$tmp/root" >/dev/null 2>&1; then
+            mutant_output=$tmp/phase1-mutant-output.txt
+            if phase1_abi_behavior_probe "$tmp/root" >"$mutant_output" 2>&1; then
                 fail 'phase 1 field-type mutation was accepted by ABI behavior probe'
             fi
+            grep -Fq 'field type participates in the ordinal ABI encoding' "$mutant_output" || {
+                cat "$mutant_output" >&2
+                fail 'phase 1 mutant failed outside the field-type ABI assertion'
+            }
+            grep -Eiq 'fail|assert|expected|not equal' "$mutant_output" || {
+                cat "$mutant_output" >&2
+                fail 'phase 1 mutant lacked an assertion-failure diagnostic'
+            }
+            echo 'KPM_PHASE1_FIELD_TYPE_ABI_ASSERTION_FAILED=1'
             current=$((current + 1))
             continue
         else
