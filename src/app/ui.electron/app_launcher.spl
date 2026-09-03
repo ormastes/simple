@@ -1,0 +1,70 @@
+# codex-impl — shared fail-closed Electron application launch resolution.
+
+use app.io.mod.{cwd, file_exists}
+use app.io.cli_ops.{cli_current_exe_path}
+
+struct ElectronAppLaunch:
+    binary: text
+    package_dir: text
+    ready: bool
+    reason: text
+
+fn _repo_path(repo_root: text, relative: text) -> text:
+    var root = repo_root.replace("\\", "/")
+    while root.ends_with("/"):
+        root = root.substring(0, root.len() - 1)
+    if root == "":
+        return relative
+    root + "/" + relative
+
+pub fn resolve_electron_app_launch(repo_root: text) -> ElectronAppLaunch:
+    val package_dir = _repo_path(repo_root, "tools/electron-shell")
+    if not file_exists(package_dir + "/package.json"):
+        return ElectronAppLaunch(binary: "", package_dir: package_dir,
+            ready: false, reason: "electron_package_manifest_missing")
+
+    val app_binary = package_dir +
+        "/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    if file_exists(app_binary):
+        return ElectronAppLaunch(binary: app_binary, package_dir: package_dir,
+            ready: true, reason: "electron_app_binary")
+
+    val shim = package_dir + "/node_modules/.bin/electron"
+    if file_exists(shim):
+        return ElectronAppLaunch(binary: shim, package_dir: package_dir,
+            ready: true, reason: "electron_shim")
+
+    ElectronAppLaunch(binary: "", package_dir: package_dir,
+        ready: false, reason: "electron_binary_missing")
+
+pub fn resolve_workspace_electron_app_launch() -> ElectronAppLaunch:
+    val from_cwd = resolve_electron_app_launch(cwd())
+    if from_cwd.ready:
+        return from_cwd
+
+    # Native Caret/DevHub artifacts normally live below build/ or bin/. Walk
+    # only a fixed number of executable ancestors so launching outside the
+    # checkout is deterministic and cannot turn into an unbounded tree scan.
+    var root = cli_current_exe_path().replace("\\", "/")
+    var depth = 0
+    while depth < 6 and root.contains("/"):
+        root = root.substring(0, root.last_index_of("/"))
+        val candidate = resolve_electron_app_launch(root)
+        if candidate.ready:
+            return candidate
+        depth = depth + 1
+    from_cwd
+
+pub fn electron_app_launch_args(package_dir: text, url: text,
+        debug_port: text) -> [text]:
+    var args = ["--no-sandbox"]
+    if debug_port != "":
+        args.push("--remote-debugging-port=" + debug_port)
+    # Electron treats an absent or unresolved application path as a request to
+    # show its default welcome screen. Always pass the resolved package path.
+    args.push(package_dir)
+    args.push("--url")
+    args.push(url)
+    args
+
+export ElectronAppLaunch

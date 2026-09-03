@@ -1,0 +1,45 @@
+use app.spipe.testing.*
+use std.io_runtime.{file_read}
+
+describe "compiler inventory event production call chain":
+    it "refreshes queued Git and filesystem events before snapshot freeze":
+        val admission = file_read("src/app/compiler_entrypoint/admission.spl")
+        val refresh = admission.index_of("compiler_inventory_refresh_v1(")
+        val freeze = admission.index_of("scv_compile_snapshot_acquire_v1(")
+        expect(refresh >= 0).to_equal(true)
+        expect(freeze > refresh).to_equal(true)
+
+    it "polls Git automatically without mutating repository state":
+        val source = file_read("src/app/compiler_entrypoint/inventory_events.spl")
+        expect(source).to_contain("rev-parse\", \"HEAD")
+        expect(source).to_contain("diff\", \"--name-status")
+        expect(source).to_contain("ls-files\", \"--others")
+        expect(source.contains("git\", [\"add")).to_equal(false)
+        expect(source.contains("git\", [\"commit")).to_equal(false)
+        expect(source.contains("git\", [\"update-index")).to_equal(false)
+
+    it "fails closed for absent or damaged event authority":
+        val source = file_read("src/app/compiler_entrypoint/inventory_events.spl")
+        val inventory = file_read("src/lib/scv/compile_source_inventory.spl")
+        val admission = file_read("src/app/compiler_entrypoint/admission.spl")
+        expect(source).to_contain("compile-event-journal-missing")
+        expect(source).to_contain("filesystem-event-journal-missing")
+        expect(source).to_contain("filesystem-event-journal-truncated")
+        expect(source).to_contain("filesystem-event-journal-rewritten")
+        expect(source).to_contain("compile-event-inventory-binding-mismatch")
+        expect(inventory).to_contain("inventory-event-overflow")
+        expect(admission).to_contain("SIMPLE_SCV_INVENTORY_COLD_INIT")
+
+    it "binds the published inventory generation into admission receipts":
+        val source = file_read("src/app/compiler_entrypoint/inventory_events.spl")
+        val admission = file_read("src/app/compiler_entrypoint/admission.spl")
+        expect(source).to_contain("inventory_generation={inventory.inventory!.generation}")
+        expect(admission).to_contain("SIMPLE_SCV_INVENTORY_GENERATION")
+
+    it "routes every compiler-facing CLI entrypoint through admission":
+        val source = file_read("src/app/cli/_CliMain/main_and_help.spl")
+        for command in ["check", "compile", "build", "run", "test",
+                "native-build", "mcp", "lsp", "query"]:
+            expect(source).to_contain("str_eq(args[0], \"{command}\")")
+        expect(source).to_contain("compiler_entrypoint_admit_v1(admission_roots)")
+        expect(source).to_contain("if str_eq(args[0], \"test\"): [\"src\", \"test\"]")

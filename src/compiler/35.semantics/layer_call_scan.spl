@@ -1,0 +1,140 @@
+use std.nogc_sync_mut.io.file_ops.{file_exists}
+
+struct ScannedModuleCalls:
+    module_path: text
+    callee_modules: [text]
+
+fn layer_scan_callees(line: text) -> [text]:
+    var callees: [text] = []
+    var ident = ""
+    var index = 0
+    while index < line.len():
+        val character = line[index:index + 1]
+        val alpha = (character >= "a" and character <= "z") or
+            (character >= "A" and character <= "Z") or character == "_"
+        val digit = character >= "0" and character <= "9"
+        if alpha or (digit and ident != ""):
+            ident = ident + character
+        else:
+            if character == "(" and ident != "":
+                callees.push(ident)
+            ident = ""
+        index = index + 1
+    callees
+
+fn layer_scan_import_target(line: text) -> text:
+    val trimmed = line.trim()
+    var start = 0
+    if trimmed.starts_with("use lazy "):
+        start = 9
+    elif trimmed.starts_with("use "):
+        start = 4
+    elif trimmed.starts_with("from "):
+        start = 5
+    else:
+        return ""
+    var target = ""
+    var index = start
+    while index < trimmed.len():
+        val character = trimmed[index:index + 1]
+        if character == " " or character == "{" or character == "(" or character == ",":
+            break
+        target = target + character
+        index = index + 1
+    if target.ends_with("."):
+        target = target[0:target.len() - 1]
+    target
+
+fn layer_scan_imported_symbols(line: text) -> [text]:
+    var open_index = 0 - 1
+    var index = 0
+    while index < line.len():
+        if line[index:index + 1] == "{":
+            open_index = index
+        index = index + 1
+    if open_index < 0:
+        return []
+    val remainder = line[open_index + 1:line.len()]
+    var close_index = remainder.len()
+    index = 0
+    while index < remainder.len():
+        if remainder[index:index + 1] == "}":
+            close_index = index
+        index = index + 1
+    var symbols: [text] = []
+    for part in remainder[0:close_index].split(","):
+        val symbol = part.trim()
+        if symbol != "":
+            symbols.push(symbol)
+    symbols
+
+fn layer_scan_candidate(base: text) -> text:
+    val plain = base + ".spl"
+    if file_exists(plain):
+        return plain
+    val package = base + "/__init__.spl"
+    if file_exists(package):
+        return package
+    ""
+
+fn layer_scan_resolve(module: text) -> text:
+    if module.starts_with("std."):
+        val standard = layer_scan_candidate("src/lib/" + module[4:module.len()].replace(".", "/"))
+        if standard != "":
+            return standard
+    val relative = module.replace(".", "/")
+    for root in ["src/lib/", "src/compiler/", "src/"]:
+        val candidate = layer_scan_candidate(root + relative)
+        if candidate != "":
+            return candidate
+    ""
+
+fn layer_scan_local_functions(lines: [text]) -> {text: bool}:
+    var result: {text: bool} = {}
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with("fn "):
+            continue
+        var name = ""
+        var index = 3
+        while index < trimmed.len():
+            val character = trimmed[index:index + 1]
+            val alpha = (character >= "a" and character <= "z") or
+                (character >= "A" and character <= "Z") or character == "_"
+            val digit = character >= "0" and character <= "9"
+            if not alpha and not (digit and name != ""):
+                break
+            name = name + character
+            index = index + 1
+        if name != "":
+            result[name] = true
+    result
+
+fn scan_source_calls(path: text, content: text) -> ScannedModuleCalls:
+    val lines = content.split("\n")
+    var symbol_modules: [{text: text}] = []
+    for line in lines:
+        val target = layer_scan_import_target(line)
+        if target == "":
+            continue
+        val resolved = layer_scan_resolve(target)
+        if resolved == "":
+            continue
+        for symbol in layer_scan_imported_symbols(line):
+            var entry: {text: text} = {}
+            entry[symbol] = resolved
+            symbol_modules.push(entry)
+    val local_functions = layer_scan_local_functions(lines)
+    var modules: [text] = []
+    var seen: {text: bool} = {}
+    for line in lines:
+        for callee in layer_scan_callees(line):
+            if local_functions.has(callee):
+                continue
+            for entry in symbol_modules:
+                if entry.has(callee):
+                    val module = entry[callee]
+                    if not seen.has(module):
+                        seen[module] = true
+                        modules.push(module)
+    ScannedModuleCalls(module_path: path, callee_modules: modules)

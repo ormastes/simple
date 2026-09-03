@@ -1,0 +1,149 @@
+use compiler.interp.load_facade.contracts.{
+    InterpreterArchivePlanV1, InterpreterLoadDiagnosticIdentityV1,
+    InterpreterLoadErrorV1, InterpreterLoadFailureV1, InterpreterLoadPlanV1,
+    InterpreterLoadResolverIdentityV1, InterpreterLoadSnapshotIdentityV1,
+    InterpreterPackageLoadV1
+}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_close_v1, pinned_archive_open_verified_v1
+}
+use compiler.hir.import_materialization.state.{ImportSnapshotIdentityV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn interpreter_load_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn interpreter_load_token_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn interpreter_load_snapshot_valid_v1(
+    identity: InterpreterLoadSnapshotIdentityV1
+) -> bool:
+    interpreter_load_token_valid_v1(identity.revision) and
+        interpreter_load_digest_valid_v1(identity.tree_digest) and
+        interpreter_load_digest_valid_v1(identity.inventory_digest) and
+        interpreter_load_digest_valid_v1(identity.package_index_digest)
+
+fn interpreter_load_resolver_valid_v1(
+    identity: InterpreterLoadResolverIdentityV1
+) -> bool:
+    interpreter_load_digest_valid_v1(identity.producer_digest) and
+        interpreter_load_token_valid_v1(identity.root_generation) and
+        interpreter_load_digest_valid_v1(identity.variant_digest)
+
+fn interpreter_load_failure_v1(
+    error: InterpreterLoadErrorV1, code: text,
+    package_identity: text, module_identity: text,
+    snapshot: InterpreterLoadSnapshotIdentityV1
+) -> InterpreterLoadFailureV1:
+    val canonical = "interpreter-load-v1|{code}|{package_identity}|" +
+        "{module_identity}|{snapshot.revision}|{snapshot.tree_digest}|" +
+        "{snapshot.inventory_digest}|{snapshot.package_index_digest}"
+    InterpreterLoadFailureV1(error, InterpreterLoadDiagnosticIdentityV1(
+        code, package_identity, module_identity, snapshot.revision,
+        sha256_text(canonical)))
+
+fn interpreter_load_plan_v1(
+    route: PackageIndexRouteV1,
+    snapshot: InterpreterLoadSnapshotIdentityV1,
+    resolver: InterpreterLoadResolverIdentityV1
+) -> Result[InterpreterLoadPlanV1, InterpreterLoadFailureV1]:
+    if not interpreter_load_snapshot_valid_v1(snapshot):
+        return Err(interpreter_load_failure_v1(
+            InterpreterLoadErrorV1.invalid_snapshot_identity,
+            "IL1001", "", "", snapshot))
+    if not interpreter_load_resolver_valid_v1(resolver):
+        return Err(interpreter_load_failure_v1(
+            InterpreterLoadErrorV1.invalid_resolver_identity,
+            "IL1002", "", "", snapshot))
+    if not route.valid:
+        return Err(interpreter_load_failure_v1(
+            InterpreterLoadErrorV1.invalid_route,
+            "IL1003", "", "", snapshot))
+    if route.dirty_modules.len() > 0 or route.source_paths.len() > 0:
+        val package_identity = if route.dirty_modules.len() > 0:
+            route.dirty_modules[0].package_id
+        else:
+            ""
+        val module_identity = if route.dirty_modules.len() > 0:
+            route.dirty_modules[0].module_id
+        else:
+            ""
+        return Err(interpreter_load_failure_v1(
+            InterpreterLoadErrorV1.dirty_package_requires_compile,
+            "IL1004", package_identity, module_identity, snapshot))
+    if route.archive_admissions.len() == 0:
+        return Err(interpreter_load_failure_v1(
+            InterpreterLoadErrorV1.empty_route,
+            "IL1005", "", "", snapshot))
+
+    var archives: [InterpreterArchivePlanV1] = []
+    var packages: [text] = []
+    for admission in route.archive_admissions:
+        if packages.contains(admission.package_identity):
+            return Err(interpreter_load_failure_v1(
+                InterpreterLoadErrorV1.duplicate_package,
+                "IL1006", admission.package_identity, "", snapshot))
+        if (not admission.load.valid or admission.load.source_required or
+                admission.load.receipt == nil or admission.archive_path == ""):
+            return Err(interpreter_load_failure_v1(
+                InterpreterLoadErrorV1.archive_authority_missing,
+                "IL1007", admission.package_identity, "", snapshot))
+        val receipt = admission.load.receipt!
+        if (receipt.package_key != admission.package_identity or
+                receipt.producer_digest != resolver.producer_digest or
+                receipt.producer_identity != resolver.root_generation or
+                receipt.variant_digest != resolver.variant_digest or
+                receipt.receipt_digest == "" or receipt.archive_digest == ""):
+            return Err(interpreter_load_failure_v1(
+                InterpreterLoadErrorV1.archive_authority_mismatch,
+                "IL1008", admission.package_identity, "", snapshot))
+        val modules = admission.module_identities.sorted()
+        if modules.len() == 0 or modules[0] == "":
+            return Err(interpreter_load_failure_v1(
+                InterpreterLoadErrorV1.archive_authority_mismatch,
+                "IL1008", admission.package_identity, "", snapshot))
+        packages.push(admission.package_identity)
+        archives.push(InterpreterArchivePlanV1(
+            admission.package_identity, modules, admission.archive_path,
+            receipt))
+    Ok(InterpreterLoadPlanV1(snapshot, resolver, archives))
+
+fn interpreter_load_execute_v1(
+    plan: InterpreterLoadPlanV1
+) -> Result[[InterpreterPackageLoadV1], InterpreterLoadFailureV1]:
+    var loaded: [InterpreterPackageLoadV1] = []
+    for archive in plan.archives:
+        val opened = pinned_archive_open_verified_v1(
+            machine_cache_root(), archive.archive_path, archive.receipt)
+        if opened.is_err():
+            for package in loaded:
+                _ = pinned_archive_close_v1(package.capability)
+            return Err(interpreter_load_failure_v1(
+                InterpreterLoadErrorV1.archive_open_failed,
+                "IL1009", archive.package_identity, "", plan.snapshot))
+        loaded.push(InterpreterPackageLoadV1(
+            archive.package_identity, archive.module_identities,
+            ImportSnapshotIdentityV1(
+                plan.snapshot.revision, plan.snapshot.tree_digest,
+                plan.snapshot.inventory_digest),
+            archive.receipt, opened.unwrap()))
+    Ok(loaded)
+
+fn interpreter_load_close_v1(loads: [InterpreterPackageLoadV1]) -> bool:
+    var closed = true
+    for package in loads:
+        if pinned_archive_close_v1(package.capability).is_err():
+            closed = false
+    closed
+
+export interpreter_load_snapshot_valid_v1, interpreter_load_resolver_valid_v1
+export interpreter_load_plan_v1, interpreter_load_execute_v1
+export interpreter_load_close_v1

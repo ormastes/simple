@@ -1,0 +1,74 @@
+use app.spipe.testing.*
+use compiler.driver.cache.pinned_archive_capability.{
+    ArchiveFileIdentityV1, PinnedArchiveCapability,
+    pinned_archive_close_v1, pinned_archive_read_member_v1,
+    pinned_archive_receipt_canonical_v1, pinned_archive_receipt_valid_v1
+}
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn pinned_receipt(member_name: text, member_digest: text) -> PackageArchiveReceiptV1:
+    val members = [PackageArchiveMemberReceiptV1(
+        member_name, 0, 7, member_digest)]
+    val provisional = PackageArchiveReceiptV1(
+        "pkg.alpha", sha256_text("action"), sha256_text("archive"),
+        sha256_text("metadata"), "root-v1", sha256_text("compiler-v1"),
+        sha256_text("variant"), [sha256_text("dependency")], members, "")
+    PackageArchiveReceiptV1(
+        provisional.package_key, provisional.action_key, provisional.archive_digest,
+        provisional.normalized_metadata_digest, provisional.producer_identity,
+        provisional.producer_digest, provisional.variant_digest,
+        provisional.dependency_interface_digests, provisional.members,
+        sha256_text(pinned_archive_receipt_canonical_v1(provisional)))
+
+describe "pinned immutable archive capability":
+    it "binds ordered member geometry and producer identity into the receipt":
+        val receipt = pinned_receipt("interface.smf", sha256_text("payload"))
+        expect(pinned_archive_receipt_valid_v1(receipt)).to_equal(true)
+        val changed = PackageArchiveReceiptV1(
+            receipt.package_key, receipt.action_key, receipt.archive_digest,
+            receipt.normalized_metadata_digest, "different-producer",
+            receipt.producer_digest, receipt.variant_digest,
+            receipt.dependency_interface_digests, receipt.members,
+            receipt.receipt_digest)
+        expect(pinned_archive_receipt_valid_v1(changed)).to_equal(false)
+
+    it "rejects overlapping or unordered member receipts":
+        val first = PackageArchiveMemberReceiptV1(
+            "z", 0, 4, sha256_text("first"))
+        val second = PackageArchiveMemberReceiptV1(
+            "a", 2, 4, sha256_text("second"))
+        val invalid = PackageArchiveReceiptV1(
+            "pkg.alpha", sha256_text("action"), sha256_text("archive"),
+            sha256_text("metadata"), "root-v1", sha256_text("compiler-v1"),
+            sha256_text("variant"), [sha256_text("dependency")],
+            [first, second], sha256_text("invalid"))
+        expect(pinned_archive_receipt_canonical_v1(invalid)).to_equal("")
+        expect(pinned_archive_receipt_valid_v1(invalid)).to_equal(false)
+
+    it "fails deterministically after consuming close":
+        val receipt = pinned_receipt("interface.smf", sha256_text("payload"))
+        val capability = PinnedArchiveCapability(
+            descriptor: -1,
+            identity: ArchiveFileIdentityV1(1, 2, 7, receipt.archive_digest),
+            archive_digest: receipt.archive_digest,
+            receipt_digest: receipt.receipt_digest,
+            members: receipt.members,
+            open: false)
+        expect(pinned_archive_read_member_v1(
+            &capability, "interface.smf").is_err()).to_equal(true)
+        expect(pinned_archive_close_v1(capability).is_err()).to_equal(true)
+
+    it "has no path retained for reopen after admission":
+        val receipt = pinned_receipt("interface.smf", sha256_text("payload"))
+        val capability = PinnedArchiveCapability(
+            descriptor: 9,
+            identity: ArchiveFileIdentityV1(1, 2, 7, receipt.archive_digest),
+            archive_digest: receipt.archive_digest,
+            receipt_digest: receipt.receipt_digest,
+            members: receipt.members,
+            open: true)
+        expect(capability.descriptor).to_equal(9)
+        expect(capability.members[0].name).to_equal("interface.smf")

@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo_root"
+
+fail() {
+    printf 'BS5 dependency audit failed: %s\n' "$1" >&2
+    exit 1
+}
+
+native_loader_manifest=src/compiler_rust/native_loader/Cargo.toml
+native_loader_tests=src/compiler_rust/native_loader/tests/native_loader_tests.rs
+receipt=doc/09_report/compiler/bs5_rust_dependency_trim_receipt_2026-09-02.md
+
+if grep -Eq '^[[:space:]]*cc[[:space:]]*=' "$native_loader_manifest"; then
+    fail 'simple-native-loader still declares the unused Rust cc crate'
+fi
+
+if grep -R -Eq '\bcc::' \
+    src/compiler_rust/native_loader/src \
+    src/compiler_rust/native_loader/tests; then
+    fail 'simple-native-loader references cc:: after dependency removal'
+fi
+
+grep -Fq 'Command::new("cc")' "$native_loader_tests" ||
+    fail 'native-loader fixture no longer documents its external C compiler process'
+
+for required in \
+    'libloading = "0.8"' \
+    'thiserror.workspace = true' \
+    'simple-common = { path = "../common" }' \
+    'simple-simd = { path = "../simd" }' \
+    'simple-runtime-abi = { path = "../runtime_abi" }' \
+    'libc = "0.2"' \
+    'tempfile = "3"'; do
+    grep -Fq "$required" "$native_loader_manifest" ||
+        fail "bootstrap/native-loader authority dependency missing: $required"
+done
+
+for required in \
+    'simple-common = { path = "../common" }' \
+    'simple-compiler = { path = "../compiler" }' \
+    'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls"] }' \
+    'spl_hosted_runtime = { path = "../../runtime/hosted" }' \
+    'libc = "0.2"'; do
+    grep -Fq "$required" src/compiler_rust/native_all/Cargo.toml ||
+        fail "native-all authority dependency missing: $required"
+done
+
+grep -Fq 'simple-driver = { path = "../driver", optional = true }' \
+    src/compiler_rust/native_all/Cargo.toml ||
+    fail 'native-all driver compatibility dependency changed'
+
+grep -Fq 'driver-compat = ["dep:simple-driver", "simple-runtime/driver-hooks"]' \
+    src/compiler_rust/native_all/Cargo.toml ||
+    fail 'native-all driver compatibility feature changed'
+
+test -f "$receipt" || fail 'dependency audit receipt missing'
+grep -Fq 'Removed: `cc = "1"` from `simple-native-loader` dev-dependencies.' "$receipt" ||
+    fail 'dependency audit receipt does not name the exact removal'
+grep -Fq 'Preserved bootstrap authority: yes.' "$receipt" ||
+    fail 'dependency audit receipt lacks bootstrap-authority decision'
+
+printf 'BS5_RUST_DEPENDENCY_TRIM_STATIC_PASS\n'

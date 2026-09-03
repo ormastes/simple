@@ -1,0 +1,136 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1,
+    package_archive_receipt_canonical_fields_v1
+}
+use compiler.driver.cache.pinned_archive_capability.{
+    ArchiveFileIdentityV1, PinnedArchiveCapability
+}
+use compiler.driver.smf.package_image_v1.*
+use compiler.driver.smf.package_section_reader_v1.{
+    package_section_reader_open_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn d1_members() -> [PackageArchiveMemberReceiptV1]:
+    var members: [PackageArchiveMemberReceiptV1] = []
+    var offset: u64 = 0
+    for name in [
+            "debug", "exports", "generics", "hir-summaries", "imports",
+            "initialization", "mir", "objects", "receipts", "types"]:
+        members = members.push(PackageArchiveMemberReceiptV1(
+            name, offset, 8, sha256_text(name)))
+        offset = offset + 8
+    members
+
+fn d1_receipt() -> PackageArchiveReceiptV1:
+    val provisional = PackageArchiveReceiptV1(
+        "pkg.alpha", sha256_text("action"), sha256_text("archive"),
+        sha256_text("metadata"), "compiler-v1", sha256_text("producer"),
+        sha256_text("variant"), [sha256_text("dependency")], d1_members(), "")
+    PackageArchiveReceiptV1(
+        provisional.package_key, provisional.action_key, provisional.archive_digest,
+        provisional.normalized_metadata_digest, provisional.producer_identity,
+        provisional.producer_digest, provisional.variant_digest,
+        provisional.dependency_interface_digests, provisional.members,
+        sha256_text(package_archive_receipt_canonical_fields_v1(provisional)))
+
+fn d1_sections() -> [PackageSectionDescriptorV1]:
+    val kinds = [
+        PackageSectionKindV1.debug, PackageSectionKindV1.exports,
+        PackageSectionKindV1.generics, PackageSectionKindV1.hir_summaries,
+        PackageSectionKindV1.imports, PackageSectionKindV1.initialization,
+        PackageSectionKindV1.mir, PackageSectionKindV1.objects,
+        PackageSectionKindV1.receipts, PackageSectionKindV1.types]
+    val members = d1_members()
+    var sections: [PackageSectionDescriptorV1] = []
+    var index = 0
+    while index < kinds.len():
+        val member = members[index]
+        sections = sections.push(PackageSectionDescriptorV1(
+            kinds[index], member.name, member.offset, member.extent,
+            member.payload_digest))
+        index = index + 1
+    sections
+
+fn d1_image() -> PackageImageV1:
+    val receipt = d1_receipt()
+    PackageImageV1(
+        PACKAGE_IMAGE_SCHEMA_V1, receipt.package_key, receipt.action_key,
+        receipt.archive_digest, receipt.receipt_digest, receipt.producer_identity,
+        receipt.producer_digest, receipt.variant_digest,
+        receipt.dependency_interface_digests, d1_sections())
+
+describe "versioned demand-driven SMF package image":
+    it "requires every selected independently addressable section":
+        val receipt = d1_receipt()
+        expect(package_image_validate_v1(d1_image(), receipt).is_ok()).to_equal(true)
+        expect(d1_image().sections.len()).to_equal(10)
+
+    it "rejects incompatible schema versions":
+        val valid = d1_image()
+        val incompatible = PackageImageV1(
+            2, valid.package_identity, valid.action_digest, valid.archive_digest,
+            valid.receipt_digest, valid.producer_identity, valid.producer_digest,
+            valid.variant_digest, valid.dependency_interface_digests,
+            valid.sections)
+        expect(package_image_validate_v1(
+            incompatible, d1_receipt()).is_err()).to_equal(true)
+
+    it "rejects section checksum or geometry drift":
+        val valid = d1_image()
+        var changed_sections = valid.sections
+        val first = changed_sections[0]
+        changed_sections[0] = PackageSectionDescriptorV1(
+            first.kind, first.member_name, first.offset, first.extent,
+            sha256_text("changed"))
+        val changed = PackageImageV1(
+            valid.schema_version, valid.package_identity, valid.action_digest,
+            valid.archive_digest, valid.receipt_digest, valid.producer_identity,
+            valid.producer_digest, valid.variant_digest,
+            valid.dependency_interface_digests, changed_sections)
+        expect(package_image_validate_v1(
+            changed, d1_receipt()).is_err()).to_equal(true)
+
+    it "rejects duplicate section kinds":
+        val valid = d1_image()
+        var duplicate_sections = valid.sections
+        val second = duplicate_sections[1]
+        duplicate_sections[1] = PackageSectionDescriptorV1(
+            duplicate_sections[0].kind, second.member_name, second.offset,
+            second.extent, second.checksum)
+        val duplicate = PackageImageV1(
+            valid.schema_version, valid.package_identity, valid.action_digest,
+            valid.archive_digest, valid.receipt_digest, valid.producer_identity,
+            valid.producer_digest, valid.variant_digest,
+            valid.dependency_interface_digests, duplicate_sections)
+        expect(package_image_validate_v1(
+            duplicate, d1_receipt()).is_err()).to_equal(true)
+
+    it "admits only explicitly selected bounded sections":
+        val image = d1_image()
+        val capability = PinnedArchiveCapability(
+            descriptor: 9,
+            identity: ArchiveFileIdentityV1(1, 2, 80, image.archive_digest),
+            archive_digest: image.archive_digest,
+            receipt_digest: image.receipt_digest,
+            members: d1_receipt().members,
+            open: true)
+        val reader = package_section_reader_open_v1(
+            image, d1_receipt(), capability,
+            [PackageSectionKindV1.exports, PackageSectionKindV1.types])
+        expect(reader.is_ok()).to_equal(true)
+        expect(reader.unwrap().selected_sections.len()).to_equal(2)
+
+    it "rejects a capability from another immutable archive":
+        val image = d1_image()
+        val capability = PinnedArchiveCapability(
+            descriptor: 9,
+            identity: ArchiveFileIdentityV1(1, 2, 80, sha256_text("other")),
+            archive_digest: sha256_text("other"),
+            receipt_digest: image.receipt_digest,
+            members: d1_receipt().members,
+            open: true)
+        expect(package_section_reader_open_v1(
+            image, d1_receipt(), capability,
+            [PackageSectionKindV1.exports]).is_err()).to_equal(true)

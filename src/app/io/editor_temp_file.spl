@@ -1,0 +1,36 @@
+# Secure lifecycle for files handed to an interactive editor.
+
+use app.io.mod.{env_get, file_create_exclusive, file_delete, file_read_regular_no_follow_bounded, getpid, time_now_unix_micros}
+
+val EDITOR_TEMP_MAX_BYTES: i64 = 8388608
+val EDITOR_TEMP_CREATE_ATTEMPTS: i64 = 8
+
+pub struct EditorTempFile:
+    path: text
+
+fn _editor_temp_root() -> text:
+    val configured = env_get("TMPDIR")
+    val root = if configured != "": configured else: "/tmp"
+    if root.ends_with("/") and root.len() > 1: root[0:root.len() - 1] else: root
+
+pub fn editor_temp_create(kind: text, extension: text, content: text) -> Result<EditorTempFile, text>:
+    """Exclusively create a collision-safe editor file. Kind and extension are internal labels."""
+    if kind == "" or kind.contains("/") or kind.contains(".."):
+        return Err("invalid editor temp kind")
+    if extension == "" or extension.contains("/") or extension.contains(".."):
+        return Err("invalid editor temp extension")
+    val root = _editor_temp_root()
+    val pid = getpid()
+    val created_at = time_now_unix_micros()
+    for attempt in 0..EDITOR_TEMP_CREATE_ATTEMPTS:
+        val path = "{root}/simple-{kind}-{pid}-{created_at}-{attempt}.{extension}"
+        if file_create_exclusive(path, content):
+            return Ok(EditorTempFile(path: path))
+    Err("could not create an exclusive editor temp file")
+
+pub fn editor_temp_read(temp: EditorTempFile) -> Result<text, text>:
+    """Read only a regular, non-symlink file and enforce the editor payload limit."""
+    file_read_regular_no_follow_bounded(temp.path, EDITOR_TEMP_MAX_BYTES)
+
+pub fn editor_temp_cleanup(temp: EditorTempFile) -> bool:
+    file_delete(temp.path)

@@ -12,13 +12,51 @@ use lazy compiler.driver.driver_api (aot_native_file_with_backend, aot_native_pr
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
 use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, OutputFormat)
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_compile_finalize_baseline_v1
+}
 use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
+use app.io.aspect_params_env.{aspect_params_from_env}
 use compiler.mir_opt (mir_optimization_inventory_lines)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use std.common.convert.{try_parse_int}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
 }
+use app.perf.demand_compile_receipt.{
+    demand_compile_receipt_canonical_v1, demand_compile_receipt_create_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.nogc_sync_mut.io.sysinfo_ops.{hostname}
+use std.env.{env_get}
+
+fn _cli_publish_demand_compile_receipt_v1(
+    driver: CompilerDriver, source_file: text, command_identity: text
+) -> bool:
+    if driver.ctx.demand_compile_execution == nil:
+        return true
+    val binary_path = _cli_driver_binary()
+    val binary_digest = file_hash_sha256(binary_path)
+    val fixture_digest = file_hash_sha256(source_file)
+    val snapshot_authority = [
+        env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+        env_get("SIMPLE_SCV_TREE_ID") ?? "",
+        env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""].join("|")
+    val host_authority = [hostname(), driver.ctx.native_target].join("|")
+    val receipt = demand_compile_receipt_create_v1(
+        sha256_text(snapshot_authority), binary_digest,
+        sha256_text(host_authority), sha256_text(command_identity),
+        fixture_digest, driver.ctx.demand_compile_execution!.counters)
+    if receipt.is_err():
+        return false
+    val receipt_root = "build/perf/demand-compile"
+    _cli_dir_create_impl(receipt_root, true)
+    _cli_file_write_impl(
+        "{receipt_root}/{receipt.unwrap().receipt_digest}.receipt",
+        demand_compile_receipt_canonical_v1(receipt.unwrap()) +
+            "receipt={receipt.unwrap().receipt_digest}\n")
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
 # checks, NOT std.path.stem/extension: those match rfind's raw i64 result
@@ -130,6 +168,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     # Use the Pure Simple compiler driver directly
     # (use desugared __default/__create for interpreter compatibility)
     var options = driver_core_compile_options_default()
+    options.aspect_params = aspect_params_from_env()
     options.mode = CompileMode.Aot
     options.input_files = [source_file]
     options.output_file = out
@@ -152,6 +191,21 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
 
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
+    if driver.ctx.demand_compile_execution != nil:
+        var execution = driver.ctx.demand_compile_execution!
+        if not demand_compile_finalize_baseline_v1(
+                &mut execution, result.is_success(), out):
+            _cli_eprint("error: demand baseline action finalization failed")
+            return 1
+        driver.ctx.demand_compile_execution = Some(execution)
+    val command_identity = [
+        "compile", source_file, out, output_format, backend,
+        str(release), str(low_memory), str(opt_level), profile,
+        driver.ctx.native_target].join("|")
+    if not _cli_publish_demand_compile_receipt_v1(
+            driver, source_file, command_identity):
+        _cli_eprint("error: demand compile receipt publication failed")
+        return 1
 
     match result:
         case CompileResult.Success(_):

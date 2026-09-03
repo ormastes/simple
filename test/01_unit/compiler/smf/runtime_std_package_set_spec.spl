@@ -1,0 +1,51 @@
+use app.spipe.testing.*
+use compiler.driver.smf.package_image_v1.{PackageSectionKindV1}
+use compiler.driver.smf.runtime_std_package_set.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn runtime_std_authority() -> RuntimeStdPackageAuthorityV1:
+    RuntimeStdPackageAuthorityV1(
+        sha256_text("compiler"), sha256_text("action-abi"),
+        sha256_text("runtime-abi"), sha256_text("std-abi"),
+        sha256_text("config"), "aarch64-apple-darwin-macho", "scv-1")
+
+describe "runtime and standard library precompiled SMF baseline":
+    it "uses canonical package identities":
+        expect(RUNTIME_PACKAGE_IDENTITY_V1).to_equal("simple.runtime")
+        expect(STD_PACKAGE_IDENTITY_V1).to_equal("simple.std")
+
+    it "binds rebuild identity to compiler action ABI package ABI and config":
+        val authority = runtime_std_authority()
+        val original = runtime_std_action_digest_v1(
+            authority, RUNTIME_PACKAGE_IDENTITY_V1)
+        val changed = RuntimeStdPackageAuthorityV1(
+            authority.compiler_digest, sha256_text("changed-action-abi"),
+            authority.runtime_abi_digest, authority.std_abi_digest,
+            authority.config_digest, authority.target_triple,
+            authority.snapshot_revision)
+        expect(original == "").to_equal(false)
+        expect(runtime_std_action_digest_v1(
+            changed, RUNTIME_PACKAGE_IDENTITY_V1) == original).to_equal(false)
+
+    it "keeps unrelated standard ABI changes out of runtime action identity":
+        val authority = runtime_std_authority()
+        val changed = RuntimeStdPackageAuthorityV1(
+            authority.compiler_digest, authority.action_abi_digest,
+            authority.runtime_abi_digest, sha256_text("changed-std-abi"),
+            authority.config_digest, authority.target_triple,
+            authority.snapshot_revision)
+        expect(runtime_std_action_digest_v1(
+            changed, RUNTIME_PACKAGE_IDENTITY_V1)).to_equal(
+                runtime_std_action_digest_v1(
+                    authority, RUNTIME_PACKAGE_IDENTITY_V1))
+
+    it "creates action graph work for both baseline packages":
+        val authority = runtime_std_authority()
+        expect(runtime_std_build_action_v1(
+            authority, RUNTIME_PACKAGE_IDENTITY_V1) != nil).to_equal(true)
+        expect(runtime_std_build_action_v1(
+            authority, STD_PACKAGE_IDENTITY_V1) != nil).to_equal(true)
+
+    it "fails closed for unsupported package identities":
+        expect(runtime_std_action_digest_v1(
+            runtime_std_authority(), "third.party") == "").to_equal(true)

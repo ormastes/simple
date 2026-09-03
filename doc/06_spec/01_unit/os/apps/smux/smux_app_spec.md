@@ -28,7 +28,7 @@ smux_app_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,6 +59,54 @@ expect(smux_run_cmd(["new", "dev"])).to_equal(0)
 val sessions = smux_list_sessions()
 expect(sessions.len()).to_equal(1)
 expect(sessions[0].name).to_equal("dev")
+```
+
+</details>
+
+#### routes the full command to the named session only
+
+1. Create two sessions and address the second by name
+2. Capture both panes and require isolation plus complete argv joining
+   - Expected: first capture is empty
+   - Expected: second capture contains `echo hello world`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+smux_reset_for_test()
+expect(smux_run_cmd(["new", "first"])).to_equal(0)
+expect(smux_run_cmd(["new", "second"])).to_equal(0)
+expect(smux_run_cmd(["send", "second", "echo", "hello", "world"])).to_equal(0)
+val sessions = smux_list_sessions()
+val first_window = smux_list_windows(sessions[0].id)[0]
+val second_window = smux_list_windows(sessions[1].id)[0]
+val first_pane = smux_list_panes(sessions[0].id, first_window.id)[0]
+val second_pane = smux_list_panes(sessions[1].id, second_window.id)[0]
+val first_capture = smux_capture(sessions[0].id, first_window.id,
+    first_pane.id, 100)
+val second_capture = smux_capture(sessions[1].id, second_window.id,
+    second_pane.id, 100)
+expect(first_capture.content).to_equal("")
+expect(second_capture.content).to_contain("echo hello world")
+```
+
+</details>
+
+#### fails when a command names an unknown session
+
+1. Reject every pane command before touching another session
+   - Expected: send, capture, and split each return `1`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+smux_reset_for_test()
+expect(smux_run_cmd(["new", "known"])).to_equal(0)
+expect(smux_run_cmd(["send", "missing", "echo", "unsafe"])).to_equal(1)
+expect(smux_run_cmd(["capture", "missing"])).to_equal(1)
+expect(smux_run_cmd(["split", "missing"])).to_equal(1)
 ```
 
 </details>
@@ -121,7 +169,7 @@ expect(smux_remote_launch_once(42)).to_equal(true)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/apps/smux/smux_app_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-09-02 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -133,8 +181,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

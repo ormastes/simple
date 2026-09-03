@@ -3,6 +3,7 @@
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
+use app.io.cli_ops.{cli_current_exe_path}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
@@ -24,6 +25,7 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{time_now_unix_micros}
 extern fn rt_path_absolute(path: text) -> text
+extern fn sys_get_args() -> [text]
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
 # truncate) then write() as two separate steps, so a concurrent reader that
@@ -138,66 +140,44 @@ fn parse_client_run(args: [text]) -> ClientRun:
 fn invoking_binary() -> text:
     """Absolute path of the compiler binary running THIS process ("" if unknown).
 
-    Canonicalizes /proc/self/exe IN-PROCESS. Never shell out: a spawned
-    helper's /proc/self describes the HELPER, which is how the CLI's guard
-    became a fork bomb on 2026-07-25.
+    Uses the CLI's cross-platform current-executable resolver, then
+    canonicalizes the result IN-PROCESS. Never shell out: a spawned helper's
+    self identity describes the HELPER, which is how the CLI's guard became a
+    fork bomb on 2026-07-25.
 
-    This is the only answer that is not a guess. Every candidate list below it
-    is a guess, and a guess that lands on the DEPLOYED binary while the caller
-    invoked a freshly rebuilt one turns a verification run into a vacuous one
-    — see doc/08_tracking/bug/
+    If the shared resolver cannot provide an existing path (notably when a
+    host has no /proc), true process argv supplies one final canonicalizable
+    identity. No deployed-path candidate list is permitted — see
+    doc/08_tracking/bug/
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
-    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
-    if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
-        return self_path
+    val current = cli_current_exe_path()
+    if current != "" and file_exists(current):
+        val self_path = rt_path_absolute(current) ?? ""
+        if self_path.len() > 0 and file_exists(self_path):
+            return self_path
+    val process_args = sys_get_args()
+    if process_args.len() > 0 and file_exists(process_args[0]):
+        val argv_binary = rt_path_absolute(process_args[0]) ?? ""
+        if argv_binary != "" and file_exists(argv_binary):
+            return argv_binary
     ""
 
 fn simple_binary() -> text:
-    # An explicit SIMPLE_BINARY is the ONE legitimate reason to execute a spec
-    # with a binary other than the invoking one (cross-binary parity specs);
-    # preserve it explicitly rather than by falling through to a fixed path.
-    val configured = env_get("SIMPLE_BINARY") ?? ""
-    if configured != "" and file_exists(configured):
-        return configured
-    # The invoking binary, resolved in-process. This MUST outrank the
-    # bin/simple / debug-seed candidate list below: cli_get_args()[0] here is
-    # the SUBCOMMAND ("test"), not argv0, so without this step every
-    # `<rebuilt-binary> test <spec>` run silently handed the spec to the stale
-    # deployed bin/simple. Measured 2026-08-08: invoking
-    # src/compiler_rust/target/release/simple printed
-    # `child binary: .../bin/release/x86_64-unknown-linux-gnu/simple`.
+    # Qualification is valid only when the child is the canonical invoking
+    # candidate. An explicit SIMPLE_BINARY must resolve to that same identity;
+    # it is a binding, not permission to substitute another compiler.
     val invoker = invoking_binary()
-    if invoker != "":
+    if invoker == "":
+        return ""
+    val configured_raw = env_get("SIMPLE_BINARY") ?? ""
+    if configured_raw == "":
         return invoker
-    val raw = cli_get_args()
-    # Source-mode argv can begin with this file's own .spl path (when the seed
-    # interprets test_runner_client.spl directly). It exists, but it is not
-    # executable; passing it to process_run(_timeout) produces a misleading
-    # permission-denied failure instead of running the test. Same fix as
-    # test_runner_single.spl's simple_binary().
-    if raw.len() > 0 and (raw[0].ends_with("/simple") or raw[0].ends_with("simple.exe")) and file_exists(raw[0]):
-        return raw[0]
-    # bin/simple (the deployed pure-Simple self-hosted binary — see
-    # .claude/rules/bootstrap.md "Default tooling runs on pure-Simple") MUST be
-    # tried before any Rust-seed candidate. The old order checked the debug
-    # seed first, so whenever a `cargo build` had left a stray
-    # src/compiler_rust/target/debug/simple around (a routine dev-loop
-    # byproduct, not something anyone opts into for testing), a spawned light
-    # daemon silently pinned itself to that debug interpreter for its whole
-    # lifetime. A debug build is 10-50x slower than release, so specs that
-    # normally finish in seconds instead blow through *any* --timeout /
-    # SIMPLE_TIMEOUT_SECONDS override (the override still fires — it just
-    # can't rescue a run that was never going to finish in time), always
-    # ending in "Process timed out" (src/lib/nogc_sync_mut/src/infra.spl:686 /
-    # src/compiler_rust/compiler/src/interpreter_extern/system.rs:165,228).
-    # See doc/08_tracking/bug/test_client_debug_seed_binary_shadowing_timeout_2026-08-06.md.
-    if file_exists("bin/simple"):
-        return "bin/simple"
-    if file_exists("/proc/self/exe"):
-        return "/proc/self/exe"
-    if file_exists("src/compiler_rust/target/debug/simple"):
-        return "src/compiler_rust/target/debug/simple"
-    "./bin/simple"
+    if not file_exists(configured_raw):
+        return ""
+    val configured = rt_path_absolute(configured_raw) ?? ""
+    if configured == "" or not file_exists(configured) or configured != invoker:
+        return ""
+    configured
 
 fn ensure_dirs():
     dir_create_all(LIGHT_DAEMON_DIR)
@@ -255,19 +235,16 @@ fn report_stale_lock():
 fn daemon_recorded_binary() -> text:
     """Absolute path of the compiler a LIVE light daemon serves specs with.
 
-    Returns "" when no daemon is alive (nothing to mismatch against). A daemon
-    that is alive but predates the daemon.binary record was, by construction of
-    the pre-2026-08-08 resolver, always running bin/simple — resolve that so an
-    old daemon still produces an honest comparison rather than a free pass."""
+    Returns "" when no daemon is alive or its canonical identity is missing.
+    Never infer an old daemon's identity from deployed bin/simple: native
+    qualification must use recorded candidate authority, not a fallback."""
     if not daemon_lock_alive():
         return ""
     val recorded = (read_file_text(LIGHT_BINARY)).trim()
-    if recorded != "" and file_exists(recorded):
-        return recorded
-    val deployed = rt_path_absolute("bin/simple") ?? ""
-    if deployed != "" and file_exists(deployed):
-        return deployed
-    ""
+    if recorded == "" or not file_exists(recorded):
+        return ""
+    val canonical = rt_path_absolute(recorded) ?? ""
+    if canonical != "" and file_exists(canonical): canonical else: ""
 
 fn ensure_daemon() -> bool:
     if daemon_lock_alive():
@@ -627,6 +604,11 @@ fn main() -> i64:
         print "Simple Test Runner client"
         print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
         return 1
+    val candidate_binary = simple_binary()
+    if candidate_binary == "":
+        print "ERROR: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
+        print "ERROR: refusing to fall back to deployed bin/simple or a Rust seed"
+        return 1
     # Daemon-lane timeout only: the light-request protocol clamps to
     # LIGHT_REQUEST_MAX_TIMEOUT_MS (600s). The direct lane must honor the
     # full requested --timeout — see long_timeout_bypass below and
@@ -697,11 +679,12 @@ fn main() -> i64:
     # lane that rebuilds the compiler and runs `test` to verify the fix then
     # measures the old binary and calls it green. Divert to the direct lane
     # whenever the daemon's binary is not the one running this process. A
-    # daemon predating this record (no daemon.binary file) is treated as
-    # bin/simple, which is what every pre-fix daemon actually used.
-    val invoker = invoking_binary()
+    # daemon predating this record has unavailable identity and must not serve
+    # qualification work.
+    val invoker = candidate_binary
     val daemon_binary = daemon_recorded_binary()
-    val invoker_bypass = invoker != "" and daemon_binary != "" and invoker != daemon_binary
+    val daemon_was_alive = daemon_lock_alive()
+    val invoker_bypass = daemon_was_alive and daemon_binary != invoker
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
@@ -723,7 +706,12 @@ fn main() -> i64:
     # zero production call sites. This is that wiring.
     val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
+    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
+    if daemon_ok:
+        val active_daemon_binary = daemon_recorded_binary()
+        if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
+            print "invoking-binary: test daemon identity is unavailable or mismatched; bypassing daemon so {candidate_binary} executes the spec"
+            daemon_ok = false
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
@@ -742,7 +730,7 @@ fn main() -> i64:
             print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
         else:
             print "WARNING: test daemon unavailable; running directly"
-        binary = simple_binary()
+        binary = candidate_binary
     var worst = 0
     var executed = 0
     var seq = 0

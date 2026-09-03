@@ -1,0 +1,84 @@
+use std.spec.{describe, it, expect}
+use compiler.driver.demand_mir_evidence_builder.{
+    CombinedMirEvidenceErrorV1, CombinedMirScvIdentityV1,
+    CombinedMirArchiveEvidenceV1, CombinedMirDirtyEvidenceV1,
+    CombinedMirEvidenceBuilder, combined_mir_evidence_build_v1
+}
+
+val DIGEST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val DIGEST_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val DIGEST_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+fn identity() -> CombinedMirScvIdentityV1:
+    CombinedMirScvIdentityV1(DIGEST_A, DIGEST_B, DIGEST_C)
+
+fn archive(module_id: text, dependencies: [text]) -> CombinedMirArchiveEvidenceV1:
+    CombinedMirArchiveEvidenceV1(
+        "pkg", module_id, ["symbol.{module_id}"], dependencies, [DIGEST_A],
+        DIGEST_B, "producer-v1", "debug", identity())
+
+fn dirty(module_id: text, dependencies: [text]) -> CombinedMirDirtyEvidenceV1:
+    CombinedMirDirtyEvidenceV1(
+        "pkg", module_id, ["symbol.{module_id}"], dependencies, [DIGEST_C],
+        DIGEST_A, "producer-v1", "debug", identity())
+
+describe("CombinedMirEvidenceBuilder"):
+    it("admits one mixed archive and dirty dependency closure"):
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug",
+            [archive("clean", ["dirty"])], [dirty("dirty", [])]))
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap().dependency_count).to_equal(2)
+        expect(result.unwrap().snapshot_tree_digest).to_equal(DIGEST_B)
+
+    it("rejects an empty route"):
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug", [], []))
+        expect(result.unwrap_err()).to_equal(CombinedMirEvidenceErrorV1.empty_route)
+
+    it("rejects stale archive identity"):
+        var stale = archive("clean", [])
+        stale.scv = CombinedMirScvIdentityV1(DIGEST_C, DIGEST_B, DIGEST_C)
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug", [stale], []))
+        expect(result.unwrap_err()).to_equal(
+            CombinedMirEvidenceErrorV1.archive_authority_invalid)
+
+    it("rejects duplicate modules across archive and dirty evidence"):
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug",
+            [archive("same", [])], [dirty("same", [])]))
+        expect(result.unwrap_err()).to_equal(
+            CombinedMirEvidenceErrorV1.dependency_conflict)
+
+    it("rejects duplicate symbols"):
+        var second = dirty("dirty", [])
+        second.symbol_ids = ["symbol.clean"]
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug", [archive("clean", [])], [second]))
+        expect(result.unwrap_err()).to_equal(
+            CombinedMirEvidenceErrorV1.duplicate_symbol)
+
+    it("rejects unresolved dependencies"):
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug", [], [dirty("dirty", ["missing"])]))
+        expect(result.unwrap_err()).to_equal(
+            CombinedMirEvidenceErrorV1.dependency_unresolved)
+
+    it("rejects missing read-set authority"):
+        var incomplete = dirty("dirty", [])
+        incomplete.read_set_digests = []
+        val result = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug", [], [incomplete]))
+        expect(result.unwrap_err()).to_equal(
+            CombinedMirEvidenceErrorV1.read_set_incomplete)
+
+    it("is deterministic across archive and dirty input order"):
+        val first = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug",
+            [archive("clean", ["dirty"])], [dirty("dirty", [])])).unwrap()
+        val second = combined_mir_evidence_build_v1(CombinedMirEvidenceBuilder(
+            identity(), "producer-v1", "debug",
+            [archive("clean", ["dirty"])], [dirty("dirty", [])])).unwrap()
+        expect(first.demand_closure_digest).to_equal(second.demand_closure_digest)
+        expect(first.dependency_set_digest).to_equal(second.dependency_set_digest)

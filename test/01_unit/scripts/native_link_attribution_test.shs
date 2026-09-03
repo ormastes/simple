@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/native-link-attribution-test.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fail() { echo "native link attribution test: FAIL — $*" >&2; exit 1; }
+reject() { if "$@" >/dev/null 2>&1; then fail "mutation accepted: $*"; fi; }
+
+printf 'binary-v1\n' >"$scratch/binary"
+printf 'action=v1\n' >"$scratch/action.env"
+printf 'runtime-closure=v1\n' >"$scratch/runtime.env"
+printf 'retained-section\t64\t.text.main\nretained-section\t16\t.data.runtime\n' >"$scratch/map.tsv"
+printf 'removed-section\t32\t.text.unused\n' >"$scratch/removed.tsv"
+printf 'symbol\t24\tmain\nsymbol\t8\truntime_init\n' >"$scratch/symbols.tsv"
+printf 'dso\t0\tlibSystem.B.dylib\n' >"$scratch/dsos.tsv"
+printf 'constructor\t8\truntime_ctor\n' >"$scratch/constructors.tsv"
+printf 'export\t8\t_main\n' >"$scratch/exports.tsv"
+cat >"$scratch/reasons.tsv" <<'EOF'
+retained-section	.text.main	entry	program-entry
+retained-section	.data.runtime	runtime	declared-runtime-closure
+removed-section	.text.unused	linker	unreachable-section
+symbol	main	entry	exported-entry
+symbol	runtime_init	runtime	runtime-initialization
+dso	libSystem.B.dylib	platform	declared-platform-dependency
+constructor	runtime_ctor	runtime	declared-runtime-constructor
+export	_main	entry	declared-export
+EOF
+
+produce() {
+    output_name=$1
+    (cd "$scratch" && "$ROOT/scripts/check/produce-native-link-attribution.shs" --output-dir "$output_name" \
+        --binary "$scratch/binary" --link-map "$scratch/map.tsv" \
+        --removed-sections "$scratch/removed.tsv" --symbols "$scratch/symbols.tsv" \
+        --dsos "$scratch/dsos.tsv" --constructors "$scratch/constructors.tsv" \
+        --exports "$scratch/exports.tsv" --action-receipt "$scratch/action.env" \
+        --runtime-closure "$scratch/runtime.env" --reason-ledger "$scratch/reasons.tsv")
+}
+check() {
+    "$ROOT/scripts/check/check-native-link-attribution.shs" --receipt "$scratch/out/receipt.env" \
+        --attribution "$scratch/out/attribution.tsv" --binary "$scratch/binary" \
+        --link-map "$scratch/map.tsv" --removed-sections "$scratch/removed.tsv" \
+        --symbols "$scratch/symbols.tsv" --dsos "$scratch/dsos.tsv" \
+        --constructors "$scratch/constructors.tsv" --exports "$scratch/exports.tsv" \
+        --action-receipt "$scratch/action.env" --runtime-closure "$scratch/runtime.env" \
+        --reason-ledger "$scratch/reasons.tsv"
+}
+
+produce out >/dev/null || fail clean-producer
+check >/dev/null || fail clean-checker
+cp "$scratch/binary" "$scratch/binary.good"; printf drift >>"$scratch/binary"; reject check; mv "$scratch/binary.good" "$scratch/binary"
+cp "$scratch/action.env" "$scratch/action.good"; printf drift >>"$scratch/action.env"; reject check; mv "$scratch/action.good" "$scratch/action.env"
+cp "$scratch/runtime.env" "$scratch/runtime.good"; printf drift >>"$scratch/runtime.env"; reject check; mv "$scratch/runtime.good" "$scratch/runtime.env"
+cp "$scratch/reasons.tsv" "$scratch/reasons.good"; sed '$d' "$scratch/reasons.tsv" >"$scratch/reasons.short"; mv "$scratch/reasons.short" "$scratch/reasons.tsv"; reject check; mv "$scratch/reasons.good" "$scratch/reasons.tsv"
+cp "$scratch/out/attribution.tsv" "$scratch/attribution.good"; cat "$scratch/attribution.good" >>"$scratch/out/attribution.tsv"; reject check; mv "$scratch/attribution.good" "$scratch/out/attribution.tsv"
+printf 'symbol\tnot-a-size\tbad\n' >>"$scratch/symbols.tsv"; reject produce bad-output
+echo 'native link attribution test: PASS — clean evidence and six mutations'

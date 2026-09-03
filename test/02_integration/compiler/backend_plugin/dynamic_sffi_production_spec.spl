@@ -1,0 +1,66 @@
+use std.spec.*
+use std.spec.step
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability, BackendPluginRequestV1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+
+val FIXTURE_SOURCE = "test/fixtures/sffi/plugin_entry_v1_fixture.c"
+val FIXTURE_DIR = "build/test-phase6-backend-product"
+
+fn build_backend_fixture(name: text, extra: text) -> text:
+    val path = "{FIXTURE_DIR}/{name}.dylib"
+    val defines = ("-DPLUGIN_IFACE_NAME='\"simple.compiler.BackendPortV1\"' "
+        + "-DPLUGIN_DIGEST='\"simple-mir-v1\"' "
+        + "-DPLUGIN_CAPABILITY='\"object_emit\"' " + extra)
+    val command = ("mkdir -p '" + FIXTURE_DIR + "' && "
+        + "case \"$(uname -s)\" in Darwin) shared=-dynamiclib;; *) shared=-shared;; esac && "
+        + "cc $shared -fPIC " + defines + " '" + FIXTURE_SOURCE + "' -o '" + path + "'")
+    val (_out, err, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    path
+
+fn backend_request(path: text) -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, "fixture_backend", "native", "generic", [],
+        "o2", "simple-mir-v1", [BackendCapability.ObjectEmit], path, true)
+
+describe "production backend dynamic SFFI negotiation":
+    it "routes the real backend loader through HostOfferV1 and retains an accepted handle":
+        step("compile spl_plugin_entry_v1 provider and call production load_backend")
+        val loaded = load_backend(backend_request(build_backend_fixture("accepted", "")))
+        expect(loaded.is_ok()).to_equal(true)
+        var session = loaded.unwrap()
+        expect(session.dynamic_adapter != nil).to_equal(true)
+        expect(session.close()).to_equal(true)
+
+    it "accepts an older compatible backend interface minor":
+        step("admit an older minor through production load_backend")
+        val loaded = load_backend(backend_request(build_backend_fixture(
+            "older-minor", "-DPLUGIN_MINOR=0")))
+        expect(loaded.is_ok()).to_equal(true)
+        var session = loaded.unwrap()
+        expect(session.close()).to_equal(true)
+
+    it "surfaces named PLUG-E diagnostics from the real backend loader":
+        step("reject major and digest before dynamic backend session publication")
+        val bad_major = load_backend(backend_request(
+            build_backend_fixture("major", "-DPLUGIN_MAJOR=2")))
+        expect(bad_major.is_err()).to_equal(true)
+        expect(bad_major.unwrap_err().diagnostic()).to_contain("PLUG-E-MAJOR")
+        val bad_digest = load_backend(backend_request(
+            build_backend_fixture("digest", "-DPLUGIN_DIGEST='\"wrong-mir\"'")))
+        expect(bad_digest.is_err()).to_equal(true)
+        expect(bad_digest.unwrap_err().diagnostic()).to_contain("PLUG-E-DIGEST")
+
+    it "refuses missing capability and concrete ABI before session publication":
+        step("exercise capability and ABI refusals through production load_backend")
+        val bad_cap = load_backend(backend_request(
+            build_backend_fixture("capability", "-DPLUGIN_CAPABILITY='\"unknown_cap\"'")))
+        expect(bad_cap.is_err()).to_equal(true)
+        expect(bad_cap.unwrap_err().diagnostic()).to_contain("PLUG-E-CAP")
+        val bad_abi = load_backend(backend_request(build_backend_fixture(
+            "abi", "-DPLUGIN_ABI=2 -DPLUGIN_DEFERRED=0")))
+        expect(bad_abi.is_err()).to_equal(true)
+        expect(bad_abi.unwrap_err().diagnostic()).to_contain("PLUG-E-ABI-DEFER")

@@ -1,0 +1,71 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_archive_types.{PackageArchiveMemberReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    ArchiveFileIdentityV1, PinnedArchiveCapability
+}
+use compiler.driver.cache.route_capability_scope.{
+    RouteCapabilityScopeErrorV1, route_capability_scope_cancel_v1,
+    route_capability_scope_close_all_v1, route_capability_scope_new_v1,
+    route_capability_scope_read_member_v1,
+    route_capability_scope_register_v1, route_capability_scope_timeout_v1,
+    route_capability_scope_transfer_last_v1
+}
+
+fn scope_capability(descriptor: i64) -> PinnedArchiveCapability:
+    PinnedArchiveCapability(
+        descriptor: descriptor,
+        identity: ArchiveFileIdentityV1(1, descriptor.to_u64(), 7, "digest"),
+        archive_digest: "digest", receipt_digest: "receipt",
+        members: [PackageArchiveMemberReceiptV1("interface.smf", 0, 7, "member")],
+        open: true)
+
+describe "route capability scope":
+    it "rejects duplicate ownership registration":
+        var scope = route_capability_scope_new_v1(64)
+        expect(route_capability_scope_register_v1(
+            &scope, scope_capability(41)).is_ok()).to_equal(true)
+        val duplicate = route_capability_scope_register_v1(
+            &scope, scope_capability(41))
+        expect(duplicate.unwrap_err()).to_equal(
+            RouteCapabilityScopeErrorV1.duplicate_capability)
+
+    it "records an explicit ownership transfer and prevents a second transfer":
+        var scope = route_capability_scope_new_v1(64)
+        _ = route_capability_scope_register_v1(&scope, scope_capability(42))
+        val transfer = route_capability_scope_transfer_last_v1(&scope, 42)
+        expect(transfer.is_ok()).to_equal(true)
+        expect(route_capability_scope_transfer_last_v1(
+            &scope, 42).unwrap_err()).to_equal(
+                RouteCapabilityScopeErrorV1.invalid_transfer)
+
+    it "retains close failure and makes cleanup idempotent":
+        var scope = route_capability_scope_new_v1(64)
+        _ = route_capability_scope_register_v1(&scope, scope_capability(43))
+        expect(route_capability_scope_close_all_v1(
+            &scope).unwrap_err()).to_equal(RouteCapabilityScopeErrorV1.close_failed)
+        expect(route_capability_scope_close_all_v1(
+            &scope).unwrap_err()).to_equal(RouteCapabilityScopeErrorV1.close_failed)
+
+    it "uses the same deterministic cleanup for cancellation and timeout":
+        var cancelled = route_capability_scope_new_v1(64)
+        _ = route_capability_scope_register_v1(&cancelled, scope_capability(44))
+        expect(route_capability_scope_cancel_v1(
+            &cancelled).unwrap_err()).to_equal(RouteCapabilityScopeErrorV1.close_failed)
+        var timed_out = route_capability_scope_new_v1(64)
+        _ = route_capability_scope_register_v1(&timed_out, scope_capability(45))
+        expect(route_capability_scope_timeout_v1(
+            &timed_out).unwrap_err()).to_equal(RouteCapabilityScopeErrorV1.close_failed)
+
+    it "rejects registration after cleanup":
+        var scope = route_capability_scope_new_v1(64)
+        _ = route_capability_scope_close_all_v1(&scope)
+        expect(route_capability_scope_register_v1(
+            &scope, scope_capability(46)).unwrap_err()).to_equal(
+                RouteCapabilityScopeErrorV1.already_closed)
+
+    it "enforces bounded consumption before touching a capability":
+        var scope = route_capability_scope_new_v1(6)
+        _ = route_capability_scope_register_v1(&scope, scope_capability(47))
+        expect(route_capability_scope_read_member_v1(
+            &scope, 47, "interface.smf", 7).unwrap_err()).to_equal(
+                RouteCapabilityScopeErrorV1.invalid_transfer)

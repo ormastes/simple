@@ -1,0 +1,154 @@
+use app.compiler_entrypoint.admission.{
+    CompilerEntrypointAdmissionV1, compiler_entrypoint_admit_v1,
+    compiler_entrypoint_frozen_path_v1
+}
+use app.compiler_entrypoint.package_command_resolution.{
+    PackageCommandResolutionV1, PackageCommandSelectionV1,
+    package_command_resolve_v1
+}
+use compiler.frontend.import_head_scanner.{
+    FrozenSourceHeadV1, ImportHeadScanStatusV1, scan_import_head_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{PinnedArchiveCapability}
+use compiler.driver.smf.package_image_v1.{
+    PackageImageV1, PackageSectionKindV1
+}
+use compiler.driver.smf.package_section_reader_v1.{
+    package_section_reader_open_v1, package_section_reader_read_v1,
+    package_section_reader_close_v1
+}
+use std.async.cancellation.{CancellationToken}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.io.file_read_policy.{FileReadPolicyV1}
+use std.common.io.read_only_file_view.{
+    read_only_file_view_open_v1, read_only_file_view_read_v1,
+    read_only_file_view_close_v1
+}
+use std.common.string_core.{bytes_to_text}
+
+val DEMAND_ENTRY_HEAD_BYTES_V1: u64 = 65536
+
+struct DemandPackageSectionInputV1:
+    image: PackageImageV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+    selected_sections: [PackageSectionKindV1]
+
+struct DemandPackageSectionV1:
+    package_identity: text
+    kind: PackageSectionKindV1
+    payload: [u8]
+
+struct DemandCompileEntryV1:
+    valid: bool
+    reason: text
+    resolution: PackageCommandResolutionV1?
+    admission: CompilerEntrypointAdmissionV1?
+    frozen_sources: [text]
+    discovered_imports: [text]
+    full_parse_sources: [text]
+    sections: [DemandPackageSectionV1]
+
+fn demand_entry_invalid_v1(reason: text) -> DemandCompileEntryV1:
+    DemandCompileEntryV1(false, reason, nil, nil, [], [], [], [])
+
+fn demand_entry_inside_package_v1(path: text, package_root: text) -> bool:
+    path == package_root or path.starts_with(package_root + "/")
+
+fn demand_entry_read_head_v1(
+    admission: CompilerEntrypointAdmissionV1,
+    resolution: PackageCommandResolutionV1,
+    source_path: text,
+    imports: &mut [text],
+    full_parse_sources: &mut [text]
+) -> bool:
+    val frozen = compiler_entrypoint_frozen_path_v1(admission, source_path)
+    val frozen_package = compiler_entrypoint_frozen_path_v1(
+        admission, resolution.package_root)
+    if (frozen == "" or frozen_package == "" or
+            not demand_entry_inside_package_v1(frozen, frozen_package)):
+        return false
+    val opened = read_only_file_view_open_v1(
+        admission.snapshot_root, frozen, admission.revision_id,
+        FileReadPolicyV1.auto_map)
+    if opened.is_err():
+        return false
+    var view = opened.unwrap()
+    val length = if view.identity.size < DEMAND_ENTRY_HEAD_BYTES_V1:
+        view.identity.size
+    else:
+        DEMAND_ENTRY_HEAD_BYTES_V1
+    val content = read_only_file_view_read_v1(
+        &view, 0, length, CancellationToken.new())
+    if content.is_err():
+        _ = read_only_file_view_close_v1(view)
+        return false
+    val slice = content.unwrap()
+    val scan = scan_import_head_v1(FrozenSourceHeadV1(
+        frozen, admission.revision_id, sha256_bytes(slice.bytes),
+        bytes_to_text(slice.bytes), length == view.identity.size),
+        DEMAND_ENTRY_HEAD_BYTES_V1.to_i64())
+    if read_only_file_view_close_v1(view).is_err():
+        return false
+    if scan.status == ImportHeadScanStatusV1.needs_full_parse:
+        full_parse_sources.push(frozen)
+        return true
+    for imported in scan.imports:
+        if not imports.contains(imported):
+            imports.push(imported)
+    true
+
+fn demand_compile_entry_prepare_v1(
+    command: text, cwd: text, args: [text],
+    archive_inputs: [DemandPackageSectionInputV1]
+) -> DemandCompileEntryV1:
+    val resolution = package_command_resolve_v1(command, cwd, args)
+    if not resolution.valid:
+        return demand_entry_invalid_v1("command-scope:" + resolution.reason)
+    if resolution.selection == PackageCommandSelectionV1.RecursivePackages:
+        return demand_entry_invalid_v1("recursive-package-index-route-required")
+    var roots = resolution.source_roots
+    if roots.len() == 0:
+        roots = [resolution.package_root]
+    val admission = compiler_entrypoint_admit_v1(roots)
+    if not admission.valid:
+        return demand_entry_invalid_v1("admission:" + admission.reason)
+
+    var frozen_sources: [text] = []
+    var imports: [text] = []
+    var full_parse_sources: [text] = []
+    if resolution.explicit_file != "":
+        val frozen = compiler_entrypoint_frozen_path_v1(
+            admission, resolution.explicit_file)
+        if frozen == "" or not demand_entry_read_head_v1(
+                admission, resolution, resolution.explicit_file,
+                &mut imports, &mut full_parse_sources):
+            return demand_entry_invalid_v1("frozen-head-read-failed")
+        frozen_sources.push(frozen)
+
+    var sections: [DemandPackageSectionV1] = []
+    for input in archive_inputs:
+        val opened = package_section_reader_open_v1(
+            input.image, input.receipt, input.capability,
+            input.selected_sections)
+        if opened.is_err():
+            return demand_entry_invalid_v1("package-image-admission-failed")
+        var reader = opened.unwrap()
+        for kind in input.selected_sections:
+            val payload = package_section_reader_read_v1(&reader, kind)
+            if payload.is_err():
+                _ = package_section_reader_close_v1(reader)
+                return demand_entry_invalid_v1("package-section-read-failed")
+            sections.push(DemandPackageSectionV1(
+                input.image.package_identity, kind, payload.unwrap()))
+        if package_section_reader_close_v1(reader).is_err():
+            return demand_entry_invalid_v1("package-section-close-failed")
+
+    DemandCompileEntryV1(
+        true, "ok", Some(resolution), Some(admission), frozen_sources,
+        imports.sorted(), full_parse_sources.sorted(), sections)
+
+export DEMAND_ENTRY_HEAD_BYTES_V1
+export DemandPackageSectionInputV1, DemandPackageSectionV1, DemandCompileEntryV1
+export demand_compile_entry_prepare_v1

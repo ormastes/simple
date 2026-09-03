@@ -1,0 +1,55 @@
+use app.spipe.testing.*
+use std.common.io.file_read_policy.{
+    FileReadPolicyV1,
+    file_read_policy_allows_fallback_v1,
+    file_read_policy_selects_mapping_v1
+}
+use os.hal.read_only_file_map_port.{
+    ReadOnlyFileIdentityV1,
+    ReadOnlyFileMapErrorKind,
+    ReadOnlyFileMapRequestV1
+}
+use os.sosix.read_only_file_map.{
+    SosixReadOnlyFileMapBackendV1,
+    SosixReadOnlyFileMapPortV1
+}
+
+fn integration_identity(size: u64) -> ReadOnlyFileIdentityV1:
+    ReadOnlyFileIdentityV1(
+        device: 3u64, inode: 5u64, byte_length: size,
+        modified_ns: 7u64, generation: 11u64)
+
+fn unsupported_map_port() -> SosixReadOnlyFileMapPortV1:
+    val expected = integration_identity(131072u64)
+    SosixReadOnlyFileMapPortV1.create(SosixReadOnlyFileMapBackendV1(
+        page_bytes: 4096u64, supports_whole: false, supports_windows: false,
+        stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>:
+            Ok(expected),
+        map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>:
+            Err(-95),
+        unmap_read_only: fn(address: i64, length: u64) -> i64:
+            0))
+
+describe "D11 file-view policy over D12 mapping capability":
+    it "attempts an admitted bounded window and preserves typed unsupported":
+        var port = unsupported_map_port()
+        val selected = file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.prefer_map, true, true,
+            131072u64, 65536u64, 131072u64)
+        expect(selected).to_equal(true)
+        val mapped = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 9, identity: integration_identity(131072u64),
+            offset: 4096u64, length: 65536u64, whole_file: false))
+        expect((mapped.error ?? unreachable()).kind).to_equal(
+            ReadOnlyFileMapErrorKind.Unsupported)
+        expect(file_read_policy_allows_fallback_v1(
+            FileReadPolicyV1.prefer_map)).to_equal(true)
+
+    it "does not permit buffered fallback for must-map":
+        expect(file_read_policy_allows_fallback_v1(
+            FileReadPolicyV1.must_map)).to_equal(false)
+
+    it "keeps buffered policy from calling the mapping capability":
+        expect(file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.buffered, true, true,
+            131072u64, 65536u64, 131072u64)).to_equal(false)

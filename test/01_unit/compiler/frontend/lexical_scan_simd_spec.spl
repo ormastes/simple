@@ -1,0 +1,88 @@
+# Purpose and audience: executable D13 lexical acceleration contract.
+# @req REQ-015
+
+use std.spec
+use std.spec.step
+use compiler.frontend.lexer.lexical_scan_capability.{LexicalScanProvider, LexicalScanCapabilityError, LexicalScanBenchmarkV1, lexical_scan_admit_cpu_simd, lexical_scan_gpu_candidate}
+use compiler.frontend.lexer.lexical_scan_simd.{lexical_scan_scalar_oracle, lexical_scan_cpu_simd_candidate, lexical_scan_marks_equal, lexical_scan_with_capability}
+use compiler.frontend.lexer.lexical_scan_runtime.{
+    lexical_scan_runtime_admit_cpu_simd_v1, lexical_scan_runtime_counters_v1,
+    lexical_scan_runtime_reset_v1, lexical_scan_runtime_scan_v1,
+    lexical_scan_runtime_set_gpu_notification_crossover_v1
+}
+use compiler.frontend.core.lexer.{lex_init_with_path}
+
+fn admitted_capability(source_bytes: i64):
+    lexical_scan_admit_cpu_simd(true, 16, LexicalScanBenchmarkV1(
+        source_bytes: source_bytes,
+        scalar_ns: 200,
+        simd_ns: 100,
+        matched_samples: 7,
+        scalar_digest: "matched",
+        simd_digest: "matched"
+    ))
+
+describe "D13 lexical SIMD admission":
+    it "matches the scalar oracle across lexical boundaries":
+        step("compare accelerated marks with the scalar semantic oracle")
+        val source = "fn main():\n    print(\"x # y\") # tail\n"
+        expect(lexical_scan_marks_equal(lexical_scan_scalar_oracle(source), lexical_scan_cpu_simd_candidate(source))).to_be_true()
+
+    it "dispatches SIMD only after matched benchmark admission":
+        step("admit a measured CPU capability above crossover")
+        val admitted = admitted_capability(64)
+        expect(admitted.is_ok()).to_be_true()
+        val result = lexical_scan_with_capability("0123456789abcdef : #\n", admitted.unwrap())
+        expect(result.used_provider).to_equal(LexicalScanProvider.CpuSimd)
+        expect(result.parity_verified).to_be_true()
+
+    it "rejects benchmark evidence with semantic divergence":
+        step("reject unequal scalar and SIMD result digests")
+        val admitted = lexical_scan_admit_cpu_simd(true, 16, LexicalScanBenchmarkV1(
+            source_bytes: 64,
+            scalar_ns: 200,
+            simd_ns: 100,
+            matched_samples: 7,
+            scalar_digest: "scalar",
+            simd_digest: "different"
+        ))
+        expect(admitted.is_err()).to_be_true()
+        expect(admitted.unwrap_err()).to_equal(LexicalScanCapabilityError.ParityMismatch)
+
+    it "keeps below-crossover inputs on the scalar oracle":
+        step("dispatch a short source through scalar")
+        val admitted = admitted_capability(64).unwrap()
+        val result = lexical_scan_with_capability("x", admitted)
+        expect(result.used_provider).to_equal(LexicalScanProvider.Scalar)
+
+    it "reports GPU work only as a candidate notification":
+        step("emit notification without selecting a GPU provider")
+        val candidate = lexical_scan_gpu_candidate(4096, 1024)
+        expect(candidate.notify).to_be_true()
+        expect(candidate.reason).to_equal("transfer-inclusive-benchmark-required")
+
+    it "uses the scalar oracle by default at the live lexer entry":
+        step("initialize the production lexer and capture D13 counters")
+        lexical_scan_runtime_reset_v1()
+        lex_init_with_path("fn main():\n    pass\n", "")
+        val counters = lexical_scan_runtime_counters_v1()
+        expect(counters.scalar_scan_count).to_equal(1)
+        expect(counters.simd_scan_count).to_equal(0)
+
+    it "uses admitted SIMD at the live lexer entry and only notifies for GPU":
+        step("admit measured SIMD before production lexer initialization")
+        lexical_scan_runtime_reset_v1()
+        val admitted = lexical_scan_runtime_admit_cpu_simd_v1(true, 16, LexicalScanBenchmarkV1(
+            source_bytes: 64,
+            scalar_ns: 200,
+            simd_ns: 100,
+            matched_samples: 7,
+            scalar_digest: "matched",
+            simd_digest: "matched"))
+        expect(admitted.is_ok()).to_be_true()
+        lexical_scan_runtime_set_gpu_notification_crossover_v1(16)
+        lex_init_with_path("fn main():\n    print(\"0123456789abcdef\")\n", "")
+        val counters = lexical_scan_runtime_counters_v1()
+        expect(counters.simd_scan_count).to_equal(1)
+        expect(counters.gpu_notification_count).to_equal(1)
+        expect(counters.divergence_fallback_count).to_equal(0)

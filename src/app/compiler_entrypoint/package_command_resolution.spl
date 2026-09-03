@@ -1,0 +1,199 @@
+# Typed, side-effect-free command resolution for package-oriented compiler commands.
+
+use app.io.file_ops.{file_exists, path_absolute}
+
+enum PackageCommandSelectionV1:
+    NearestPackage
+    ExplicitFile
+    ExplicitSources
+    RecursivePackages
+
+enum PackageCommandResolutionErrorV1:
+    UnsupportedCommand
+    WorkingDirectoryUnavailable
+    ManifestNotFound
+    ExplicitFileMissing
+    ExplicitFileInvalid
+    SourceValueMissing
+    SourceRootMissing
+    RecursiveSelectionAmbiguous
+    MultipleExplicitFiles
+
+struct PackageCommandResolutionV1:
+    valid: bool
+    reason: text
+    error: PackageCommandResolutionErrorV1?
+    selection: PackageCommandSelectionV1
+    package_root: text
+    manifest_path: text
+    explicit_file: text
+    source_roots: [text]
+    recursive: bool
+    passthrough_args: [text]
+
+fn _package_resolution_invalid_v1(
+    error: PackageCommandResolutionErrorV1, reason: text
+) -> PackageCommandResolutionV1:
+    PackageCommandResolutionV1(
+        false, reason, Some(error), PackageCommandSelectionV1.NearestPackage,
+        "", "", "", [], false, [])
+
+fn _package_path_trim_v1(path: text) -> text:
+    var result = path.replace("\\", "/")
+    while result.len() > 1 and result.ends_with("/"):
+        result = result.substring(0, result.len() - 1)
+    result
+
+fn _package_path_parent_v1(path: text) -> text:
+    val normalized = _package_path_trim_v1(path)
+    if normalized == "/":
+        return "/"
+    val parts = normalized.split("/")
+    if parts.len() <= 1:
+        return "."
+    val parent = parts.slice(0, parts.len() - 1).join("/")
+    if parent == "" and normalized.starts_with("/"):
+        return "/"
+    parent
+
+fn _package_existing_absolute_v1(path: text) -> text:
+    if path == "" or not file_exists(path):
+        return ""
+    path_absolute(path).replace("\\", "/")
+
+fn package_command_nearest_manifest_v1(cwd: text) -> text:
+    var current = _package_existing_absolute_v1(cwd)
+    if current == "":
+        return ""
+    while true:
+        val candidate = current + "/simple.sdn"
+        if file_exists(candidate):
+            return candidate
+        val parent = _package_path_parent_v1(current)
+        if parent == current:
+            return ""
+        current = parent
+    ""
+
+fn _package_command_supported_v1(command: text) -> bool:
+    command == "build" or command == "check" or command == "run" or
+        command == "test"
+
+fn _package_command_success_v1(
+    selection: PackageCommandSelectionV1,
+    package_root: text,
+    manifest_path: text,
+    explicit_file: text,
+    source_roots: [text],
+    recursive: bool,
+    passthrough_args: [text]
+) -> PackageCommandResolutionV1:
+    PackageCommandResolutionV1(
+        true, "ok", nil, selection, package_root, manifest_path,
+        explicit_file, source_roots, recursive, passthrough_args)
+
+fn package_command_resolve_v1(
+    command: text, cwd: text, args: [text]
+) -> PackageCommandResolutionV1:
+    if not _package_command_supported_v1(command):
+        return _package_resolution_invalid_v1(
+            PackageCommandResolutionErrorV1.UnsupportedCommand,
+            "unsupported-command")
+
+    val canonical_cwd = _package_existing_absolute_v1(cwd)
+    if canonical_cwd == "":
+        return _package_resolution_invalid_v1(
+            PackageCommandResolutionErrorV1.WorkingDirectoryUnavailable,
+            "working-directory-unavailable")
+
+    var source_roots: [text] = []
+    var passthrough_args: [text] = []
+    var explicit_file = ""
+    var recursive = false
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--source":
+            if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                return _package_resolution_invalid_v1(
+                    PackageCommandResolutionErrorV1.SourceValueMissing,
+                    "source-value-missing")
+            val source = _package_existing_absolute_v1(args[index + 1])
+            if source == "":
+                return _package_resolution_invalid_v1(
+                    PackageCommandResolutionErrorV1.SourceRootMissing,
+                    "source-root-missing")
+            source_roots.push(source)
+            index = index + 2
+        elif arg.starts_with("--source="):
+            val raw_source = arg.substring("--source=".len(), arg.len())
+            val source = _package_existing_absolute_v1(raw_source)
+            if source == "":
+                val source_error = if raw_source == "":
+                    PackageCommandResolutionErrorV1.SourceValueMissing
+                else:
+                    PackageCommandResolutionErrorV1.SourceRootMissing
+                val source_reason = if raw_source == "":
+                    "source-value-missing"
+                else:
+                    "source-root-missing"
+                return _package_resolution_invalid_v1(
+                    source_error, source_reason)
+            source_roots.push(source)
+            index = index + 1
+        elif arg == "./...":
+            recursive = true
+            index = index + 1
+        elif arg.starts_with("-"):
+            passthrough_args.push(arg)
+            index = index + 1
+        elif arg.ends_with(".spl"):
+            if explicit_file != "":
+                return _package_resolution_invalid_v1(
+                    PackageCommandResolutionErrorV1.MultipleExplicitFiles,
+                    "multiple-explicit-files")
+            explicit_file = _package_existing_absolute_v1(arg)
+            if explicit_file == "":
+                return _package_resolution_invalid_v1(
+                    PackageCommandResolutionErrorV1.ExplicitFileMissing,
+                    "explicit-file-missing")
+            index = index + 1
+        else:
+            return _package_resolution_invalid_v1(
+                PackageCommandResolutionErrorV1.ExplicitFileInvalid,
+                "unrecognized-positional-input")
+
+    if recursive and (explicit_file != "" or source_roots.len() > 0):
+        return _package_resolution_invalid_v1(
+            PackageCommandResolutionErrorV1.RecursiveSelectionAmbiguous,
+            "recursive-selection-ambiguous")
+
+    if explicit_file != "":
+        return _package_command_success_v1(
+            PackageCommandSelectionV1.ExplicitFile,
+            _package_path_parent_v1(explicit_file), "", explicit_file,
+            source_roots, false, passthrough_args)
+
+    if source_roots.len() > 0:
+        return _package_command_success_v1(
+            PackageCommandSelectionV1.ExplicitSources,
+            canonical_cwd, "", "", source_roots, false, passthrough_args)
+
+    val manifest = package_command_nearest_manifest_v1(canonical_cwd)
+    if manifest == "":
+        return _package_resolution_invalid_v1(
+            PackageCommandResolutionErrorV1.ManifestNotFound,
+            if recursive: "recursive-package-manifest-not-found"
+            else: "nearest-package-manifest-not-found")
+    val root = _package_path_parent_v1(manifest)
+    if recursive:
+        return _package_command_success_v1(
+            PackageCommandSelectionV1.RecursivePackages,
+            root, manifest, "", [], true, passthrough_args)
+    _package_command_success_v1(
+        PackageCommandSelectionV1.NearestPackage,
+        root, manifest, "", [], false, passthrough_args)
+
+export PackageCommandSelectionV1, PackageCommandResolutionErrorV1
+export PackageCommandResolutionV1
+export package_command_nearest_manifest_v1, package_command_resolve_v1

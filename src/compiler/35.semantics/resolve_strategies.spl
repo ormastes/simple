@@ -13,6 +13,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.traits.traits.*
 use compiler.semantics.resolve.{MethodResolver, ResolveError}
 use compiler.hir.{MethodResolution}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_unresolved_method_v1
+}
 
 impl MethodResolver:
     me resolve_method(receiver: HirExpr, method: text, args: [HirCallArg]) -> MethodResolution:
@@ -23,7 +27,10 @@ impl MethodResolver:
         2. Trait method implemented by receiver's type
         3. Free function where receiver becomes first argument
         """
+        reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
         if receiver.type_ == nil:
+            reverse_reference_register_unresolved_method_v1(
+                method, "unknown-receiver", "receiver-type-unknown")
             self.add_error(
                 ("cannot resolve method '{method}': receiver type is unknown. " +
                 "Ensure the receiver expression has a valid type."),
@@ -32,6 +39,8 @@ impl MethodResolver:
             return MethodResolution.Unresolved
         val ty = receiver.type_ ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
         val type_name = self.format_type(ty)
+        reverse_reference_register_unresolved_method_v1(
+            method, type_name, "method-candidate:{method}:{type_name}:{args.len()}")
 
         # Priority 1: Instance method on receiver's type
         val instance_result = self.try_instance_method(ty, method)

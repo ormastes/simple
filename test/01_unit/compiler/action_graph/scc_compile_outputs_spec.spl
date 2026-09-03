@@ -1,0 +1,93 @@
+use compiler.driver.action_graph.scc_compile_outputs.*
+use compiler.driver.cache.package_archive_cache.{PackageArchivePublishInputV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.*
+
+fn digest(value: text) -> text:
+    sha256_text(value)
+
+fn entry(module_identity: text, action_digest: text) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        "pkg", module_identity, "snapshot/{module_identity}.spl", digest("source"),
+        digest("metadata"), digest("export"), digest("abi"), digest("init"),
+        digest("provider"), action_digest, digest("manifest"), "scc-1", [], [])
+
+fn output(module_identity: text) -> SccModuleCompileOutputV1:
+    val package_image = "image:{module_identity}"
+    val interface_content = "interface:{module_identity}"
+    val action_content = "action:{module_identity}"
+    SccModuleCompileOutputV1(
+        entry(module_identity, digest(action_content)), package_image,
+        digest(package_image), interface_content, digest(interface_content),
+        action_content, digest(action_content), [], digest("dependencies"),
+        digest("read-set"), digest("mir"), "baseline:cranelift",
+        digest("baseline"), ["a:diagnostic", "b:diagnostic"],
+        "compile:{module_identity}", true, "build/{module_identity}.o", "")
+
+fn validate(outputs: SccCompileOutputsV1) -> Result[[PackageArchivePublishInputV1], SccCompileOutputsErrorV1]:
+    scc_compile_outputs_validate_v1(
+        outputs, "scc-1", digest("mir"), "baseline:cranelift",
+        digest("baseline"))
+
+describe "SccCompileOutputsV1":
+    it "admits real complete compiler outputs in scheduled module order":
+        val result = validate(SccCompileOutputsV1(
+            "scc-1", ["a", "b"], [output("b"), output("a")]))
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().len()).to_equal(2)
+
+    it "rejects partial and unexpected member sets":
+        val partial = validate(SccCompileOutputsV1(
+            "scc-1", ["a", "b"], [output("a")]))
+        expect(partial.unwrap_err()).to_equal(
+            SccCompileOutputsErrorV1.member_set_incomplete)
+        val unexpected = validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [output("b")]))
+        expect(unexpected.unwrap_err()).to_equal(
+            SccCompileOutputsErrorV1.unexpected_member)
+
+    it "rejects duplicate members and wrong SCC identity":
+        val duplicate = validate(SccCompileOutputsV1(
+            "scc-1", ["a", "b"], [output("a"), output("a")]))
+        expect(duplicate.unwrap_err()).to_equal(
+            SccCompileOutputsErrorV1.duplicate_member)
+        val wrong = validate(SccCompileOutputsV1(
+            "other-scc", ["a"], [output("a")]))
+        expect(wrong.unwrap_err()).to_equal(
+            SccCompileOutputsErrorV1.scc_identity_mismatch)
+
+    it "rejects failed placeholder and checksum-invalid outputs":
+        var failed = output("a")
+        failed.compiler_action_succeeded = false
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [failed])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.output_missing)
+        var placeholder = output("a")
+        placeholder.package_image = "placeholder"
+        placeholder.package_image_digest = digest("placeholder")
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [placeholder])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.output_placeholder)
+        var corrupt = output("a")
+        corrupt.interface_digest = digest("wrong")
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [corrupt])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.artifact_mismatch)
+
+    it "rejects MIR baseline action and diagnostic authority drift":
+        var admission = output("a")
+        admission.mir_admission_digest = digest("other")
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [admission])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.admission_mismatch)
+        var artifact = output("a")
+        artifact.baseline_artifact_digest = digest("other")
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [artifact])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.artifact_mismatch)
+        var diagnostics = output("a")
+        diagnostics.diagnostics = ["b", "a"]
+        expect(validate(SccCompileOutputsV1(
+            "scc-1", ["a"], [diagnostics])).unwrap_err()).to_equal(
+                SccCompileOutputsErrorV1.diagnostic_order_invalid)

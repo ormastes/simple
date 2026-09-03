@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+bridge=src/compiler/80.driver/action_graph/artifact_service_bridge.spl
+integration=src/compiler/80.driver/action_graph/demand_compile_integration.spl
+driver=src/compiler/80.driver/driver_source_pipeline_loading.spl
+
+test -f "$bridge"
+grep -q 'fn demand_artifact_route_v1(' "$bridge"
+grep -q 'fn demand_artifact_claim_v1(' "$bridge"
+grep -q 'fn demand_artifact_commit_v1(' "$bridge"
+grep -q 'artifact_service_enqueue_v1' "$bridge"
+grep -q 'artifact_service_claim_v1' "$bridge"
+grep -q 'artifact_service_complete_v1' "$bridge"
+grep -q 'entry.cas_artifact_digest == output_identity' "$bridge"
+grep -q 'coordinator_claim_v1' "$bridge"
+grep -q 'coordinator_commit_v1' "$bridge"
+grep -q 'ArtifactFrameStreamV1.diagnostic' "$bridge"
+grep -q 'daemon_available' "$bridge"
+grep -q 'profile.foreground_priority + action.priority' "$bridge"
+if grep -Eq 'if .*daemon_available|elif .*daemon_available' "$bridge"; then
+    printf '%s\n' 'daemon availability changes action semantics' >&2
+    exit 1
+fi
+test -f "$integration"
+grep -q 'demand_artifact_route_v1' "$driver"
+grep -q 'demand_artifact_claim_v1' "$driver"
+grep -q 'demand_artifact_commit_v1' "$driver"
+if grep -q 'demand_compile_complete_action_v1' "$driver"; then
+    printf '%s\n' 'driver bypasses artifact service' >&2
+    exit 1
+fi
+
+for adapter in \
+    src/app/compiler_service/demand_profile.spl \
+    src/app/test_daemon/demand_profile.spl \
+    src/app/mcp/demand_compile_profile.spl \
+    src/app/simple_lsp_mcp/demand_compile_profile.spl
+do
+    grep -q 'demand_artifact_route_v1' "$adapter"
+    grep -q 'daemon_available' "$adapter"
+done
+
+printf '%s\n' 'artifact-service-bridge-contract: PASS'

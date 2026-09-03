@@ -1,0 +1,65 @@
+use app.spipe.testing.*
+use compiler.frontend.import_head_scanner.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn frozen_head(content: text, complete_file: bool = true) -> FrozenSourceHeadV1:
+    FrozenSourceHeadV1(
+        "snapshot/src/example.spl", "snapshot-v1", sha256_text(content),
+        content, complete_file)
+
+describe "bounded frozen import head scanner":
+    it "returns sorted exact imports without reading declarations":
+        val result = scan_import_head_v1(frozen_head(
+            "# heading\nuse zeta.api\nuse alpha.core.{Thing}\nfn body():\n    pass\n"), 4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.exact)
+        expect(result.imports).to_equal(["alpha.core", "zeta.api"])
+
+    it "deduplicates imports":
+        val result = scan_import_head_v1(frozen_head(
+            "use alpha.core\nuse alpha.core.{Thing}\n"), 4096)
+        expect(result.imports).to_equal(["alpha.core"])
+
+    it "accepts a multiline selector head without scanning its body":
+        val result = scan_import_head_v1(frozen_head(
+            "use std.io_runtime.{\n    file_read_result, file_exists\n}\nfn body():\n    pass\n"),
+            4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.exact)
+        expect(result.imports).to_equal(["std.io_runtime"])
+
+    it "ignores import-shaped text in comments and strings":
+        val result = scan_import_head_v1(frozen_head(
+            "# use false.comment\nval banner = \"use false.string\"\n"), 4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.exact)
+        expect(result.imports.len()).to_equal(0)
+
+    it "escalates a truncated frozen head rather than guessing":
+        val result = scan_import_head_v1(frozen_head(
+            "use alpha.core\nuse beta.", false), 4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.needs_full_parse)
+        expect(result.reason).to_equal(ImportHeadScanReasonV1.head_limit_reached)
+        expect(result.imports.len()).to_equal(0)
+
+    it "escalates when the byte budget ends inside the file":
+        val result = scan_import_head_v1(frozen_head(
+            "use alpha.core\nfn body():\n    pass\n"), 8)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.needs_full_parse)
+        expect(result.reason).to_equal(ImportHeadScanReasonV1.head_limit_reached)
+
+    it "escalates malformed import syntax":
+        val result = scan_import_head_v1(frozen_head("use alpha..core\n"), 4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.needs_full_parse)
+        expect(result.reason).to_equal(ImportHeadScanReasonV1.malformed_import)
+
+    it "escalates unterminated strings and nested block comments":
+        val string_result = scan_import_head_v1(frozen_head("\"use hidden"), 4096)
+        expect(string_result.reason).to_equal(ImportHeadScanReasonV1.unterminated_string)
+        val comment_result = scan_import_head_v1(frozen_head(
+            "/* outer /* inner */"), 4096)
+        expect(comment_result.reason).to_equal(
+            ImportHeadScanReasonV1.unterminated_block_comment)
+
+    it "rejects an unbound frozen view":
+        val result = scan_import_head_v1(FrozenSourceHeadV1(
+            "live.spl", "", sha256_text("use alpha"), "use alpha", true), 4096)
+        expect(result.status).to_equal(ImportHeadScanStatusV1.needs_full_parse)
+        expect(result.reason).to_equal(ImportHeadScanReasonV1.invalid_frozen_view)

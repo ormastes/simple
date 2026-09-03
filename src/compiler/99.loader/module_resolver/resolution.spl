@@ -126,7 +126,11 @@ impl ModuleResolver:
                         # the ambiguous case reproducible, and it is the ordering
                         # the non-fatal warning below already assumes. See
                         # doc/08_tracking/bug/tierless_std_import_readdir_order_2026-08-17.md
-                        val subdirs = tier_ordered_subdirs(self.cached_dir_list(lib_dir))
+                        val subdirs = tier_ordered_subdirs(self.inventory_entries(lib_dir))
+                        if subdirs.is_empty():
+                            return CompileError.semantic(
+                                "cannot resolve import: admitted package module inventory is absent or has no src/lib tiers"
+                            ).with_note("refresh and admit PackageImageV1 plus the persistent package index; live directory scanning is forbidden")
                         for subdir in subdirs:
                             # Filter by allowed_families if restriction is active
                             if self.allowed_families.len() > 0:
@@ -179,13 +183,19 @@ impl ModuleResolver:
                 self.resolution_cache[cache_key] = nil
                 return Err(err)
 
-    fn cached_dir_list(dir_path: text) -> [text]:
-        """Get directory listing with caching to avoid repeated rt_dir_list calls."""
-        if self.dir_cache.has(dir_path):
-            return self.dir_cache[dir_path]
-        self.dir_list_call_count = self.dir_list_call_count + 1
-        val entries = dir_list(dir_path)
-        self.dir_cache[dir_path] = entries
+    fn inventory_entries(dir_path: text) -> [text]:
+        if self.module_inventory == nil:
+            return []
+        var entries: [text] = []
+        val prefix = if dir_path.ends_with("/"): dir_path else: "{dir_path}/"
+        for module in self.module_inventory!.entries:
+            if not module.source_identity.starts_with(prefix):
+                continue
+            val tail = module.source_identity.substring(prefix.len(), module.source_identity.len())
+            val slash = tail.index_of("/")
+            val entry = if slash >= 0: tail.substring(0, slash) else: tail
+            if entry != "" and not entries.contains(entry):
+                entries.push(entry)
         entries
 
     fn clear_cache():
@@ -259,26 +269,8 @@ impl ModuleResolver:
         else:
             self.tier_multiplicity[dotted] = [tier]
 
-    fn collect_tier_modules(dir: text, rel: text, tier: text):
-        """Recursively record module sub-paths (.spl files and __init__.spl dirs)."""
-        val entries = dir_list(dir)
-        for entry in entries:
-            if entry == "" or entry.starts_with("."):
-                continue
-            val full = path_join2(dir, entry)
-            if probe_dir_exists(full):
-                val child_rel = if rel == "": "{entry}" else: "{rel}.{entry}"
-                if probe_file_exists(path_join2(full, "__init__.spl")):
-                    self.record_tier_module(child_rel, tier)
-                self.collect_tier_modules(full, child_rel, tier)
-            elif entry.ends_with(".spl"):
-                val stem = entry.substring(0, entry.len() - 4)
-                if stem != "" and stem != "__init__":
-                    val dotted = if rel == "": "{stem}" else: "{rel}.{stem}"
-                    self.record_tier_module(dotted, tier)
-
     fn build_tier_multiplicity(lib_dir: text):
-        """One-time (per resolver) walk of the tier dirs AND the lib root.
+        """Build tier multiplicity from admitted immutable module identities.
 
         The five canonical tiers are not the only place a `std.<path>` can
         land: `_resolve_module_path_uncached` tries `src/lib/<path>` (step 3)
@@ -288,35 +280,25 @@ impl ModuleResolver:
         tiers left that whole class unflagged. Root modules are recorded
         under the pseudo-tier `<lib-root>`.
         """
+        if self.module_inventory == nil:
+            return
         val tier_names = ["common", "nogc_sync_mut", "nogc_async_mut", "gc_async_mut", "nogc_async_mut_noalloc"]
-        for tier in tier_names:
-            val tier_dir = path_join2(lib_dir, tier)
-            if probe_dir_exists(tier_dir):
-                self.collect_tier_modules(tier_dir, "", tier)
-        self.collect_lib_root_modules(lib_dir, tier_names)
+        val prefix = if lib_dir.ends_with("/"): lib_dir else: "{lib_dir}/"
+        for module in self.module_inventory!.entries:
+            if not module.source_identity.starts_with(prefix):
+                continue
+            var dotted = module.module_identity
+            var tier = "<lib-root>"
+            for candidate in tier_names:
+                val marker = "lib.{candidate}."
+                if dotted.starts_with(marker):
+                    tier = candidate
+                    dotted = dotted.substring(marker.len(), dotted.len())
+            if dotted.starts_with("lib."):
+                dotted = dotted.substring(4, dotted.len())
+            if dotted != "":
+                self.record_tier_module(dotted, tier)
         self.tier_map_built = true
-
-    fn collect_lib_root_modules(lib_dir: text, tier_names: [text]):
-        """Record modules that live directly under `src/lib/`, not in a tier."""
-        val entries = dir_list(lib_dir)
-        for entry in entries:
-            if entry == "" or entry.starts_with("."):
-                continue
-            var is_tier = false
-            for t in tier_names:
-                if t == entry:
-                    is_tier = true
-            if is_tier:
-                continue
-            val full = path_join2(lib_dir, entry)
-            if probe_dir_exists(full):
-                if probe_file_exists(path_join2(full, "__init__.spl")):
-                    self.record_tier_module(entry, "<lib-root>")
-                self.collect_tier_modules(full, entry, "<lib-root>")
-            elif entry.ends_with(".spl"):
-                val stem = entry.substring(0, entry.len() - 4)
-                if stem != "" and stem != "__init__":
-                    self.record_tier_module(stem, "<lib-root>")
 
     fn maybe_warn_tier_ambiguity(lib_dir: text, inner_segments: [text], from_file: text):
         """Warn when a tier-less std import path exists under 2+ lib tiers.
@@ -383,7 +365,7 @@ impl ModuleResolver:
                     pass
             else:
                 # Try numbered directory fallback (NN.segment pattern)
-                val numbered = find_numbered_dir(current, segment)
+                val numbered = self.find_numbered_dir(current, segment)
                 if numbered.?:
                     current = numbered ?? current
                 else:
@@ -425,7 +407,7 @@ impl ModuleResolver:
             return Ok(ResolvedModule.file(ssh_path, original_path.clone()))
 
         # Try numbered directory fallback for the last segment
-        val numbered_dir = find_numbered_dir(current, last)
+        val numbered_dir = self.find_numbered_dir(current, last)
         if numbered_dir.?:
             val nd = numbered_dir ?? ""
             val nd_init = path_join2(nd, "__init__.spl")
@@ -564,8 +546,6 @@ extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
 extern fn rt_file_read_text(path: text) -> text
 
-use std.io_runtime.{dir_list}
-
 fn path_join2(a: text, b: text) -> text:
     """Join two path segments."""
     rt_path_join(a, b)
@@ -591,9 +571,6 @@ fn file_read(path: text) -> text?:
     Some(rt_file_read_text(path) ?? "")
 
 extern fn rt_env_get(key: text) -> text
-
-# Module-level directory listing cache for free functions
-var _dir_listing_cache: {text: [text]} = {}
 
 # ===== Tier Precedence for tier-less `use std.X` =====
 # Canonical, least-capability-first order. `common` is pure and cannot pull a
@@ -629,44 +606,33 @@ fn tier_ordered_subdirs(subdirs: [text]) -> [text]:
             ordered.push(subdir)
     ordered
 
-fn cached_dir_list_global(dir_path: text) -> [text]:
-    """Module-level cached dir listing for free functions."""
-    if _dir_listing_cache.has(dir_path):
-        return _dir_listing_cache[dir_path]
-    val entries = dir_list(dir_path)
-    _dir_listing_cache[dir_path] = entries
-    entries
-
-fn find_numbered_dir(parent: text, segment: text) -> text?:
-    """Find a numbered directory matching a segment name.
+impl ModuleResolver:
+    fn find_numbered_dir(parent: text, segment: text) -> text?:
+        """Find a numbered directory matching a segment name.
 
     Scans the parent directory for entries matching the pattern NN.name
     where NN is a 1-3 digit numeric prefix and name matches the segment.
     Returns the full path if found, nil otherwise.
     Uses cached directory listings to avoid repeated rt_dir_list calls.
     """
-    if not probe_dir_exists(parent):
-        return nil
-
-    val entries = cached_dir_list_global(parent)
-    for entry in entries:
-        val dot_idx = entry.index_of(".")
-        if dot_idx.?:
-            val idx = dot_idx ?? 0
-            if idx >= 1 and idx <= 3:
-                val prefix = entry.substring(0, idx)
-                # Verify prefix is all digits
-                var all_digits = true
-                for ch in prefix:
-                    if ch < "0" or ch > "9":
-                        all_digits = false
-                if all_digits:
-                    val name = entry.substring(idx + 1)
-                    if name == segment:
-                        val full_path = path_join2(parent, entry)
-                        if probe_dir_exists(full_path):
-                            return Some(full_path)
-    nil
+        val entries = self.inventory_entries(parent)
+        for entry in entries:
+            val dot_idx = entry.index_of(".")
+            if dot_idx.?:
+                val idx = dot_idx ?? 0
+                if idx >= 1 and idx <= 3:
+                    val prefix = entry.substring(0, idx)
+                    var all_digits = true
+                    for ch in prefix:
+                        if ch < "0" or ch > "9":
+                            all_digits = false
+                    if all_digits:
+                        val name = entry.substring(idx + 1)
+                        if name == segment:
+                            val full_path = path_join2(parent, entry)
+                            if probe_dir_exists(full_path):
+                                return Some(full_path)
+        nil
 
 # ============================================================================
 # Usage Examples

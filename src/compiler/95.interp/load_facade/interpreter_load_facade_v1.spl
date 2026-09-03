@@ -1,0 +1,179 @@
+use app.compiler_entrypoint.package_command_resolution.{
+    PackageCommandResolutionV1
+}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.hir.import_materialization.state.{
+    ImportSnapshotIdentityV1, import_materialization_snapshot_valid_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, pinned_archive_close_v1
+}
+use compiler.driver.smf.package_image_v1.{
+    PackageImageV1, PackageSectionKindV1, package_section_kind_name_v1
+}
+use compiler.driver.smf.package_section_reader_v1.{
+    package_section_reader_open_v1, package_section_reader_read_v1,
+    package_section_reader_close_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+enum InterpreterLoadDemandV1:
+    metadata
+    executable
+    debug
+
+enum InterpreterLoadErrorV1:
+    invalid_resolution
+    invalid_snapshot
+    package_identity_mismatch
+    archive_authority_rejected
+    section_read_failed
+    archive_close_failed
+
+struct InterpreterPackageAuthorityV1:
+    resolution: PackageCommandResolutionV1
+    snapshot: ImportSnapshotIdentityV1
+    image: PackageImageV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+
+struct InterpreterLoadedSectionV1:
+    kind: PackageSectionKindV1
+    payload: [u8]
+
+struct InterpreterLoadReceiptV1:
+    package_identity: text
+    snapshot: ImportSnapshotIdentityV1
+    archive_digest: text
+    receipt_digest: text
+    selected_sections: [PackageSectionKindV1]
+    load_digest: text
+
+struct InterpreterLoadResultV1:
+    valid: bool
+    error: InterpreterLoadErrorV1?
+    diagnostic: DiagnosticV1?
+    resolver: PackageCommandResolutionV1
+    snapshot: ImportSnapshotIdentityV1
+    sections: [InterpreterLoadedSectionV1]
+    receipt: InterpreterLoadReceiptV1?
+
+fn interpreter_load_sections_v1(
+    demand: InterpreterLoadDemandV1
+) -> [PackageSectionKindV1]:
+    match demand:
+        case metadata:
+            [
+                PackageSectionKindV1.exports,
+                PackageSectionKindV1.imports,
+                PackageSectionKindV1.types,
+                PackageSectionKindV1.initialization,
+                PackageSectionKindV1.receipts,
+            ]
+        case executable:
+            [
+                PackageSectionKindV1.exports,
+                PackageSectionKindV1.imports,
+                PackageSectionKindV1.types,
+                PackageSectionKindV1.generics,
+                PackageSectionKindV1.hir_summaries,
+                PackageSectionKindV1.mir,
+                PackageSectionKindV1.initialization,
+                PackageSectionKindV1.receipts,
+            ]
+        case debug:
+            [
+                PackageSectionKindV1.exports,
+                PackageSectionKindV1.imports,
+                PackageSectionKindV1.types,
+                PackageSectionKindV1.generics,
+                PackageSectionKindV1.hir_summaries,
+                PackageSectionKindV1.mir,
+                PackageSectionKindV1.initialization,
+                PackageSectionKindV1.debug,
+                PackageSectionKindV1.receipts,
+            ]
+
+fn interpreter_load_failure_v1(
+    authority: InterpreterPackageAuthorityV1,
+    error: InterpreterLoadErrorV1,
+    code: text,
+    message: text
+) -> InterpreterLoadResultV1:
+    InterpreterLoadResultV1(
+        false, Some(error), Some(DiagnosticV1.error(code, message)),
+        authority.resolution, authority.snapshot, [], nil)
+
+fn interpreter_load_digest_v1(
+    authority: InterpreterPackageAuthorityV1,
+    sections: [PackageSectionKindV1]
+) -> text:
+    var encoded = "simple-interpreter-load-v1\n"
+    encoded = encoded + "package={authority.image.package_identity}\n"
+    encoded = encoded + "resolver-root={authority.resolution.package_root}\n"
+    encoded = encoded + "revision={authority.snapshot.revision}\n"
+    encoded = encoded + "tree={authority.snapshot.tree_digest}\n"
+    encoded = encoded + "inventory={authority.snapshot.inventory_digest}\n"
+    encoded = encoded + "archive={authority.receipt.archive_digest}\n"
+    encoded = encoded + "receipt={authority.receipt.receipt_digest}\n"
+    for section in sections:
+        encoded = encoded + "section={package_section_kind_name_v1(section)}\n"
+    sha256_text(encoded)
+
+fn interpreter_load_from_package_v1(
+    authority: InterpreterPackageAuthorityV1,
+    demand: InterpreterLoadDemandV1
+) -> InterpreterLoadResultV1:
+    if not authority.resolution.valid:
+        _ = pinned_archive_close_v1(authority.capability)
+        return interpreter_load_failure_v1(
+            authority, InterpreterLoadErrorV1.invalid_resolution,
+            "IL1001", "interpreter package resolution is not admitted")
+    if not import_materialization_snapshot_valid_v1(authority.snapshot):
+        _ = pinned_archive_close_v1(authority.capability)
+        return interpreter_load_failure_v1(
+            authority, InterpreterLoadErrorV1.invalid_snapshot,
+            "IL1002", "interpreter snapshot identity is invalid")
+    if authority.image.package_identity != authority.receipt.package_key:
+        _ = pinned_archive_close_v1(authority.capability)
+        return interpreter_load_failure_v1(
+            authority, InterpreterLoadErrorV1.package_identity_mismatch,
+            "IL1003", "resolved package and archive identity differ")
+
+    val selected = interpreter_load_sections_v1(demand)
+    val opened = package_section_reader_open_v1(
+        authority.image, authority.receipt, authority.capability, selected)
+    if opened.is_err():
+        _ = pinned_archive_close_v1(authority.capability)
+        return interpreter_load_failure_v1(
+            authority, InterpreterLoadErrorV1.archive_authority_rejected,
+            "IL1004", "interpreter package archive authority was rejected")
+
+    var reader = opened.unwrap()
+    var loaded: [InterpreterLoadedSectionV1] = []
+    for kind in selected:
+        val payload = package_section_reader_read_v1(&reader, kind)
+        if payload.is_err():
+            _ = package_section_reader_close_v1(reader)
+            return interpreter_load_failure_v1(
+                authority, InterpreterLoadErrorV1.section_read_failed,
+                "IL1005", "interpreter package section read failed")
+        loaded.push(InterpreterLoadedSectionV1(kind, payload.unwrap()))
+    if package_section_reader_close_v1(reader).is_err():
+        return interpreter_load_failure_v1(
+            authority, InterpreterLoadErrorV1.archive_close_failed,
+            "IL1006", "interpreter package archive close failed")
+
+    val receipt = InterpreterLoadReceiptV1(
+        authority.image.package_identity, authority.snapshot,
+        authority.receipt.archive_digest, authority.receipt.receipt_digest,
+        selected, interpreter_load_digest_v1(authority, selected))
+    InterpreterLoadResultV1(
+        true, nil, nil, authority.resolution, authority.snapshot,
+        loaded, Some(receipt))
+
+export InterpreterLoadDemandV1, InterpreterLoadErrorV1
+export InterpreterPackageAuthorityV1, InterpreterLoadedSectionV1
+export InterpreterLoadReceiptV1, InterpreterLoadResultV1
+export interpreter_load_from_package_v1

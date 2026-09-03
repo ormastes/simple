@@ -1,0 +1,74 @@
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, PackageModuleIndexEntryV1
+}
+use compiler.driver.smf.package_image_v1.{
+    PackageImageV1, package_image_validate_v1
+}
+
+struct LoaderModuleInventoryV1:
+    snapshot_revision: text
+    snapshot_tree_digest: text
+    snapshot_inventory_digest: text
+    package_identity: text
+    entries: [PackageModuleIndexEntryV1]
+
+enum LoaderModuleInventoryErrorV1:
+    package_image_invalid
+    snapshot_authority_missing
+    snapshot_authority_mismatch
+    package_missing
+    duplicate_module
+    invalid_source_identity
+
+fn loader_inventory_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn loader_inventory_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn loader_module_inventory_admit_v1(
+    image: PackageImageV1,
+    receipt: PackageArchiveReceiptV1,
+    index: PackageModuleIndexGenerationV1,
+    snapshot_revision: text,
+    snapshot_tree_digest: text,
+    snapshot_inventory_digest: text
+) -> Result[LoaderModuleInventoryV1, LoaderModuleInventoryErrorV1]:
+    if package_image_validate_v1(image, receipt).is_err():
+        return Err(LoaderModuleInventoryErrorV1.package_image_invalid)
+    if (not loader_inventory_text_valid_v1(index.scv_revision_id) or
+            not loader_inventory_digest_valid_v1(index.scv_tree_id) or
+            not loader_inventory_digest_valid_v1(index.inventory_digest)):
+        return Err(LoaderModuleInventoryErrorV1.snapshot_authority_missing)
+    if (index.scv_revision_id != snapshot_revision or
+            index.scv_tree_id != snapshot_tree_digest or
+            index.inventory_digest != snapshot_inventory_digest):
+        return Err(LoaderModuleInventoryErrorV1.snapshot_authority_mismatch)
+
+    var entries: [PackageModuleIndexEntryV1] = []
+    var module_names: [text] = []
+    for entry in index.entries:
+        if entry.package_identity != image.package_identity:
+            continue
+        if (not loader_inventory_text_valid_v1(entry.module_identity) or
+                not loader_inventory_text_valid_v1(entry.source_identity) or
+                not entry.source_identity.starts_with("/")):
+            return Err(LoaderModuleInventoryErrorV1.invalid_source_identity)
+        if module_names.contains(entry.module_identity):
+            return Err(LoaderModuleInventoryErrorV1.duplicate_module)
+        module_names.push(entry.module_identity)
+        entries.push(entry)
+    if entries.is_empty():
+        return Err(LoaderModuleInventoryErrorV1.package_missing)
+    Ok(LoaderModuleInventoryV1(
+        index.scv_revision_id, index.scv_tree_id, index.inventory_digest,
+        image.package_identity, entries))
+
+export LoaderModuleInventoryV1, LoaderModuleInventoryErrorV1
+export loader_module_inventory_admit_v1

@@ -1,0 +1,205 @@
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    ArchiveFileIdentityV1, PinnedArchiveCapability, pinned_archive_close_v1
+}
+use compiler.driver.smf.package_image_v1.{
+    PackageImageV1, PackageSectionKindV1
+}
+use compiler.driver.smf.package_section_reader_v1.{
+    package_section_reader_open_v1, package_section_reader_read_v1,
+    package_section_reader_close_v1
+}
+use compiler.backend.linker.obj_taker.{SymbolType, SymbolBinding}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+
+struct LoaderSmfAuthorityV1:
+    snapshot_revision: text
+    snapshot_tree_digest: text
+    snapshot_inventory_digest: text
+    package_identity: text
+    action_digest: text
+    archive_digest: text
+    receipt_digest: text
+
+enum LoaderSmfSymbolKindV1:
+    function
+    data
+    type_symbol
+    trait_symbol
+    actor_symbol
+    constant
+
+enum LoaderSmfBindingV1:
+    local
+    global
+    weak
+
+struct LoaderSmfSymbolV1:
+    name: text
+    section_index: i32
+    offset: i64
+    extent: i64
+    kind: LoaderSmfSymbolKindV1
+    binding: LoaderSmfBindingV1
+    generic_template: bool
+    template_parameter_count: i32
+    template_offset: i64
+
+enum LoaderSmfRelocationKindV1:
+    abs64
+    rel32
+    plt_rel32
+    got_rel32
+    abs32
+
+struct LoaderSmfRelocationV1:
+    offset: i64
+    symbol_index: i64
+    symbol_name: text
+    kind: LoaderSmfRelocationKindV1
+    addend: i64
+
+struct LoaderSmfContractV1:
+    authority: LoaderSmfAuthorityV1
+    archive_file_identity: ArchiveFileIdentityV1
+    symbols: [LoaderSmfSymbolV1]
+    relocations: [LoaderSmfRelocationV1]
+
+enum LoaderSmfAdapterErrorV1:
+    invalid_snapshot_identity
+    identity_mismatch
+    section_admission_failed
+    section_read_failed
+    malformed_smf
+    unsupported_symbol_type
+    unsupported_relocation_type
+    relocation_symbol_out_of_bounds
+    duplicate_symbol
+    close_failed
+
+fn loader_smf_identity_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn loader_smf_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn loader_smf_symbol_kind_v1(
+    kind: SymbolType
+) -> Result[LoaderSmfSymbolKindV1, LoaderSmfAdapterErrorV1]:
+    match kind:
+        SymbolType.Function: Ok(LoaderSmfSymbolKindV1.function)
+        SymbolType.Data: Ok(LoaderSmfSymbolKindV1.data)
+        SymbolType.Type: Ok(LoaderSmfSymbolKindV1.type_symbol)
+        SymbolType.Trait: Ok(LoaderSmfSymbolKindV1.trait_symbol)
+        SymbolType.ActorSymbol: Ok(LoaderSmfSymbolKindV1.actor_symbol)
+        SymbolType.Constant: Ok(LoaderSmfSymbolKindV1.constant)
+        SymbolType.Unknown: Err(LoaderSmfAdapterErrorV1.unsupported_symbol_type)
+
+fn loader_smf_binding_v1(binding: SymbolBinding) -> LoaderSmfBindingV1:
+    match binding:
+        SymbolBinding.Local: LoaderSmfBindingV1.local
+        SymbolBinding.Global: LoaderSmfBindingV1.global
+        SymbolBinding.Weak: LoaderSmfBindingV1.weak
+
+fn loader_smf_relocation_kind_v1(
+    kind: i32
+) -> Result[LoaderSmfRelocationKindV1, LoaderSmfAdapterErrorV1]:
+    match kind:
+        1: Ok(LoaderSmfRelocationKindV1.abs64)
+        2: Ok(LoaderSmfRelocationKindV1.rel32)
+        3: Ok(LoaderSmfRelocationKindV1.plt_rel32)
+        4: Ok(LoaderSmfRelocationKindV1.got_rel32)
+        5: Ok(LoaderSmfRelocationKindV1.abs32)
+        _: Err(LoaderSmfAdapterErrorV1.unsupported_relocation_type)
+
+fn package_image_to_loader_contract_v1(
+    image: PackageImageV1,
+    receipt: PackageArchiveReceiptV1,
+    capability: PinnedArchiveCapability,
+    authority: LoaderSmfAuthorityV1
+) -> Result[LoaderSmfContractV1, LoaderSmfAdapterErrorV1]:
+    val archive_file_identity = capability.identity
+    if (not loader_smf_identity_valid_v1(authority.snapshot_revision) or
+            not loader_smf_digest_valid_v1(authority.snapshot_tree_digest) or
+            not loader_smf_digest_valid_v1(authority.snapshot_inventory_digest)):
+        _ = pinned_archive_close_v1(capability)
+        return Err(LoaderSmfAdapterErrorV1.invalid_snapshot_identity)
+    if (authority.package_identity != image.package_identity or
+            authority.action_digest != image.action_digest or
+            authority.archive_digest != image.archive_digest or
+            authority.receipt_digest != image.receipt_digest):
+        _ = pinned_archive_close_v1(capability)
+        return Err(LoaderSmfAdapterErrorV1.identity_mismatch)
+
+    val opened = package_section_reader_open_v1(
+        image, receipt, capability, [PackageSectionKindV1.objects])
+    if opened.is_err():
+        if pinned_archive_close_v1(capability).is_err():
+            return Err(LoaderSmfAdapterErrorV1.close_failed)
+        return Err(LoaderSmfAdapterErrorV1.section_admission_failed)
+    var section_reader = opened.unwrap()
+    val object_bytes = package_section_reader_read_v1(
+        &section_reader, PackageSectionKindV1.objects)
+    if object_bytes.is_err():
+        _ = package_section_reader_close_v1(section_reader)
+        return Err(LoaderSmfAdapterErrorV1.section_read_failed)
+
+    val parsed = SmfReaderMemory.from_data(object_bytes.unwrap())
+    if parsed.is_err():
+        _ = package_section_reader_close_v1(section_reader)
+        return Err(LoaderSmfAdapterErrorV1.malformed_smf)
+    var smf_reader = parsed.unwrap()
+    val ordered_symbols = smf_reader.symbols_in_table_order()
+    if ordered_symbols.is_err():
+        _ = package_section_reader_close_v1(section_reader)
+        return Err(LoaderSmfAdapterErrorV1.malformed_smf)
+
+    var symbols: [LoaderSmfSymbolV1] = []
+    var names: [text] = []
+    for symbol in ordered_symbols.unwrap():
+        if symbol.name == "" or names.contains(symbol.name):
+            _ = package_section_reader_close_v1(section_reader)
+            return Err(LoaderSmfAdapterErrorV1.duplicate_symbol)
+        val kind = loader_smf_symbol_kind_v1(symbol.ty)
+        if kind.is_err():
+            _ = package_section_reader_close_v1(section_reader)
+            return Err(kind.unwrap_err())
+        names.push(symbol.name)
+        symbols.push(LoaderSmfSymbolV1(
+            symbol.name, symbol.section_index, symbol.offset, symbol.size,
+            kind.unwrap(), loader_smf_binding_v1(symbol.binding),
+            symbol.is_generic_template, symbol.template_param_count,
+            symbol.template_offset))
+
+    val raw_relocations = smf_reader.read_relocations()
+    if raw_relocations.is_err():
+        _ = package_section_reader_close_v1(section_reader)
+        return Err(LoaderSmfAdapterErrorV1.malformed_smf)
+    var relocations: [LoaderSmfRelocationV1] = []
+    for relocation in raw_relocations.unwrap():
+        if relocation.symbol_index < 0 or relocation.symbol_index >= symbols.len():
+            _ = package_section_reader_close_v1(section_reader)
+            return Err(LoaderSmfAdapterErrorV1.relocation_symbol_out_of_bounds)
+        val kind = loader_smf_relocation_kind_v1(relocation.reloc_type)
+        if kind.is_err():
+            _ = package_section_reader_close_v1(section_reader)
+            return Err(kind.unwrap_err())
+        relocations.push(LoaderSmfRelocationV1(
+            relocation.offset, relocation.symbol_index,
+            symbols[relocation.symbol_index].name, kind.unwrap(),
+            relocation.addend))
+
+    if package_section_reader_close_v1(section_reader).is_err():
+        return Err(LoaderSmfAdapterErrorV1.close_failed)
+    Ok(LoaderSmfContractV1(
+        authority, archive_file_identity, symbols, relocations))
+
+export LoaderSmfAuthorityV1, LoaderSmfSymbolKindV1, LoaderSmfBindingV1
+export LoaderSmfSymbolV1, LoaderSmfRelocationKindV1, LoaderSmfRelocationV1
+export LoaderSmfContractV1, LoaderSmfAdapterErrorV1
+export package_image_to_loader_contract_v1

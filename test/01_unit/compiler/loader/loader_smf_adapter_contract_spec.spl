@@ -1,0 +1,42 @@
+use std.test.*
+use std.fs.{read_text}
+
+describe "loader PackageImage adapter contract":
+    it "uses the package image selected-section reader":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source).to_contain("package_section_reader_open_v1")
+        expect(source).to_contain("[PackageSectionKindV1.objects]")
+        expect(source).to_contain("package_section_reader_read_v1")
+
+    it "uses the canonical in-memory SMF parser":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source).to_contain("SmfReaderMemory.from_data(object_bytes)")
+        expect(source).to_contain("symbols_in_table_order()")
+        expect(source).to_contain("read_relocations()")
+
+    it "never reopens an archive path or duplicates wire parsing":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source.contains("read_file(")).to_equal(false)
+        expect(source.contains("open_file(")).to_equal(false)
+        expect(source.contains("rt_pinned_archive_open")).to_equal(false)
+        expect(source.contains("bytes_to_u32")).to_equal(false)
+        expect(source.contains("bytes_to_u64")).to_equal(false)
+
+    it "closes the pinned capability on success and section-read failure":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source).to_contain("pinned_archive_close_v1(capability)")
+        expect(source).to_contain("_ = package_section_reader_close_v1(section_reader)")
+        expect(source).to_contain("val close_result = package_section_reader_close_v1(section_reader)")
+        expect(source).to_contain("capability_close_failed")
+
+    it "binds loader output to package and descriptor identity":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source).to_contain("archive_file_identity: ArchiveFileIdentityV1")
+        expect(source).to_contain("authority.package_identity != image.package_identity")
+        expect(source).to_contain("authority.receipt_digest != image.receipt_digest")
+
+    it "rejects duplicate symbols and invalid relocation authority":
+        val source = read_text("src/compiler/99.loader/shared_contract/package_image_loader_adapter.spl")
+        expect(source).to_contain("names.contains(symbol.name)")
+        expect(source).to_contain("relocation.symbol_index >= symbols.len()")
+        expect(source).to_contain("loader_smf_relocation_kind_v1(relocation.reloc_type)")

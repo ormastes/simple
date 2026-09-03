@@ -140,7 +140,7 @@ version output contains a compiler identity, confirm dispatch reached
 
 ## Pass criteria
 
-The runner must discover one spec with nine examples. All nine examples must
+The runner must discover one spec with ten examples. All ten examples must
 pass, the process exits must match the matrix, and the TUI capture must be
 written and read back byte-for-byte. A zero-example result, a bootstrap
 identity response, or a static source-only assertion is not acceptance.
@@ -389,6 +389,31 @@ step("Select a browser shell and an alternate loopback port")
 val browser_options = devhub_gui_options(["--browser", "--port", "9876"])
 expect(browser_options.0).to_equal(9876)
 expect(browser_options.1).to_equal("browser")
+```
+
+</details>
+
+#### should launch the resolved Electron application instead of its welcome screen
+
+- Resolve the managed Electron package and build the launch arguments
+- Require a real package manifest and an explicit application path
+
+The managed package directory is passed explicitly before `--url`. A missing
+manifest or executable fails closed, so Electron's default welcome screen
+cannot count as a successful DevHub render.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+# @req REQ-DEVHUB-TERM-001
+step("Resolve the managed Electron package and build the launch arguments")
+val launch = resolve_electron_app_launch(".")
+val args = electron_app_launch_args(launch.package_dir,
+    "http://127.0.0.1:8765/", "")
+expect(launch.ready).to_be(true)
+expect(args[1]).to_equal(launch.package_dir)
+expect(args[2]).to_equal("--url")
 ```
 
 </details>

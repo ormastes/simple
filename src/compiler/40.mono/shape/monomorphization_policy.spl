@@ -1,0 +1,44 @@
+use std.common.crypto.sha256.{sha256_text}
+use compiler.hir.hir_types.*
+use compiler.monomorphize.engine.{mangle_type}
+use compiler.mono.shape.layout_shape.*
+use compiler.mono.shape.operation_dictionary.*
+use compiler.mono.shape.shape_specialization_policy.*
+
+struct MonomorphizationShapePlanV1:
+    valid: bool
+    decision: ShapeSpecializationDecisionV1
+    shape_digest: text
+    dictionary_digest: text
+    concrete_digest: text
+
+fn mono_type_shape_input_v1(type_: HirType) -> LayoutShapeInputV1:
+    val name = mangle_type(type_)
+    match type_.kind:
+        case Int(bits, _): LayoutShapeInputV1("abi-v1", "simple-v1", bits / 8, bits / 8, sha256_text("no-pointers"), sha256_text("integer:{bits}"))
+        case Float(bits): LayoutShapeInputV1("abi-v1", "simple-v1", bits / 8, bits / 8, sha256_text("no-pointers"), sha256_text("float:{bits}"))
+        case Bool: LayoutShapeInputV1("abi-v1", "simple-v1", 1, 1, sha256_text("no-pointers"), sha256_text("bool"))
+        case Char: LayoutShapeInputV1("abi-v1", "simple-v1", 4, 4, sha256_text("no-pointers"), sha256_text("char"))
+        case Unit: LayoutShapeInputV1("abi-v1", "simple-v1", 0, 1, sha256_text("no-pointers"), sha256_text("unit"))
+        case _: LayoutShapeInputV1("abi-v1", "simple-v1", 8, 8, sha256_text("opaque:{name}"), sha256_text("opaque:{name}"))
+
+fn monomorphization_shape_plan_v1(generic_body_digest: text, type_args: [HirType], explicit: bool, evidence: ShapeSpecializationEvidenceV1) -> MonomorphizationShapePlanV1:
+    if generic_body_digest == "" or type_args.len() == 0:
+        val empty_shape = LayoutShapeIdV1("")
+        val empty_dictionary = OperationDictionaryV1(empty_shape, [], "")
+        return MonomorphizationShapePlanV1(false, shape_specialization_decide_v1(empty_shape, empty_dictionary, ShapeSpecializationRequestV1("", "", explicit, evidence)), "", "", "")
+    var shape_material = "simple/mono-shape-tuple/v1"
+    var concrete_material = "simple/mono-concrete-tuple/v1"
+    for type_ in type_args:
+        val item_shape = layout_shape_id_v1(mono_type_shape_input_v1(type_))
+        if item_shape.digest == "":
+            return MonomorphizationShapePlanV1(false, ShapeSpecializationDecisionV1(false, "shape-authority-invalid", ShapeSpecializationKindV1.Baseline, "", "", 0), "", "", "")
+        shape_material = shape_material + "|" + item_shape.digest
+        concrete_material = concrete_material + "|" + mangle_type(type_)
+    val shape_id = LayoutShapeIdV1(sha256_text(shape_material))
+    val concrete_digest = sha256_text(concrete_material)
+    val dictionary = operation_dictionary_v1(shape_id, [ShapeOperationV1("generic-body", sha256_text("abi:{shape_id.digest}"), sha256_text("impl:{generic_body_digest}:{concrete_digest}"))])
+    val decision = shape_specialization_decide_v1(shape_id, dictionary, ShapeSpecializationRequestV1(generic_body_digest, concrete_digest, explicit, evidence))
+    MonomorphizationShapePlanV1(decision.valid, decision, shape_id.digest, dictionary.digest, concrete_digest)
+
+export MonomorphizationShapePlanV1, mono_type_shape_input_v1, monomorphization_shape_plan_v1

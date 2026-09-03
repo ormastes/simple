@@ -1,0 +1,67 @@
+use compiler.mir.mir_types.{MirType}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+fn c_abi_unsupported_type(kind: text) -> text:
+    panic("E-BACKEND-C-TYPE-{kind}: C backend has no C type for MIR type kind {kind}")
+
+pub fn c_abi_map_type(ty: MirType, type_names: Dict<i64, text> = {}) -> text:
+    match ty.kind:
+        case I64: "int64_t"
+        case I32: "int32_t"
+        case I16: "int16_t"
+        case I8: "int8_t"
+        case U64: "uint64_t"
+        case U32: "uint32_t"
+        case U16: "uint16_t"
+        case U8: "uint8_t"
+        case F64: "double"
+        case F32: "float"
+        case Bool: "int64_t"
+        case Unit: "void"
+        case Char: "int16_t"
+        case Ptr(_, _): "void*"
+        case Ref(_, _): "void*"
+        case FuncPtr(_): "void*"
+        case Dict(_, _): "void*"
+        case Array(elem, size):
+            val elem_ty = c_abi_map_type(elem, type_names)
+            "spl::Array<{elem_ty}>"
+        case Slice(elem):
+            val elem_ty = c_abi_map_type(elem, type_names)
+            "spl::Array<{elem_ty}>"
+        case Tuple(elements):
+            if elements.len() == 0:
+                "void"
+            else:
+                var types: [text] = []
+                for elem in elements:
+                    types = types.push(c_abi_map_type(elem, type_names))
+                "std::tuple<{types.join(", ")}>"
+        case Struct(symbol):
+            if type_names.contains_key(symbol.id): type_names[symbol.id] + "*" else: "void*"
+        case Enum(symbol):
+            if type_names.contains_key(symbol.id): type_names[symbol.id] else: "int64_t"
+        case Union(members): "void*"
+        case Never: "void"
+        case Opaque(name):
+            if name == "str": "const char*"
+            else: "void*"
+        case Promise(_): "void*"
+        case Generator(_, _): "void*"
+        case ActorType(_): "void*"
+        case Bits(width, signed):
+            if width <= 8: (if signed: "int8_t" else: "uint8_t")
+            elif width <= 16: (if signed: "int16_t" else: "uint16_t")
+            elif width <= 32: (if signed: "int32_t" else: "uint32_t")
+            elif width <= 64: (if signed: "int64_t" else: "uint64_t")
+            else: c_abi_unsupported_type("Bits({width} bits, wider than 64)")
+        case Result(_, _): "void*"
+        case Vec4f: "float __attribute__((vector_size(16)))"
+        case Vec4i: "int32_t __attribute__((vector_size(16)))"
+        case Vec4d: "double __attribute__((vector_size(32)))"
+        case Vec8f: "float __attribute__((vector_size(32)))"
+        case Vec8i: "int32_t __attribute__((vector_size(32)))"
+        case ScalableVec(_, _): c_abi_unsupported_type("ScalableVec")
+        case _:
+            c_abi_unsupported_type("Unknown(discriminant {rt_enum_discriminant(ty.kind)})")

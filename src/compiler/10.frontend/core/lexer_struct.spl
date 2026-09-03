@@ -13,6 +13,7 @@
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs, token_can_end_expr}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_code, char_from_code}
+use compiler.frontend.lexer.lexical_scan_simd.{LexicalScanClass, LexicalScanMarkV1, lexical_scan_classify}
 
 # Token text is immutable. Reuse common identifier/literal spellings before
 # join allocates another permanently registered no-GC string.
@@ -150,6 +151,8 @@ struct CoreLexer:
     # re-entrant lexing is isolated (no shared-cache staleness). Char-indexed
     # also removes the pos(char)-vs-len(byte) mismatch that stalled the scanner.
     source_chars: [text]
+    lexical_marks: [LexicalScanMarkV1]
+    lexical_mark_cursor: i64
     slice_parts: [text]
     pos: i64
     line: i64
@@ -175,9 +178,14 @@ struct CoreLexer:
 # ===== Constructor (free function) =====
 
 fn make_core_lexer(source: text) -> CoreLexer:
+    make_core_lexer_with_marks(source, [])
+
+fn make_core_lexer_with_marks(source: text, lexical_marks: [LexicalScanMarkV1]) -> CoreLexer:
     CoreLexer(
         source: source,
         source_chars: source.chars(),
+        lexical_marks: lexical_marks,
+        lexical_mark_cursor: 0,
         slice_parts: [],
         pos: 0,
         line: 1,
@@ -222,6 +230,21 @@ impl CoreLexer:
         if target >= self.source_chars.len():
             return ""
         self.source_chars[target]
+
+    me lexical_class_at_pos() -> LexicalScanClass:
+        if self.lexical_marks.len() == 0:
+            val current = self.peek()
+            if current == "":
+                return LexicalScanClass.Other
+            return lexical_scan_classify(char_code(current))
+        while self.lexical_mark_cursor < self.lexical_marks.len() and
+            self.lexical_marks[self.lexical_mark_cursor].offset < self.pos:
+            self.lexical_mark_cursor = self.lexical_mark_cursor + 1
+        if self.lexical_mark_cursor < self.lexical_marks.len():
+            val mark = self.lexical_marks[self.lexical_mark_cursor]
+            if mark.offset == self.pos:
+                return mark.class_
+        LexicalScanClass.Other
 
     # ----- G27b: leading-operator line continuation -----
     #
@@ -1381,10 +1404,11 @@ impl CoreLexer:
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         val c: text = self.peek()
+        val lexical_class = self.lexical_class_at_pos()
         self.cur_start = self.pos
 
         # Newline
-        if c == "\n":
+        if lexical_class == LexicalScanClass.Newline and c == "\n":
             self.advance()
             self.at_line_start = true
             if self.paren_depth > 0 and not self.is_forced_indentation_active():
@@ -1425,7 +1449,7 @@ impl CoreLexer:
             return
 
         # Comment
-        if c == "#":
+        if lexical_class == LexicalScanClass.CommentLead and c == "#":
             # Skip comment to end of line
             while true:
                 val cc: text = self.peek()
@@ -1440,8 +1464,8 @@ impl CoreLexer:
             return
 
         # String literal
-        val is_dquote: bool = c == "\""
-        val is_squote: bool = c == "'"
+        val is_dquote: bool = lexical_class == LexicalScanClass.Quote and c == "\""
+        val is_squote: bool = lexical_class == LexicalScanClass.Quote and c == "'"
         if is_dquote:
             self.scan_string()
             return

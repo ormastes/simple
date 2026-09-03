@@ -12,8 +12,7 @@ use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBind
 val BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1: i64 = 2
 
 class DynamicBackendAdapter:
-    """Retains the checked path lease while the runtime bridge owns each call."""
-    provider_path: text
+    """Executes only through the retained, negotiated provider handle."""
     request: BackendPluginRequestV1
     lease: DynamicBackendPluginLease
     closed: bool
@@ -22,10 +21,11 @@ class DynamicBackendAdapter:
         if self.closed or not self.lease.is_open():
             return Err(compileerror_backend_error(
                 BackendKind.Compiler, "dynamic backend session is closed"))
-        # The bridge owns open, compile, finalize, diagnostics, provider-buffer
-        # release, and close for this call. Only the copied final object escapes.
+        # The bridge resolves the backend ABI from this exact admitted handle.
+        # It never reopens request.plugin_path, so later path replacement cannot
+        # substitute provider bytes. The lease remains the sole handle owner.
         val envelope = backend_plugin_run_module_v1(
-            self.provider_path, self.request, module)
+            self.lease.admitted_handle(), self.request, module)
         if not envelope.valid:
             return Err(compileerror_backend_error(
                 BackendKind.Compiler,

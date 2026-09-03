@@ -301,22 +301,74 @@ receipt_file_ready() {
     expect_field status "$file" pass || return 1
 }
 
+verify_transaction_entries() {
+    transaction_receipt=$1
+    transaction_base=$(dirname "$transaction_receipt")
+    entries_ref=$(manifest_value transaction_entries_path "$transaction_receipt") || return 1
+    entries_sha=$(manifest_value transaction_entries_sha256 "$transaction_receipt") || return 1
+    entries_path=$(resolve_reference "$entries_ref" "$transaction_base")
+    canonical_file "$entries_path" >/dev/null 2>&1 || return 1
+    verify_hashed_file "$entries_path" "$entries_sha" || return 1
+    entry_count=$(manifest_value entry_count "$entries_path") || return 1
+    case "$entry_count" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$entry_count" -ge 1 ] && [ "$entry_count" -le 7 ] || return 1
+    seen_names=:
+    simple_seen=0
+    entry_index=1
+    while [ "$entry_index" -le "$entry_count" ]; do
+        prefix="entry_${entry_index}"
+        name=$(manifest_value "${prefix}_name" "$entries_path") || return 1
+        kind=$(manifest_value "${prefix}_kind" "$entries_path") || return 1
+        candidate_ref=$(manifest_value "${prefix}_candidate_path" "$entries_path") || return 1
+        candidate_sha=$(manifest_value "${prefix}_candidate_sha256" "$entries_path") || return 1
+        current_ref=$(manifest_value "${prefix}_current_path" "$entries_path") || return 1
+        current_sha=$(manifest_value "${prefix}_current_sha256" "$entries_path") || return 1
+        had_current=$(manifest_value "${prefix}_had_current" "$entries_path") || return 1
+        backup_ref=$(manifest_value "${prefix}_backup_path" "$entries_path") || return 1
+        backup_sha=$(manifest_value "${prefix}_backup_sha256" "$entries_path") || return 1
+        case "$name" in simple|simple_seed|simple_ui_backend|simple_mcp_server|simple_lsp_mcp_server|simple_mcp_server.sha256|simple_lsp_mcp_server.sha256) ;; *) return 1 ;; esac
+        case "$seen_names" in *:"$name":*) return 1 ;; esac
+        seen_names="${seen_names}${name}:"
+        [ "$name" != simple ] || simple_seen=1
+        current_path=$(resolve_reference "$current_ref" "$transaction_base")
+        backup_path=$(resolve_reference "$backup_ref" "$transaction_base")
+        case "$kind" in
+            install)
+                candidate_path=$(resolve_reference "$candidate_ref" "$transaction_base")
+                verify_hashed_file "$candidate_path" "$candidate_sha" || return 1
+                verify_hashed_file "$current_path" "$current_sha" || return 1
+                [ "$current_sha" = "$candidate_sha" ] || return 1
+                ;;
+            delete)
+                [ "$candidate_ref" = - ] && [ "$candidate_sha" = absent ] &&
+                    [ "$current_sha" = absent ] && [ ! -e "$current_path" ] &&
+                    [ ! -L "$current_path" ] || return 1
+                ;;
+            *) return 1 ;;
+        esac
+        case "$had_current" in
+            true) verify_hashed_file "$backup_path" "$backup_sha" || return 1 ;;
+            false) [ "$backup_sha" = none ] && [ ! -e "$backup_path" ] && [ ! -L "$backup_path" ] || return 1 ;;
+            *) return 1 ;;
+        esac
+        entry_index=$((entry_index + 1))
+    done
+    [ "$simple_seen" -eq 1 ]
+}
+
 check_deploy() {
     DEPLOY_STATUS=blocked
     canonical_file "$DEPLOY_RECEIPT" >/dev/null 2>&1 || { DEPLOY_REASON=missing_or_invalid_receipt; return 1; }
-    expect_field schema "$DEPLOY_RECEIPT" bootstrap-deploy-receipt-v1 || { DEPLOY_REASON=invalid_schema; return 1; }
+    expect_field schema "$DEPLOY_RECEIPT" bootstrap-deploy-receipt-v2 || { DEPLOY_REASON=invalid_schema; return 1; }
     expect_field deployment_status "$DEPLOY_RECEIPT" pass || { DEPLOY_REASON=receipt_not_pass; return 1; }
+    expect_field transaction_status "$DEPLOY_RECEIPT" committed || { DEPLOY_REASON=transaction_not_committed; return 1; }
     expect_field platform_acceptance_claimed "$DEPLOY_RECEIPT" false || { DEPLOY_REASON=false_platform_claim_missing; return 1; }
     current_ref=$(manifest_value current_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_current_path; return 1; }
     current_sha=$(manifest_value current_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_current_hash; return 1; }
-    backup_ref=$(manifest_value backup_path "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_backup_path; return 1; }
-    backup_sha=$(manifest_value backup_sha256 "$DEPLOY_RECEIPT") || { DEPLOY_REASON=missing_backup_hash; return 1; }
-    [ "$backup_sha" != none ] || { DEPLOY_REASON=rollback_backup_missing; return 1; }
     base=$(dirname "$DEPLOY_RECEIPT")
     current_path=$(resolve_reference "$current_ref" "$base")
-    backup_path=$(resolve_reference "$backup_ref" "$base")
     verify_hashed_file "$current_path" "$current_sha" || { DEPLOY_REASON=current_hash_mismatch; return 1; }
-    verify_hashed_file "$backup_path" "$backup_sha" || { DEPLOY_REASON=backup_hash_mismatch; return 1; }
+    verify_transaction_entries "$DEPLOY_RECEIPT" || { DEPLOY_REASON=transaction_entries_invalid; return 1; }
     stage4_sha=$(manifest_value output_sha256 "$STAGE4_PROVENANCE") || { DEPLOY_REASON=stage4_lineage_missing; return 1; }
     [ "$current_sha" = "$stage4_sha" ] || { DEPLOY_REASON=stage4_lineage_mismatch; return 1; }
     DEPLOY_STATUS=ready
@@ -327,18 +379,10 @@ check_deploy() {
 check_rollback() {
     ROLLBACK_STATUS=blocked
     canonical_file "$ROLLBACK_RECEIPT" >/dev/null 2>&1 || { ROLLBACK_REASON=missing_or_invalid_receipt; return 1; }
-    expect_field schema "$ROLLBACK_RECEIPT" bootstrap-rollback-receipt-v1 || { ROLLBACK_REASON=invalid_schema; return 1; }
+    expect_field schema "$ROLLBACK_RECEIPT" bootstrap-rollback-receipt-v2 || { ROLLBACK_REASON=invalid_schema; return 1; }
     expect_field rollback_status "$ROLLBACK_RECEIPT" pass || { ROLLBACK_REASON=receipt_not_pass; return 1; }
     expect_field platform_acceptance_claimed "$ROLLBACK_RECEIPT" false || { ROLLBACK_REASON=false_platform_claim_missing; return 1; }
-    current_ref=$(manifest_value current_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_current_path; return 1; }
-    current_sha=$(manifest_value current_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_current_hash; return 1; }
-    backup_ref=$(manifest_value backup_path "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_backup_path; return 1; }
-    backup_sha=$(manifest_value backup_sha256 "$ROLLBACK_RECEIPT") || { ROLLBACK_REASON=missing_backup_hash; return 1; }
-    base=$(dirname "$ROLLBACK_RECEIPT")
-    current_path=$(resolve_reference "$current_ref" "$base")
-    backup_path=$(resolve_reference "$backup_ref" "$base")
-    verify_hashed_file "$current_path" "$current_sha" || { ROLLBACK_REASON=current_hash_mismatch; return 1; }
-    verify_hashed_file "$backup_path" "$backup_sha" || { ROLLBACK_REASON=backup_hash_mismatch; return 1; }
+    verify_transaction_entries "$ROLLBACK_RECEIPT" || { ROLLBACK_REASON=transaction_entries_invalid; return 1; }
     ROLLBACK_STATUS=ready
     ROLLBACK_REASON=validated
     return 0
@@ -578,20 +622,45 @@ completed_gate=stage4-essential-tools-smoke"
     self_test_file "$previous" previous-fixture
     deployed_sha=$(hash_file "$deployed")
     previous_sha=$(hash_file "$previous")
-    self_test_file "$test_root/deploy.receipt.env" "schema=bootstrap-deploy-receipt-v1
+    deploy_entries="$test_root/deploy.entries.env"
+    self_test_file "$deploy_entries" "entry_count=1
+entry_1_name=simple
+entry_1_kind=install
+entry_1_mode=755
+entry_1_candidate_path=$stage4
+entry_1_candidate_sha256=$deployed_sha
+entry_1_current_path=$deployed
+entry_1_current_sha256=$deployed_sha
+entry_1_had_current=true
+entry_1_backup_path=$previous
+entry_1_backup_sha256=$previous_sha"
+    deploy_entries_sha=$(hash_file "$deploy_entries")
+    self_test_file "$test_root/deploy.receipt.env" "schema=bootstrap-deploy-receipt-v2
 platform=test-platform
+transaction_status=committed
+transaction_entries_path=$deploy_entries
+transaction_entries_sha256=$deploy_entries_sha
 current_path=$deployed
 current_sha256=$deployed_sha
-backup_path=$previous
-backup_sha256=$previous_sha
 deployment_status=pass
 platform_acceptance_claimed=false"
-    self_test_file "$test_root/rollback.receipt.env" "schema=bootstrap-rollback-receipt-v1
+    rollback_entries="$test_root/rollback.entries.env"
+    self_test_file "$rollback_entries" "entry_count=1
+entry_1_name=simple
+entry_1_kind=install
+entry_1_mode=755
+entry_1_candidate_path=$previous
+entry_1_candidate_sha256=$previous_sha
+entry_1_current_path=$previous
+entry_1_current_sha256=$previous_sha
+entry_1_had_current=true
+entry_1_backup_path=$deployed
+entry_1_backup_sha256=$deployed_sha"
+    rollback_entries_sha=$(hash_file "$rollback_entries")
+    self_test_file "$test_root/rollback.receipt.env" "schema=bootstrap-rollback-receipt-v2
 platform=test-platform
-current_path=$previous
-current_sha256=$previous_sha
-backup_path=$deployed
-backup_sha256=$deployed_sha
+transaction_entries_path=$rollback_entries
+transaction_entries_sha256=$rollback_entries_sha
 rollback_status=pass
 platform_acceptance_claimed=false"
     for native in linux-aarch64-native-host macos-native-host; do

@@ -1,0 +1,267 @@
+# @req MBH-REQ-001 MBH-REQ-002 MBH-REQ-004 MBH-REQ-009
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_write, file_hash_sha256, dir_create_all, getpid}
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    darwin_target_identity_digest_v1, publish_current_native_action_input_v1,
+    load_current_native_action_input_v1, canonical_darwin_cpu_features_v1,
+    canonical_darwin_deployment_target_v1, canonical_darwin_target_triple_v1,
+    darwin_sdk_identity_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
+    publish_imported_closure_layer_v1, target_cache_namespace_v1,
+    target_action_key_v1
+}
+use compiler.backend.linker.linker_wrapper.{
+    native_direct_platform_flags, native_cc_platform_flags
+}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_provider_manifest_v1,
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+val MACOS_RECEIPT_ROOT = "/tmp/simple-macos-receipt-spec-{getpid()}"
+
+fn thin_aarch64_macho() -> [u8]:
+    [
+        0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x0cu8, 0x00u8, 0x00u8, 0x01u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ]
+
+fn sample_macos_identity() -> NativeActionInputIdentityV1:
+    val cache_dir = MACOS_RECEIPT_ROOT + "/build/target_cache/app"
+    dir_create_all(MACOS_RECEIPT_ROOT + "/src")
+    dir_create_all(MACOS_RECEIPT_ROOT + "/build/tools")
+    dir_create_all(MACOS_RECEIPT_ROOT + "/sdk")
+    file_write(MACOS_RECEIPT_ROOT + "/src/main.spl", "fn main(): 0\n")
+    file_write(MACOS_RECEIPT_ROOT + "/build/tools/simple", "admitted-simple-tool\n")
+    file_write(MACOS_RECEIPT_ROOT + "/sdk/SDKSettings.json", "{\"Version\":\"15.0\"}\n")
+    val tool_artifact = file_hash_sha256(MACOS_RECEIPT_ROOT + "/build/tools/simple")
+    val tool_behavior = sha256_text("compiler-behavior-v1")
+    val dependencies = publish_dependency_manifest_layer_v1(
+        MACOS_RECEIPT_ROOT, cache_dir, "//app:main", []
+    )
+    val closure = publish_imported_closure_layer_v1(
+        MACOS_RECEIPT_ROOT, cache_dir, "//app:main", "src/main.spl",
+        tool_behavior, dependencies, [ImportedClosureInputV1(
+            "src/main.spl", file_hash_sha256(MACOS_RECEIPT_ROOT + "/src/main.spl")
+        )]
+    )
+    val producer_abi = sha256_text("producer-abi-v1")
+    val sdk = darwin_sdk_identity_v1(MACOS_RECEIPT_ROOT + "/sdk")
+    val provider = sha256_text("runtime-provider")
+    val runtime_path = MACOS_RECEIPT_ROOT + "/runtime.o"
+    rt_file_write_bytes(runtime_path, thin_aarch64_macho())
+    val runtime_body = darwin_runtime_provider_manifest_v1(
+        [runtime_path], "aarch64"
+    ).unwrap()
+    file_write(cache_dir + "/native_runtime_provider_manifest.receipt", runtime_body)
+    val runtime_manifest = darwin_runtime_provider_manifest_content_identity_v1(
+        cache_dir + "/native_runtime_provider_manifest.receipt", "aarch64"
+    )
+    val linker_behavior = sha256_text(
+        "simple-darwin-link-tool-behavior-v1|artifact=64:" + tool_artifact +
+        "|policy=darwin-dead-strip-v1"
+    )
+    val linker_identity = sha256_text(
+        "simple-darwin-link-tool-identity-v1|artifact=64:" + tool_artifact +
+        "|behavior=64:" + linker_behavior
+    )
+    file_write(
+        cache_dir + "/native_link_tool_identity.receipt",
+        "simple-darwin-link-tool-identity-v1\npath=" +
+        MACOS_RECEIPT_ROOT + "/build/tools/simple\nartifact=" + tool_artifact +
+        "\nbehavior=" + linker_behavior + "\nidentity=" + linker_identity +
+        "\npolicy=darwin-dead-strip-v1\n"
+    )
+    val cpu_features = canonical_darwin_cpu_features_v1("")
+    val target_identity = darwin_target_identity_digest_v1(
+        "aarch64-apple-darwin", "aarch64", cpu_features, "13.0.0", sdk, "llvm",
+        "release-o2", "mach-o", "darwin-dead-strip-v1", linker_identity, provider,
+        runtime_manifest
+    )
+    val cache_namespace = target_cache_namespace_v1(
+        producer_abi, target_identity, "release", "binary"
+    )
+    val key = target_action_key_v1(
+        "//app:main", "native-build", "P1", "B3", cache_namespace,
+        dependencies, closure, tool_behavior, "binary"
+    )
+    NativeActionInputIdentityV1(
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: "//app:main",
+        action: "native-build", entry: "src/main.spl",
+        tool_path: "build/tools/simple", tool_artifact_digest: tool_artifact,
+        tool_behavior_digest: tool_behavior, producer_abi_digest: producer_abi,
+        target_identity_digest: target_identity, profile: "release",
+        dependency_manifest_digest: dependencies, imported_closure_digest: closure,
+        target_triple: "aarch64-apple-darwin", architecture: "aarch64",
+        cpu_features: cpu_features, deployment_target: "13.0.0",
+        sdk_identity: sdk, backend: "llvm",
+        optimization: "release-o2", object_format: "mach-o",
+        linker_policy: "darwin-dead-strip-v1",
+        linker_tool_identity: linker_identity,
+        runtime_provider_receipt: provider,
+        runtime_artifact_digest: runtime_manifest, action_key: key, errors: []
+    )
+
+fn admitted(identity: NativeActionInputIdentityV1, architecture: text = "aarch64",
+        deployment: text = "13.0", sdk: text = "", provider: text = "",
+        runtime_artifact: text = "", cpu: text = "") -> NativeActionInputIdentityV1:
+    val expected_sdk = if sdk == "": identity.sdk_identity else: sdk
+    val expected_provider = if provider == "": identity.runtime_provider_receipt else: provider
+    val expected_runtime = if runtime_artifact == "": identity.runtime_artifact_digest else: runtime_artifact
+    load_current_native_action_input_v1(
+        MACOS_RECEIPT_ROOT, MACOS_RECEIPT_ROOT + "/build/target_cache/app",
+        "//app:main", "P1", "B3", "src/main.spl", "binary",
+        identity.tool_artifact_digest, identity.target_triple, architecture,
+        deployment, expected_sdk, expected_provider,
+        expected_runtime, MACOS_RECEIPT_ROOT + "/sdk", cpu
+    )
+
+describe "authoritative Darwin native action identity":
+    # MBH-NFR-005: admission binds native architecture and toolchain evidence.
+    it "publishes writer output and admits it at the current-input reuse boundary":
+        step("Publish canonical Darwin current-input evidence, then admit that exact file")
+        val identity = sample_macos_identity()
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", identity
+        )).to_equal("")
+        expect(admitted(identity).errors.len()).to_equal(0)
+
+    it "rejects architecture SDK provider and deployment mismatches by name":
+        step("Admit the writer output against four incompatible current requests")
+        val identity = sample_macos_identity()
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", identity
+        )).to_equal("")
+        expect(admitted(identity, architecture: "x86_64").errors[0]).to_equal(
+            "target-identity-error: architecture-mismatch"
+        )
+        expect(admitted(identity, cpu: "apple-m2").errors[0]).to_equal(
+            "target-identity-error: cpu-features-mismatch"
+        )
+        expect(admitted(identity, sdk: sha256_text("different-sdk")).errors[0]).to_equal(
+            "target-identity-error: sdk-identity-mismatch"
+        )
+        expect(admitted(identity, provider: sha256_text("different-provider")).errors[0]).to_equal(
+            "target-identity-error: runtime-provider-receipt-mismatch"
+        )
+        expect(admitted(identity, deployment: "14.0").errors[0]).to_equal(
+            "target-identity-error: deployment-target-mismatch"
+        )
+        expect(admitted(identity, runtime_artifact: sha256_text("different-runtime")).errors[0]).to_equal(
+            "target-identity-error: runtime-artifact-digest-mismatch"
+        )
+
+    it "recomputes live SDK and runtime bytes at admission":
+        step("Mutate each live input after publication and reject the stale receipt")
+        var identity = sample_macos_identity()
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", identity
+        )).to_equal("")
+        file_write(MACOS_RECEIPT_ROOT + "/sdk/SDKSettings.json", "changed-sdk\n")
+        expect(admitted(identity).errors[0]).to_equal(
+            "target-identity-error: current-sdk-identity-mismatch"
+        )
+        identity = sample_macos_identity()
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", identity
+        )).to_equal("")
+        var changed_runtime = thin_aarch64_macho()
+        changed_runtime[31] = 0x01u8
+        rt_file_write_bytes(MACOS_RECEIPT_ROOT + "/runtime.o", changed_runtime)
+        expect(admitted(identity).errors[0]).to_equal(
+            "target-identity-error: current-runtime-provider-bytes-mismatch"
+        )
+        identity = sample_macos_identity()
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", identity
+        )).to_equal("")
+        file_write(MACOS_RECEIPT_ROOT + "/build/tools/simple", "changed-linker\n")
+        expect(admitted(identity).errors[0]).to_equal(
+            "target-identity-error: current-linker-tool-identity-mismatch"
+        )
+
+    it "keeps canonical target SDK and deployment identity path independent":
+        step("Relocate identical SDK settings and normalize equivalent target spellings")
+        dir_create_all(MACOS_RECEIPT_ROOT + "/relocated-sdk")
+        file_write(
+            MACOS_RECEIPT_ROOT + "/relocated-sdk/SDKSettings.json",
+            "{\"Version\":\"15.0\"}\n"
+        )
+        file_write(
+            MACOS_RECEIPT_ROOT + "/sdk/SDKSettings.json",
+            "{\"Version\":\"15.0\"}\n"
+        )
+        expect(darwin_sdk_identity_v1(MACOS_RECEIPT_ROOT + "/sdk")).to_equal(
+            darwin_sdk_identity_v1(MACOS_RECEIPT_ROOT + "/relocated-sdk")
+        )
+        expect(canonical_darwin_target_triple_v1("arm64-Apple-Darwin")).to_equal(
+            "aarch64-apple-darwin"
+        )
+        expect(canonical_darwin_deployment_target_v1("13")).to_equal("13.0.0")
+        expect(canonical_darwin_deployment_target_v1("13.0")).to_equal("13.0.0")
+
+    it "length-separates target identity fields before hashing":
+        step("Move the same characters across adjacent backend and optimization fields")
+        val identity = sample_macos_identity()
+        val first = darwin_target_identity_digest_v1(
+            identity.target_triple, identity.architecture, identity.cpu_features,
+            identity.deployment_target, identity.sdk_identity, "l", "lvm",
+            identity.object_format, identity.linker_policy,
+            identity.linker_tool_identity, identity.runtime_provider_receipt,
+            identity.runtime_artifact_digest
+        )
+        val second = darwin_target_identity_digest_v1(
+            identity.target_triple, identity.architecture, identity.cpu_features,
+            identity.deployment_target, identity.sdk_identity, "ll", "vm",
+            identity.object_format, identity.linker_policy,
+            identity.linker_tool_identity, identity.runtime_provider_receipt,
+            identity.runtime_artifact_digest
+        )
+        expect(first == second).to_equal(false)
+
+    it "rejects delimiter corruption and stale target identity":
+        step("Reject newline-bearing fields and a target digest that omits changed Darwin inputs")
+        var corrupt = sample_macos_identity()
+        corrupt.backend = "llvm\nforged=value"
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", corrupt
+        )).to_contain("malformed-native-action-input-receipt")
+        var stale = sample_macos_identity()
+        stale.deployment_target = "14.0"
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", stale
+        )).to_equal("")
+        expect(admitted(stale, deployment: "14.0").errors[0]).to_equal(
+            "target-identity-error: darwin-target-identity-mismatch"
+        )
+        var disguised = sample_macos_identity()
+        disguised.target_triple = "aarch64-unknown-linux"
+        expect(publish_current_native_action_input_v1(
+            MACOS_RECEIPT_ROOT + "/build/target_cache/app", disguised
+        )).to_equal("")
+        expect(admitted(disguised).errors[0]).to_equal(
+            "target-identity-error: target-triple-mismatch"
+        )
+
+describe "Darwin linker policy":
+    it "uses dead strip only on Darwin and excludes ELF hardening flags":
+        step("Compare direct and compiler-driver flags for Darwin, Linux, and FreeBSD")
+        expect(native_direct_platform_flags("darwin", "lld")).to_equal(["-dead_strip"])
+        expect(native_cc_platform_flags("Darwin")).to_equal(["-Wl,-dead_strip"])
+        for os in ["linux", "freebsd"]:
+            val direct = native_direct_platform_flags(os, "lld")
+            val cc_os = if os == "linux": "Linux" else: "FreeBSD"
+            val cc = native_cc_platform_flags(cc_os)
+            expect(direct.contains("-dead_strip")).to_equal(false)
+            expect(cc.contains("-Wl,-dead_strip")).to_equal(false)
+            expect(direct).to_contain("--gc-sections")
+            expect(cc).to_contain("-Wl,--gc-sections")

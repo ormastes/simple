@@ -1,0 +1,135 @@
+# @req KPM-REQ-009 KPM-REQ-011 KPM-REQ-012 KPM-REQ-014
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn run_fixture(script_body: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/simple-pkg-range.XXXXXX)\ntrap 'rm -rf \"$TMP\"' EXIT\ncd \"$TMP\"\n" + script_body])
+
+val VALID_MANIFEST = "cat > simple.sdn <<'SDN'\nproject:\n  name: phase8-fixture\n  dependencies:\n    - package: backend-old\n      provides:\n        - simple.codegen.BackendPort@1.1.0\n      requires: []\n      link: static\n    - package: backend-current\n      provides:\n        - simple.codegen.BackendPort@1.4.0\n      requires: []\n      link: static\n    - package: compiler\n      provides: []\n      requires:\n        - simple.codegen.BackendPort@^1.2.0\n      link: static\nSDN\n"
+
+describe "product package range commands":
+    it "executes lock generate, lock check, and update dry-run through the root CLI":
+        val script = VALID_MANIFEST +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "test -f simple.lock\n" +
+            "grep -q 'provides_requires:' simple.lock\n" +
+            "grep -q 'resolutions:' simple.lock\n" +
+            "grep -q 'provider: \"backend-current\"' simple.lock\n" +
+            "grep -q 'range: \"\\^1.2.0\"' simple.lock\n" +
+            "grep -q 'plugin_manifest_policy: \"simple-sdn\"' simple.lock\n" +
+            "grep -q 'simple_abi_policy: \"v1\"' simple.lock\n" +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check\n" +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" update --dry-run\n" +
+            "printf 'phase8-cli-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-cli-ok")
+
+    it "publishes update output atomically through the root CLI and remains checkable":
+        val script = VALID_MANIFEST +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "cp simple.lock simple.lock.before\n" +
+            "sed 's/BackendPort@1.4.0/BackendPort@1.5.0/' simple.sdn > simple.sdn.next\n" +
+            "mv simple.sdn.next simple.sdn\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" update\n" +
+            "test -f simple.lock\n" +
+            "test -z \"$(find . -maxdepth 1 -name 'simple.lock.tmp.*' -print -quit)\"\n" +
+            "grep -q 'version: \"1.5.0\"' simple.lock\n" +
+            "! cmp -s simple.lock.before simple.lock\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check\n" +
+            "printf 'phase8-update-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-update-ok")
+
+    it "keeps deterministic provider selection under declaration-order mutation":
+        val script = VALID_MANIFEST +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "grep -q 'provider: \"backend-current\"' simple.lock\n" +
+            "perl -0pi -e 's/backend-old/backend-z/g; s/backend-current/backend-a/g; s/BackendPort@1.1.0/BackendPort@1.4.0/g' simple.sdn\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force\n" +
+            "grep -q 'provider: \"backend-a\"' simple.lock\n" +
+            "printf 'phase8-tie-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-tie-ok")
+
+    it "fails unsatisfied ranges without mutating an existing lock":
+        val script = VALID_MANIFEST +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "cp simple.lock simple.lock.before\n" +
+            "sed 's/@\\^1.2.0/@^2.0.0/' simple.sdn > simple.sdn.bad\n" +
+            "mv simple.sdn.bad simple.sdn\n" +
+            "set +e\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > failure.out 2>&1\n" +
+            "BAD_STATUS=$?\n" +
+            "set -e\n" +
+            "test \"$BAD_STATUS\" -ne 0\n" +
+            "cmp simple.lock.before simple.lock\n" +
+            "grep -q 'no provider satisfies' failure.out\n" +
+            "printf 'phase8-fail-closed-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-fail-closed-ok")
+
+    it "preserves legacy lock and update behavior without interface declarations":
+        val script = "cat > simple.sdn <<'SDN'\nproject:\n  name: legacy-fixture\n  note: \"provides: and requires: are documentation only\"\nmetadata:\n  provides:\n    - unrelated\n# requires:\ndependencies:\n  alpha: ^1.0.0\n  beta: ~2.1.0\nSDN\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock validate\n" +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check\n" +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" update alpha\n" +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock validate\n" +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check\n" +
+            "printf 'phase8-legacy-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-legacy-ok")
+
+    it "fails closed for malformed interface declarations without replacing the lock":
+        val script = VALID_MANIFEST +
+            "SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "cp simple.lock simple.lock.before\n" +
+            "perl -0pi -e 's/provides:\\n        - simple.codegen.BackendPort@1.1.0/provides: simple.codegen.BackendPort@1.1.0/' simple.sdn\n" +
+            "set +e\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > malformed.out 2>&1\n" +
+            "BAD_STATUS=$?\n" +
+            "set -e\n" +
+            "test \"$BAD_STATUS\" -ne 0\n" +
+            "cmp simple.lock.before simple.lock\n" +
+            "grep -q 'must be a sequence of strings' malformed.out\n" +
+            "printf 'phase8-malformed-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-malformed-ok")
+
+    it "binds policy changes and rejects unknown policy without replacing the lock":
+        val script = VALID_MANIFEST +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "cp simple.lock simple.lock.before\n" +
+            "set +e\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=plugin-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check > drift.out 2>&1\n" +
+            "DRIFT_STATUS=$?\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=auto SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > invalid.out 2>&1\n" +
+            "INVALID_STATUS=$?\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=deferred SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > abi.out 2>&1\n" +
+            "ABI_STATUS=$?\n" +
+            "set -e\n" +
+            "test \"$DRIFT_STATUS\" -ne 0\n" +
+            "test \"$INVALID_STATUS\" -ne 0\n" +
+            "test \"$ABI_STATUS\" -ne 0\n" +
+            "cmp simple.lock.before simple.lock\n" +
+            "test -z \"$(find . -maxdepth 1 -name 'simple.lock.tmp.*' -print -quit)\"\n" +
+            "grep -q 'selected plugin manifest policy' drift.out\n" +
+            "grep -q 'selected plugin manifest policy' invalid.out\n" +
+            "grep -q 'selected Simple ABI policy' abi.out\n" +
+            "printf 'phase8-policy-ok\\n'\n"
+        val (stdout, stderr, status) = run_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-policy-ok")

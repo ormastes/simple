@@ -9,6 +9,7 @@ use app.io.minimal_runtime_ops.{process_run, process_run_timeout, process_run_bo
 # main() (LSP MCP server never starts). See
 # doc/08_tracking/bug/mcp_source_mode_large_import_graph_2026-06-23.md
 use .session_state.{lsp_record_location, lsp_resolve_requester}
+use app.compiler_entrypoint.admission.{compiler_entrypoint_frozen_env_path_v1}
 
 # Base-repair (mirrors origin/main): run_command_text calls process_run_bounded
 # with these bounds, but the merge left them undefined here.
@@ -40,10 +41,18 @@ fn run_command_text(binary: text, args: [text]) -> text:
     command_failure(code, stderr, clean)
 
 fn run_lsp_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    run_command_text(find_simple_binary(), [lsp_query_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+    val frozen_file = compiler_entrypoint_frozen_env_path_v1(file)
+    val frozen_tool = compiler_entrypoint_frozen_env_path_v1(lsp_query_path())
+    if frozen_file == "" or frozen_tool == "":
+        return "SCV-E-PATH: query input is outside admitted snapshot"
+    run_command_text(find_simple_binary(), [frozen_tool, subcmd, frozen_file, str(line0 + 1), str(char0 + 1)])
 
 fn run_visibility_query(subcmd: text, file: text, line0: i64, char0: i64) -> text:
-    run_command_text(find_simple_binary(), [query_visibility_path(), subcmd, file, str(line0 + 1), str(char0 + 1)])
+    val frozen_file = compiler_entrypoint_frozen_env_path_v1(file)
+    val frozen_tool = compiler_entrypoint_frozen_env_path_v1(query_visibility_path())
+    if frozen_file == "" or frozen_tool == "":
+        return "SCV-E-PATH: visibility input is outside admitted snapshot"
+    run_command_text(find_simple_binary(), [frozen_tool, subcmd, frozen_file, str(line0 + 1), str(char0 + 1)])
 
 # hover with an explicit requester location (`path[:line]`); "" = no requester.
 fn run_visibility_hover(file: text, line0: i64, char0: i64, requester: text) -> text:
@@ -89,7 +98,10 @@ fn run_lsp_diagnostics(file: text) -> text:
     val enabled = env_get("SIMPLE_LSP_ENABLE_DIAGNOSTICS") ?? ""
     if enabled != "1":
         return "diagnostics unavailable in source mode (process_run deadlocks on the `simple check` subcommand spawn). Run `simple check " + file + "` directly, or set SIMPLE_LSP_ENABLE_DIAGNOSTICS=1 on a working native build."
-    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", file], 10000)
+    val frozen_file = compiler_entrypoint_frozen_env_path_v1(file)
+    if frozen_file == "":
+        return "SCV-E-PATH: diagnostics input is outside admitted snapshot"
+    val (stdout, stderr, code) = process_run_timeout(find_simple_binary(), ["check", frozen_file], 10000)
     val clean = clean_command_output(stdout)
     if code == 0:
         return clean

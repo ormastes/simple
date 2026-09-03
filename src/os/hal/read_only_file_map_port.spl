@@ -1,0 +1,98 @@
+"""Portable read-only file mapping capability.
+
+The HAL contract reports mapping failures exactly. Policy-owned buffered reads
+live above this boundary; implementations must never substitute them here.
+"""
+
+pub enum ReadOnlyFileMapErrorKind:
+    InvalidRequest
+    Unsupported
+    ResourceExhausted
+    IdentityMismatch
+    NotRegularFile
+    MappingFailed
+    ReleaseFailed
+
+pub struct ReadOnlyFileIdentityV1:
+    device: u64
+    inode: u64
+    byte_length: u64
+    modified_ns: u64
+    generation: u64
+
+pub struct ReadOnlyFileMapRequestV1:
+    file_handle: i64
+    identity: ReadOnlyFileIdentityV1
+    offset: u64
+    length: u64
+    whole_file: bool
+
+pub struct ReadOnlyFileMapErrorV1:
+    kind: ReadOnlyFileMapErrorKind
+    status: i64
+    reason: text
+
+pub struct ReadOnlyFileMapCapabilityV1:
+    address: i64
+    mapped_offset: u64
+    mapped_length: u64
+    visible_offset: u64
+    visible_length: u64
+    identity: ReadOnlyFileIdentityV1
+    provider: text
+    token: u64
+
+pub struct ReadOnlyFileMapResultV1:
+    capability: ReadOnlyFileMapCapabilityV1?
+    error: ReadOnlyFileMapErrorV1?
+
+pub fn read_only_file_identity_same_v1(
+    left: ReadOnlyFileIdentityV1,
+    right: ReadOnlyFileIdentityV1
+) -> bool:
+    left.device == right.device and left.inode == right.inode and
+        left.byte_length == right.byte_length and
+        left.modified_ns == right.modified_ns and
+        left.generation == right.generation
+
+pub fn read_only_file_map_request_error_v1(request: ReadOnlyFileMapRequestV1) -> text:
+    if request.file_handle < 0:
+        return "file-handle-invalid"
+    if request.identity.byte_length == 0u64:
+        return "empty-file-mapping-unsupported"
+    if request.whole_file:
+        if request.offset != 0u64:
+            return "whole-file-offset-must-be-zero"
+        if request.length != 0u64 and request.length != request.identity.byte_length:
+            return "whole-file-length-mismatch"
+        return ""
+    if request.length == 0u64:
+        return "window-length-must-be-positive"
+    if request.offset > request.identity.byte_length:
+        return "window-offset-out-of-bounds"
+    if request.length > request.identity.byte_length - request.offset:
+        return "window-range-out-of-bounds"
+    ""
+
+pub fn read_only_file_map_error_v1(
+    kind: ReadOnlyFileMapErrorKind,
+    status: i64,
+    reason: text
+) -> ReadOnlyFileMapResultV1:
+    ReadOnlyFileMapResultV1(
+        capability: nil,
+        error: ReadOnlyFileMapErrorV1(kind: kind, status: status, reason: reason))
+
+pub fn read_only_file_map_success_v1(
+    capability: ReadOnlyFileMapCapabilityV1
+) -> ReadOnlyFileMapResultV1:
+    ReadOnlyFileMapResultV1(capability: capability, error: nil)
+
+pub trait ReadOnlyFileMapPortV1:
+    fn provider_name() -> text
+    fn page_size() -> u64
+    fn supports_whole_file() -> bool
+    fn supports_window() -> bool
+    me map_read_only(request: ReadOnlyFileMapRequestV1) -> ReadOnlyFileMapResultV1
+    me release_read_only(capability: ReadOnlyFileMapCapabilityV1) -> ReadOnlyFileMapErrorV1?
+

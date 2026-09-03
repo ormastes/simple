@@ -1,0 +1,82 @@
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mono.shape.layout_shape.*
+use compiler.mono.shape.operation_dictionary.*
+
+enum ShapeSpecializationKindV1:
+    Baseline
+    Explicit
+    ProfileGuided
+
+struct ShapeSpecializationEvidenceV1:
+    call_count: i64
+    estimated_saved_nanos: i64
+    estimated_compile_nanos: i64
+    profile_digest: text
+
+struct ShapeSpecializationRequestV1:
+    generic_body_digest: text
+    concrete_type_digest: text
+    explicit: bool
+    evidence: ShapeSpecializationEvidenceV1
+
+struct ShapeSpecializationDecisionV1:
+    valid: bool
+    reason: text
+    kind: ShapeSpecializationKindV1
+    implementation_key: text
+    baseline_body_key: text
+    estimated_net_nanos: i64
+
+fn shape_baseline_body_key_v1(
+    generic_body_digest: text,
+    shape_id: LayoutShapeIdV1,
+    dictionary: OperationDictionaryV1
+) -> text:
+    if generic_body_digest == "" or shape_id.digest == "" or dictionary.digest == "":
+        return ""
+    sha256_text(
+        "simple/shape-baseline-body/v1" +
+        "|body={generic_body_digest}" +
+        "|shape={shape_id.digest}" +
+        "|dictionary={dictionary.digest}")
+
+fn shape_specialization_decide_v1(
+    shape_id: LayoutShapeIdV1,
+    dictionary: OperationDictionaryV1,
+    request: ShapeSpecializationRequestV1
+) -> ShapeSpecializationDecisionV1:
+    val baseline_key = shape_baseline_body_key_v1(
+        request.generic_body_digest, shape_id, dictionary)
+    if baseline_key == "" or request.concrete_type_digest == "":
+        return ShapeSpecializationDecisionV1(
+            false, "shape-authority-invalid", ShapeSpecializationKindV1.Baseline,
+            "", "", 0)
+    if dictionary.shape_id.digest != shape_id.digest:
+        return ShapeSpecializationDecisionV1(
+            false, "dictionary-shape-mismatch", ShapeSpecializationKindV1.Baseline,
+            "", baseline_key, 0)
+
+    val net_nanos = request.evidence.estimated_saved_nanos -
+        request.evidence.estimated_compile_nanos
+    if request.explicit:
+        return ShapeSpecializationDecisionV1(
+            true, "explicit-specialization", ShapeSpecializationKindV1.Explicit,
+            sha256_text("simple/shape-specialization/v1|{baseline_key}|{request.concrete_type_digest}"),
+            baseline_key, net_nanos)
+    if request.evidence.profile_digest != "" and
+            request.evidence.call_count > 0 and net_nanos > 0:
+        return ShapeSpecializationDecisionV1(
+            true, "profile-break-even", ShapeSpecializationKindV1.ProfileGuided,
+            sha256_text(
+                "simple/shape-profile-specialization/v1" +
+                "|baseline={baseline_key}" +
+                "|type={request.concrete_type_digest}" +
+                "|profile={request.evidence.profile_digest}"),
+            baseline_key, net_nanos)
+    ShapeSpecializationDecisionV1(
+        true, "deterministic-baseline-fallback", ShapeSpecializationKindV1.Baseline,
+        baseline_key, baseline_key, net_nanos)
+
+export ShapeSpecializationKindV1, ShapeSpecializationEvidenceV1
+export ShapeSpecializationRequestV1, ShapeSpecializationDecisionV1
+export shape_baseline_body_key_v1, shape_specialization_decide_v1

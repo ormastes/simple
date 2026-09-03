@@ -1,0 +1,89 @@
+use app.spipe.testing.*
+use compiler.hir.archive.interface_action_archive.{
+    CompileActionRegistry, CompileArchiveActionV1,
+    InterfaceActionArchiveErrorV1, InterfaceActionArchiveV1,
+    InterfaceArchiveSymbolV1, SemanticContext,
+    interface_action_archive_install_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn archive_variant_v1() -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1(
+        "aarch64-apple-darwin-macho", "cranelift", ["atomic-apk"],
+        "debug", "v1", ["opt=0"], ["SIMPLE_LIB=src"])
+
+fn admitted_archive_v1() -> InterfaceActionArchiveV1:
+    val interface_digest = sha256_text("interface")
+    val action_digest = sha256_text("action")
+    InterfaceActionArchiveV1(
+        "pkg.alpha", archive_variant_v1(), sha256_text("producer"),
+        [sha256_text("dependency")], interface_digest, action_digest,
+        [InterfaceArchiveSymbolV1(
+            "pkg.alpha.run", "function", "fn(i64)->i64",
+            sha256_text("symbol"))],
+        [CompileArchiveActionV1(
+            "pkg.alpha.run.native", "native-codegen", "pkg.alpha.run",
+            sha256_text("native-action"))])
+
+fn empty_semantic_context_v1() -> SemanticContext:
+    SemanticContext([], [])
+
+fn empty_action_registry_v1() -> CompileActionRegistry:
+    CompileActionRegistry([], [])
+
+describe "compiler-owned interface/action archive ingestion":
+    it "installs typed symbols and actions atomically without source reads":
+        var semantic_owner = empty_semantic_context_v1()
+        var action_owner = empty_action_registry_v1()
+        val installed = interface_action_archive_install_v1(
+            admitted_archive_v1(), &mut semantic_owner, &mut action_owner)
+        expect(installed.is_ok()).to_equal(true)
+        expect(installed.unwrap().installed_symbol_count).to_equal(1)
+        expect(installed.unwrap().installed_action_count).to_equal(1)
+        expect(semantic_owner.archive_symbols.len()).to_equal(1)
+        expect(action_owner.archive_actions.len()).to_equal(1)
+
+    it "rejects duplicate symbols before mutating either owner":
+        var semantic_owner = SemanticContext(
+            ["pkg.base"], [InterfaceArchiveSymbolV1(
+                "pkg.alpha.run", "function", "fn(i64)->i64",
+                sha256_text("existing"))])
+        var action_owner = empty_action_registry_v1()
+        val installed = interface_action_archive_install_v1(
+            admitted_archive_v1(), &mut semantic_owner, &mut action_owner)
+        expect(installed.is_err()).to_equal(true)
+        expect(installed.unwrap_err()).to_equal(
+            InterfaceActionArchiveErrorV1.install_conflict)
+        expect(semantic_owner.archive_symbols.len()).to_equal(1)
+        expect(action_owner.archive_actions.len()).to_equal(0)
+
+    it "rejects unresolved action targets before mutating either owner":
+        val original = admitted_archive_v1()
+        val invalid = InterfaceActionArchiveV1(
+            original.package_key, original.variant_key,
+            original.producer_digest, original.dependency_interface_digests,
+            original.interface_payload_digest, original.action_payload_digest,
+            original.interface_symbols,
+            [CompileArchiveActionV1(
+                "pkg.alpha.missing.native", "native-codegen",
+                "pkg.alpha.missing", sha256_text("missing"))])
+        var semantic_owner = empty_semantic_context_v1()
+        var action_owner = empty_action_registry_v1()
+        val installed = interface_action_archive_install_v1(
+            invalid, &mut semantic_owner, &mut action_owner)
+        expect(installed.is_err()).to_equal(true)
+        expect(semantic_owner.archive_symbols.len()).to_equal(0)
+        expect(action_owner.archive_actions.len()).to_equal(0)
+
+    it "rejects reinstalling a package without partial mutation":
+        var semantic_owner = empty_semantic_context_v1()
+        var action_owner = empty_action_registry_v1()
+        val first = interface_action_archive_install_v1(
+            admitted_archive_v1(), &mut semantic_owner, &mut action_owner)
+        expect(first.is_ok()).to_equal(true)
+        val second = interface_action_archive_install_v1(
+            admitted_archive_v1(), &mut semantic_owner, &mut action_owner)
+        expect(second.is_err()).to_equal(true)
+        expect(semantic_owner.archive_symbols.len()).to_equal(1)
+        expect(action_owner.archive_actions.len()).to_equal(1)

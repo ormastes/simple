@@ -1,0 +1,150 @@
+use app.spipe.testing.*
+use compiler.mir.admission.mir_admission_v1.{
+    MIR_ADMISSION_SCHEMA_V1,
+    MirAdmissionErrorV1,
+    MirDependencyEvidenceV1,
+    MirDependencyKindV1,
+    MirDependencyStateV1,
+    mir_admission_prove_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn admitted_snapshot_v1() -> text:
+    sha256_text("snapshot-v1")
+
+fn admitted_tree_v1() -> text:
+    sha256_text("tree-v1")
+
+fn admitted_inventory_v1() -> text:
+    sha256_text("inventory-v1")
+
+fn concrete_dependency_v1(
+    identity: text,
+    kind: MirDependencyKindV1
+) -> MirDependencyEvidenceV1:
+    MirDependencyEvidenceV1(
+        identity,
+        kind,
+        MirDependencyStateV1.concrete,
+        admitted_snapshot_v1(),
+        sha256_text("materialized:{identity}"))
+
+fn dependency_with_state_v1(
+    state: MirDependencyStateV1
+) -> MirDependencyEvidenceV1:
+    MirDependencyEvidenceV1(
+        "pkg.alpha.Type",
+        MirDependencyKindV1.type_dependency,
+        state,
+        admitted_snapshot_v1(),
+        sha256_text("materialized:type"))
+
+describe "snapshot-bound MIR admission":
+    it "admits a concrete type body and provider closure":
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(),
+            admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [
+                concrete_dependency_v1(
+                    "pkg.alpha.Type", MirDependencyKindV1.type_dependency),
+                concrete_dependency_v1(
+                    "pkg.alpha.run", MirDependencyKindV1.body_dependency),
+                concrete_dependency_v1(
+                    "pkg.alpha.Provider",
+                    MirDependencyKindV1.provider_dependency)
+            ])
+        expect(admitted.is_ok()).to_equal(true)
+        expect(admitted.unwrap().schema_version).to_equal(
+            MIR_ADMISSION_SCHEMA_V1)
+        expect(admitted.unwrap().snapshot_revision).to_equal(
+            admitted_snapshot_v1())
+        expect(admitted.unwrap().snapshot_tree_digest).to_equal(
+            admitted_tree_v1())
+        expect(admitted.unwrap().snapshot_inventory_digest).to_equal(
+            admitted_inventory_v1())
+        expect(admitted.unwrap().dependency_count).to_equal(3)
+
+    it "rejects an unresolved dependency before MIR construction":
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [dependency_with_state_v1(MirDependencyStateV1.unresolved)])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.unresolved_dependency)
+
+    it "rejects a failed dependency before MIR construction":
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [dependency_with_state_v1(MirDependencyStateV1.failed)])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.failed_dependency)
+
+    it "rejects a stale dependency before MIR construction":
+        val original = dependency_with_state_v1(
+            MirDependencyStateV1.concrete)
+        val stale = MirDependencyEvidenceV1(
+            original.identity,
+            original.kind,
+            original.state,
+            sha256_text("older-snapshot"),
+            original.materialization_digest)
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"), [stale])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.stale_dependency)
+
+    it "rejects a virtual dependency before MIR construction":
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [dependency_with_state_v1(
+                MirDependencyStateV1.virtual_dependency)])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.virtual_dependency)
+
+    it "rejects duplicate dependency identities":
+        val dependency = concrete_dependency_v1(
+            "pkg.alpha.Type", MirDependencyKindV1.type_dependency)
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [dependency, dependency])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.duplicate_dependency)
+
+    it "rejects malformed snapshot and materialization authority":
+        val invalid_snapshot = mir_admission_prove_v1(
+            "not-a-digest", admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"), [])
+        expect(invalid_snapshot.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.invalid_snapshot)
+
+        val invalid_tree = mir_admission_prove_v1(
+            admitted_snapshot_v1(), "not-a-digest", admitted_inventory_v1(),
+            sha256_text("demand-closure"), [])
+        expect(invalid_tree.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.invalid_snapshot)
+
+        val invalid_inventory = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), "not-a-digest",
+            sha256_text("demand-closure"), [])
+        expect(invalid_inventory.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.invalid_snapshot)
+
+        val original = dependency_with_state_v1(
+            MirDependencyStateV1.concrete)
+        val invalid_dependency = MirDependencyEvidenceV1(
+            original.identity,
+            original.kind,
+            original.state,
+            original.snapshot_revision,
+            "not-a-digest")
+        val admitted = mir_admission_prove_v1(
+            admitted_snapshot_v1(), admitted_tree_v1(), admitted_inventory_v1(),
+            sha256_text("demand-closure"),
+            [invalid_dependency])
+        expect(admitted.unwrap_err()).to_equal(
+            MirAdmissionErrorV1.invalid_dependency)

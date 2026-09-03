@@ -1,0 +1,59 @@
+use app.spipe.testing.*
+use std.io.{read_file}
+
+val STATE_PATH = "src/compiler/20.hir/import_materialization/state.spl"
+val MATERIALIZER_PATH = "src/compiler/20.hir/import_materialization/materializer.spl"
+
+describe "atomic import materialization proxy":
+    it "uses a single CAS owner and bounded waiter suspension":
+        val state = read_file(STATE_PATH)
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(state).to_contain("atomic_state.compare_exchange(")
+        expect(materializer).to_contain("thread_yield()")
+        expect(materializer).to_contain("IMPORT_MATERIALIZATION_WAIT_BUDGET_V1")
+        expect(materializer).to_contain("waiter_count.fetch_add")
+        expect(materializer).to_contain("waiter_count.fetch_sub")
+
+    it "caches a typed failure for every later waiter":
+        val state = read_file(STATE_PATH)
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(state).to_contain("ImportMaterializationFailureV1?")
+        expect(state).to_contain("materialization.failure = Some(")
+        expect(materializer).to_contain("if encoded < 0:")
+        expect(materializer).to_contain("cached_failure")
+
+    it "materializes declaration body MIR and native demand monotonically":
+        val state = read_file(STATE_PATH)
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(state).to_contain("case declaration: 1")
+        expect(state).to_contain("case body: 2")
+        expect(state).to_contain("case mir: 3")
+        expect(state).to_contain("case native: 4")
+        expect(materializer).to_contain("interface.smf")
+        expect(materializer).to_contain("hir-bodies.smf")
+        expect(materializer).to_contain("mir.smf")
+        expect(materializer).to_contain("native.smf")
+
+    it "reads exclusively through a pinned frozen archive capability":
+        val state = read_file(STATE_PATH)
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(state).to_contain("snapshot: ImportSnapshotIdentityV1")
+        expect(state).to_contain("FrozenImportCapabilityV1")
+        expect(state).to_contain("capability: PinnedArchiveCapability")
+        expect(materializer).to_contain("pinned_archive_read_member_v1(")
+        expect(materializer.contains("read_file(")).to_equal(false)
+        expect(materializer.contains("rt_file_read")).to_equal(false)
+        expect(materializer.contains("source_path")).to_equal(false)
+
+    it "loads every prerequisite section before publishing a higher demand":
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(materializer).to_contain("var level = completed_level + 1")
+        expect(materializer).to_contain("while level <= target:")
+        expect(materializer).to_contain("import_materialization_publish_ready_v1")
+
+    it "exposes frozen D7 and D8 handoff contracts":
+        val state = read_file(STATE_PATH)
+        val materializer = read_file(MATERIALIZER_PATH)
+        expect(state).to_contain("ImportMaterializationReceiptV1")
+        expect(materializer).to_contain("import_materialization_ready_for_mir_v1")
+        expect(materializer).to_contain("snapshot_identity_mismatch")

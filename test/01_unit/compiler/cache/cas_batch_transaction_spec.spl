@@ -1,0 +1,47 @@
+use std.spec.*
+use std.spec.step
+
+describe "CAS SCC batch transaction contract":
+    it "publishes mappings through one generation pointer swap":
+        step("publishes mappings through one generation pointer swap")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        expect(source.split("rt_file_rename(staged_current, \"{root}/CURRENT\")").len() - 1).to_equal(1)
+        expect(source).to_contain("file_lock(\"{root}/publication.lock\"")
+        expect(source).to_contain("cas_batch_current_v1(store_root) != transaction.expected_current_generation")
+
+    it "requires exact SCC membership before publication":
+        step("requires exact SCC membership before publication")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        expect(source).to_contain("transaction.required_package_keys")
+        expect(source).to_contain("CasBatchTransactionErrorV1.incomplete_scc")
+        expect(source).to_contain("dir_list(\"{directory}/objects\").len() != transaction.required_package_keys.len()")
+
+    it "seals and fsyncs content before publishing CURRENT":
+        step("seals and fsyncs content before publishing CURRENT")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        val seal = source.index_of("file_create_excl(\"{directory}/SEALED\"")
+        val publish = source.index_of("rt_file_rename(staged_current, \"{root}/CURRENT\")")
+        expect(seal).to_be_greater_than(0)
+        expect(publish).to_be_greater_than(seal)
+        expect(source).to_contain("rt_file_fsync(generation_path)")
+        expect(source).to_contain("rt_file_fsync(\"{root}/generations\")")
+
+    it "keeps stale and partial transactions invisible":
+        step("keeps stale and partial transactions invisible")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        expect(source).to_contain("CasBatchTransactionErrorV1.current_compare_failed")
+        expect(source).to_contain("CasBatchTransactionErrorV1.incomplete_scc")
+        expect(source).to_not_contain("action_put(")
+
+    it "recovers only staging owned by dead processes":
+        step("recovers only staging owned by dead processes")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        expect(source).to_contain("process_is_running(owner)")
+        expect(source).to_contain("CasBatchTransactionErrorV1.recovery_owner_live")
+
+    it "contains no fail-fast placeholder":
+        step("contains no fail-fast placeholder")
+        val source = rt_file_read_text("src/compiler/80.driver/cache/cas_batch_transaction.spl") ?? ""
+        expect(source).to_not_contain("PKG-ARCHIVE-E-SCC-BATCH-NOT-WIRED")
+
+extern fn rt_file_read_text(path: text) -> text?

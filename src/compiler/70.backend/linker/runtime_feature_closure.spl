@@ -1,0 +1,100 @@
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+enum RuntimeFeatureRootKindV1:
+    DemandAction
+    Provider
+
+struct RuntimeFeatureRootV1:
+    identity: text
+    symbol: text
+    reason: text
+    kind: RuntimeFeatureRootKindV1
+
+struct RuntimeFeatureClosureV1:
+    entry_identity: text
+    roots: [RuntimeFeatureRootV1]
+    digest: text
+
+fn runtime_feature_root_kind_text_v1(kind: RuntimeFeatureRootKindV1) -> text:
+    match kind:
+        case RuntimeFeatureRootKindV1.DemandAction: "demand-action"
+        case RuntimeFeatureRootKindV1.Provider: "provider"
+
+fn runtime_feature_text_valid_v1(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed != "" and not trimmed.contains("\n") and not trimmed.contains("\r")
+
+fn runtime_feature_sorted_rows_v1(rows: [text]) -> [text]:
+    var sorted: [text] = []
+    for row in rows:
+        var inserted = false
+        var next: [text] = []
+        for existing in sorted:
+            if not inserted and row < existing:
+                next.push(row)
+                inserted = true
+            next.push(existing)
+        if not inserted:
+            next.push(row)
+        sorted = next
+    sorted
+
+pub fn runtime_feature_closure_v1(
+    entry_identity: text,
+    declared_roots: [RuntimeFeatureRootV1],
+    retained_symbols: [text]
+) -> Result<RuntimeFeatureClosureV1, text>:
+    if not runtime_feature_text_valid_v1(entry_identity):
+        return Err("runtime-feature-closure-invalid-entry-identity")
+    var roots_by_symbol: Dict<text, RuntimeFeatureRootV1> = {}
+    for root in declared_roots:
+        if not runtime_feature_text_valid_v1(root.identity) or
+           not runtime_feature_text_valid_v1(root.symbol) or
+           not runtime_feature_text_valid_v1(root.reason):
+            return Err("runtime-feature-closure-invalid-root")
+        if roots_by_symbol.has(root.symbol):
+            return Err("runtime-feature-closure-duplicate-root:" + root.symbol)
+        roots_by_symbol[root.symbol] = root
+    var retained_seen: Dict<text, bool> = {}
+    for symbol in retained_symbols:
+        if not runtime_feature_text_valid_v1(symbol):
+            return Err("runtime-feature-closure-invalid-retained-root")
+        if retained_seen.has(symbol):
+            return Err("runtime-feature-closure-duplicate-retained-root:" + symbol)
+        retained_seen[symbol] = true
+        if not roots_by_symbol.has(symbol):
+            return Err("runtime-feature-closure-undeclared-root:" + symbol)
+    for symbol in roots_by_symbol.keys():
+        if not retained_seen.has(symbol):
+            return Err("runtime-feature-closure-unretained-declaration:" + symbol)
+    var rows: [text] = []
+    for symbol in retained_symbols:
+        val root = roots_by_symbol[symbol]
+        rows.push(runtime_feature_root_kind_text_v1(root.kind) + "|" +
+            root.identity + "|" + root.symbol + "|" + root.reason)
+    rows = runtime_feature_sorted_rows_v1(rows)
+    var receipt = "runtime-feature-closure-v1\nentry=" + entry_identity
+    var roots: [RuntimeFeatureRootV1] = []
+    for row in rows:
+        receipt = receipt + "\nroot=" + row
+    for symbol in retained_symbols:
+        roots.push(roots_by_symbol[symbol])
+    val digest = sha256_u8_hex(receipt.bytes())
+    if digest.len() != 64:
+        return Err("runtime-feature-closure-digest-failed")
+    Ok(RuntimeFeatureClosureV1(
+        entry_identity: entry_identity,
+        roots: roots,
+        digest: digest
+    ))
+
+pub fn runtime_feature_closure_receipt_v1(closure: RuntimeFeatureClosureV1) -> text:
+    var rows: [text] = []
+    for root in closure.roots:
+        rows.push(runtime_feature_root_kind_text_v1(root.kind) + "|" +
+            root.identity + "|" + root.symbol + "|" + root.reason)
+    var receipt = "runtime-feature-closure-receipt-v1\nentry=" +
+        closure.entry_identity + "\ndigest=" + closure.digest
+    for row in runtime_feature_sorted_rows_v1(rows):
+        receipt = receipt + "\nroot=" + row
+    receipt + "\n"

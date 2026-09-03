@@ -1,0 +1,54 @@
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.backend.backend.backend_types.{compileoptions_debug_options, compileoptions_release_options}
+use compiler.backend.backend.cranelift_codegen_adapter.{cranelift_compile_module_direct}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.backend.linker._LinkerWrapper.native_linking.{NativeLinkConfig, link_to_native}
+use std.io_runtime.{file_write_bytes}
+
+fn _bootstrap_cranelift_module(ctx: CompileContext) -> MirModule?:
+    if ctx.bootstrap_entry_mir.?:
+        return ctx.bootstrap_entry_mir.unwrap()
+    if ctx.mir_modules.contains_key("app.cli.bootstrap_main"):
+        return ctx.mir_modules["app.cli.bootstrap_main"]
+    for module in ctx.mir_modules.values():
+        return module
+    nil
+
+pub fn bootstrap_compile_to_native_local(ctx: CompileContext,
+        backend_name: text, output: text) -> CompileResult:
+    bootstrap_compile_context_to_native_local(ctx, backend_name, output)
+
+pub fn bootstrap_compile_context_to_native_local(ctx: CompileContext,
+        backend_name: text, output: text) -> CompileResult:
+    if backend_name != "cranelift":
+        return CompileResult.CodegenError(
+            "cranelift-only bootstrap composition refuses backend '{backend_name}'")
+    val module = _bootstrap_cranelift_module(ctx)
+    if module == nil:
+        return CompileResult.CodegenError(
+            "cranelift-only bootstrap has no lowered entry MIR module")
+    val options = if ctx.options.release:
+        compileoptions_release_options()
+    else:
+        compileoptions_debug_options()
+    match cranelift_compile_module_direct(options, module):
+        case Err(error):
+            return CompileResult.CodegenError(
+                "cranelift-only bootstrap emission failed: {error.message}")
+        case Ok(codegen):
+            if not codegen.has_object_code or codegen.object_code.len() == 0:
+                return CompileResult.CodegenError(
+                    "cranelift-only bootstrap emitted no object bytes")
+            val object_path = output + ".app.cli.bootstrap_main.cranelift.o"
+            if not file_write_bytes(object_path, codegen.object_code):
+                return CompileResult.CodegenError(
+                    "cranelift-only bootstrap could not persist its object")
+            var link_config = NativeLinkConfig.default()
+            link_config.debug = ctx.options.debug_info
+            link_config.verbose = ctx.options.verbose
+            link_config.target_triple = ctx.native_target
+            match link_to_native([object_path], output, link_config):
+                case Ok(_): CompileResult.Success(output)
+                case Err(message): CompileResult.CodegenError(
+                    "cranelift-only bootstrap link failed: {message}")

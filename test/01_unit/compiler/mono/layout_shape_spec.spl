@@ -1,0 +1,68 @@
+use app.spipe.testing.*
+use compiler.mono.shape.layout_shape.*
+use compiler.mono.shape.operation_dictionary.*
+use compiler.mono.shape.shape_specialization_policy.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn shape_input(pointer_map: text = "ptr-0") -> LayoutShapeInputV1:
+    LayoutShapeInputV1("abi-v1", "simple-v1", 16, 8, pointer_map, "pair-i64")
+
+fn dictionary(shape_id: LayoutShapeIdV1) -> OperationDictionaryV1:
+    operation_dictionary_v1(shape_id, [
+        ShapeOperationV1("compare", "compare-v1", "compare-impl"),
+        ShapeOperationV1("drop", "drop-v1", "drop-impl")])
+
+describe "generic layout-shape sharing":
+    it "binds ABI layout and pointer-map identity":
+        val base = layout_shape_id_v1(shape_input())
+        val same = layout_shape_id_v1(shape_input())
+        val changed = layout_shape_id_v1(shape_input("ptr-1"))
+        expect(base.digest).to_equal(same.digest)
+        expect(base.digest == changed.digest).to_equal(false)
+
+    it "builds one deterministic baseline body per shape":
+        val shape_id = layout_shape_id_v1(shape_input())
+        val operations = dictionary(shape_id)
+        val first = shape_baseline_body_key_v1("generic-sort", shape_id, operations)
+        val second = shape_baseline_body_key_v1("generic-sort", shape_id, operations)
+        expect(first).to_equal(second)
+        expect(first == "").to_equal(false)
+
+    it "rejects unordered or duplicate dictionary operations":
+        val shape_id = layout_shape_id_v1(shape_input())
+        val invalid = operation_dictionary_v1(shape_id, [
+            ShapeOperationV1("drop", "drop-v1", "drop-impl"),
+            ShapeOperationV1("compare", "compare-v1", "compare-impl")])
+        expect(invalid.digest).to_equal("")
+
+    it "permits explicit specialization without changing baseline identity":
+        val shape_id = layout_shape_id_v1(shape_input())
+        val operations = dictionary(shape_id)
+        val decision = shape_specialization_decide_v1(shape_id, operations,
+            ShapeSpecializationRequestV1(
+                "generic-sort", "concrete-i64", true,
+                ShapeSpecializationEvidenceV1(0, 0, 10, "")))
+        expect(decision.valid).to_equal(true)
+        expect(decision.kind).to_equal(ShapeSpecializationKindV1.Explicit)
+        expect(decision.implementation_key == decision.baseline_body_key).to_equal(false)
+
+    it "uses profile specialization only beyond measured break-even":
+        val shape_id = layout_shape_id_v1(shape_input())
+        val operations = dictionary(shape_id)
+        val hot = shape_specialization_decide_v1(shape_id, operations,
+            ShapeSpecializationRequestV1(
+                "generic-sort", "concrete-i64", false,
+                ShapeSpecializationEvidenceV1(1000, 5000, 1000, sha256_text("profile"))))
+        expect(hot.kind).to_equal(ShapeSpecializationKindV1.ProfileGuided)
+        expect(hot.estimated_net_nanos).to_equal(4000)
+
+    it "falls back deterministically without semantic substitution":
+        val shape_id = layout_shape_id_v1(shape_input())
+        val operations = dictionary(shape_id)
+        val cold = shape_specialization_decide_v1(shape_id, operations,
+            ShapeSpecializationRequestV1(
+                "generic-sort", "concrete-i64", false,
+                ShapeSpecializationEvidenceV1(1, 10, 1000, sha256_text("profile"))))
+        expect(cold.kind).to_equal(ShapeSpecializationKindV1.Baseline)
+        expect(cold.reason).to_equal("deterministic-baseline-fallback")
+        expect(cold.implementation_key).to_equal(cold.baseline_body_key)

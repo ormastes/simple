@@ -1,0 +1,96 @@
+use os.hal.read_only_file_map_port.{
+    ReadOnlyFileIdentityV1,
+    ReadOnlyFileMapErrorKind,
+    ReadOnlyFileMapRequestV1
+}
+use os.sosix.read_only_file_map.{
+    SosixReadOnlyFileMapBackendV1,
+    SosixReadOnlyFileMapPortV1
+}
+
+fn identity(size: u64, generation: u64 = 1u64) -> ReadOnlyFileIdentityV1:
+    ReadOnlyFileIdentityV1(
+        device: 7u64, inode: 11u64, byte_length: size,
+        modified_ns: 13u64, generation: generation)
+
+describe "D12 read-only file-map adapters":
+    it "maps a whole file through the opened no-follow identity":
+        val expected = identity(8192u64)
+        val backend = SosixReadOnlyFileMapBackendV1(
+            page_bytes: 4096u64, supports_whole: true, supports_windows: true,
+            stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>:
+                Ok(expected),
+            map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>:
+                Ok((4096, length)),
+            unmap_read_only: fn(address: i64, length: u64) -> i64: 0)
+        var port = SosixReadOnlyFileMapPortV1.create(backend)
+        val result = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 3, identity: expected, offset: 0u64,
+            length: 0u64, whole_file: true))
+        expect(result.error == nil).to_be(true)
+        expect((result.capability ?? unreachable()).visible_length).to_equal(8192u64)
+
+    it "page-aligns a bounded window while preserving its visible range":
+        val expected = identity(16384u64)
+        val backend = SosixReadOnlyFileMapBackendV1(
+            page_bytes: 4096u64, supports_whole: true, supports_windows: true,
+            stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>: Ok(expected),
+            map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>:
+                expect(offset).to_equal(4096u64)
+                expect(length).to_equal(2000u64)
+                Ok((8192, length)),
+            unmap_read_only: fn(address: i64, length: u64) -> i64: 0)
+        var port = SosixReadOnlyFileMapPortV1.create(backend)
+        val result = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 4, identity: expected, offset: 5000u64,
+            length: 1096u64, whole_file: false))
+        val capability = result.capability ?? unreachable()
+        expect(capability.mapped_offset).to_equal(4096u64)
+        expect(capability.visible_offset).to_equal(904u64)
+
+    it "returns typed unsupported without buffered fallback":
+        val expected = identity(4096u64)
+        val backend = SosixReadOnlyFileMapBackendV1(
+            page_bytes: 4096u64, supports_whole: false, supports_windows: false,
+            stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>: Ok(expected),
+            map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>: Err(-95),
+            unmap_read_only: fn(address: i64, length: u64) -> i64: 0)
+        var port = SosixReadOnlyFileMapPortV1.create(backend)
+        val result = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 5, identity: expected, offset: 0u64,
+            length: 0u64, whole_file: true))
+        expect((result.error ?? unreachable()).kind).to_equal(ReadOnlyFileMapErrorKind.Unsupported)
+
+    it "classifies mapping resource exhaustion":
+        val expected = identity(4096u64)
+        val backend = SosixReadOnlyFileMapBackendV1(
+            page_bytes: 4096u64, supports_whole: true, supports_windows: true,
+            stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>: Ok(expected),
+            map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>: Err(-12),
+            unmap_read_only: fn(address: i64, length: u64) -> i64: 0)
+        var port = SosixReadOnlyFileMapPortV1.create(backend)
+        val result = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 6, identity: expected, offset: 0u64,
+            length: 4096u64, whole_file: false))
+        expect((result.error ?? unreachable()).kind).to_equal(ReadOnlyFileMapErrorKind.ResourceExhausted)
+
+    it "rejects identity drift and releases the new mapping":
+        val expected = identity(4096u64)
+        var calls = 0
+        var releases = 0
+        val backend = SosixReadOnlyFileMapBackendV1(
+            page_bytes: 4096u64, supports_whole: true, supports_windows: true,
+            stat_handle_no_follow: fn(handle: i64) -> Result<ReadOnlyFileIdentityV1, text>:
+                calls = calls + 1
+                Ok(identity(4096u64, calls as u64)),
+            map_handle_read_only: fn(handle: i64, offset: u64, length: u64) -> Result<(i64, u64), i64>: Ok((12288, length)),
+            unmap_read_only: fn(address: i64, length: u64) -> i64:
+                releases = releases + 1
+                0)
+        var port = SosixReadOnlyFileMapPortV1.create(backend)
+        val result = port.map_read_only(ReadOnlyFileMapRequestV1(
+            file_handle: 7, identity: expected, offset: 0u64,
+            length: 4096u64, whole_file: false))
+        expect((result.error ?? unreachable()).kind).to_equal(ReadOnlyFileMapErrorKind.IdentityMismatch)
+        expect(releases).to_equal(1)
+

@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scan_root=${1:-$repo_root}
+interp="$scan_root/src/compiler/95.interp"
+loader="$scan_root/src/compiler/99.loader"
+
+fail() {
+    echo "FAIL: $1" >&2
+    exit 1
+}
+
+test -d "$interp" || fail "missing interpreter layer"
+test -d "$loader" || fail "missing loader layer"
+
+if rg -n '^\s*use compiler\.loader\.loader\.' "$interp" "$loader" >/dev/null 2>&1; then
+    fail "sibling-private loader import"
+fi
+
+if rg -n '^\s*use compiler\.interp\.(interpreter|execution)\.' "$loader" >/dev/null 2>&1; then
+    fail "interpreter state escapes into loader"
+fi
+
+if rg -n '(^|[^A-Za-z0-9_])(struct|class|enum)\s+(SmfReader|SmfHeader|PackageImageV1|SmfSectionDirectory)([^A-Za-z0-9_]|$)|fn\s+(parse_smf|decode_smf_header|read_smf_directory)\s*\(' \
+    "$interp" "$loader" -g '*.spl' \
+    -g '!shared_contract/**' -g '!load_facade/**' >/dev/null 2>&1; then
+    fail "duplicate SMF authority outside shared contract"
+fi
+
+if rg -n '(^|[^A-Za-z0-9_])(dir_list|walk_dir|recursive_scan|scan_source_root|live_source_fallback)\s*\(|SIMPLE_PACKAGE_INDEX_COLD_INIT|SIMPLE_SCV_INVENTORY_COLD_INIT' \
+    "$interp" "$loader" -g '*.spl' \
+    -g '!load_facade/**' -g '!shared_contract/**' \
+    -g '!module_resolver/**' >/dev/null 2>&1; then
+    fail "live-tree fallback at interpreter/loader boundary"
+fi
+
+echo "PASS: interpreter/loader boundary authority is sealed"

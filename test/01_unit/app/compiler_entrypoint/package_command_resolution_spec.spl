@@ -1,0 +1,58 @@
+use app.spipe.testing.*
+use app.compiler_entrypoint.package_command_resolution.*
+use std.io_runtime.{file_read}
+
+describe "typed package command resolution":
+    it "selects the nearest simple.sdn without recursively scanning":
+        val result = package_command_resolve_v1("check", "src/app/cli", [])
+        expect(result.valid).to_equal(true)
+        expect(result.selection).to_equal(PackageCommandSelectionV1.NearestPackage)
+        expect(result.manifest_path.ends_with("/simple.sdn")).to_equal(true)
+        expect(result.recursive).to_equal(false)
+
+    it "preserves explicit single-file behavior":
+        val result = package_command_resolve_v1(
+            "build", ".", ["src/app/compiler_entrypoint/admission.spl"])
+        expect(result.valid).to_equal(true)
+        expect(result.selection).to_equal(PackageCommandSelectionV1.ExplicitFile)
+        expect(result.explicit_file.ends_with("/admission.spl")).to_equal(true)
+
+    it "preserves explicit source roots without discovering siblings":
+        val result = package_command_resolve_v1(
+            "test", ".", ["--source", "src/compiler", "--sequential"])
+        expect(result.valid).to_equal(true)
+        expect(result.selection).to_equal(PackageCommandSelectionV1.ExplicitSources)
+        expect(result.source_roots.len()).to_equal(1)
+        expect(result.passthrough_args).to_equal(["--sequential"])
+
+    it "makes recursive package selection explicit":
+        val result = package_command_resolve_v1("build", "src/app", ["./..."])
+        expect(result.valid).to_equal(true)
+        expect(result.selection).to_equal(PackageCommandSelectionV1.RecursivePackages)
+        expect(result.recursive).to_equal(true)
+
+    it "rejects ambiguous recursive and explicit selection":
+        val result = package_command_resolve_v1(
+            "build", ".", ["./...", "--source", "src/app"])
+        expect(result.valid).to_equal(false)
+        expect(result.error).to_equal(Some(
+            PackageCommandResolutionErrorV1.RecursiveSelectionAmbiguous))
+
+    it "rejects missing explicit inputs with typed errors":
+        val missing_file = package_command_resolve_v1(
+            "run", ".", ["does-not-exist.spl"])
+        expect(missing_file.error).to_equal(Some(
+            PackageCommandResolutionErrorV1.ExplicitFileMissing))
+        val missing_source = package_command_resolve_v1(
+            "check", ".", ["--source", "does-not-exist"])
+        expect(missing_source.error).to_equal(Some(
+            PackageCommandResolutionErrorV1.SourceRootMissing))
+
+    it "contains no recursive discovery or compilation side effects":
+        val source = file_read(
+            "src/app/compiler_entrypoint/package_command_resolution.spl")
+        expect(source.contains("dir_walk")).to_equal(false)
+        expect(source.contains("compile(")).to_equal(false)
+        expect(source.contains("process_run")).to_equal(false)
+        expect(source.contains("env_set")).to_equal(false)
+        expect(source.contains("file_write")).to_equal(false)

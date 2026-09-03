@@ -1,0 +1,83 @@
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, PinnedArchiveErrorV1,
+    pinned_archive_close_v1, pinned_archive_read_member_v1
+}
+use compiler.driver.smf.package_image_v1.{
+    PackageImageV1, PackageImageErrorV1, PackageSectionKindV1,
+    package_image_section_v1, package_image_validate_v1
+}
+
+val PACKAGE_SECTION_MAX_READ_BYTES_V1: u64 = 268435456
+
+enum PackageSectionReadErrorV1:
+    image_invalid
+    section_not_selected
+    section_too_large
+    capability_mismatch
+    capability_read_failed
+    reader_closed
+
+class PackageSectionReaderV1:
+    image: PackageImageV1
+    capability: PinnedArchiveCapability
+    selected_sections: [PackageSectionKindV1]
+    open: bool
+
+fn package_section_reader_open_v1(
+    image: PackageImageV1, receipt: PackageArchiveReceiptV1,
+    capability: PinnedArchiveCapability,
+    selected_sections: [PackageSectionKindV1]
+) -> Result[PackageSectionReaderV1, PackageSectionReadErrorV1]:
+    if package_image_validate_v1(image, receipt).is_err():
+        return Err(PackageSectionReadErrorV1.image_invalid)
+    if (not capability.open or capability.archive_digest != image.archive_digest or
+            capability.receipt_digest != image.receipt_digest):
+        return Err(PackageSectionReadErrorV1.capability_mismatch)
+    if selected_sections.len() == 0:
+        return Err(PackageSectionReadErrorV1.section_not_selected)
+    var admitted: [PackageSectionKindV1] = []
+    for kind in selected_sections:
+        if admitted.contains(kind):
+            return Err(PackageSectionReadErrorV1.section_not_selected)
+        val section = package_image_section_v1(image, kind)
+        if section == nil:
+            return Err(PackageSectionReadErrorV1.section_not_selected)
+        if section!.extent > PACKAGE_SECTION_MAX_READ_BYTES_V1:
+            return Err(PackageSectionReadErrorV1.section_too_large)
+        admitted = admitted.push(kind)
+    Ok(PackageSectionReaderV1(image, capability, admitted, true))
+
+fn package_section_reader_read_v1(
+    reader: &PackageSectionReaderV1, kind: PackageSectionKindV1
+) -> Result[[u8], PackageSectionReadErrorV1]:
+    if not reader.open:
+        return Err(PackageSectionReadErrorV1.reader_closed)
+    if not reader.selected_sections.contains(kind):
+        return Err(PackageSectionReadErrorV1.section_not_selected)
+    val section = package_image_section_v1(reader.image, kind)
+    if section == nil:
+        return Err(PackageSectionReadErrorV1.image_invalid)
+    if section!.extent > PACKAGE_SECTION_MAX_READ_BYTES_V1:
+        return Err(PackageSectionReadErrorV1.section_too_large)
+    val payload = pinned_archive_read_member_v1(
+        &reader.capability, section!.member_name)
+    if payload.is_err():
+        return Err(PackageSectionReadErrorV1.capability_read_failed)
+    Ok(payload.unwrap())
+
+fn package_section_reader_close_v1(
+    reader: PackageSectionReaderV1
+) -> Result[(), PackageSectionReadErrorV1]:
+    if not reader.open:
+        return Err(PackageSectionReadErrorV1.reader_closed)
+    reader.open = false
+    val closed = pinned_archive_close_v1(reader.capability)
+    if closed.is_err():
+        return Err(PackageSectionReadErrorV1.capability_read_failed)
+    Ok(())
+
+export PACKAGE_SECTION_MAX_READ_BYTES_V1
+export PackageSectionReadErrorV1, PackageSectionReaderV1
+export package_section_reader_open_v1, package_section_reader_read_v1
+export package_section_reader_close_v1

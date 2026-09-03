@@ -1,0 +1,92 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+CHECKER=$ROOT/scripts/check/check-release-small-unwind-rtti.shs
+CC=${CC:-cc}
+command -v "$CC" >/dev/null 2>&1 || { echo 'SKIP: C compiler unavailable'; exit 0; }
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-small-unwind-rtti-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+target=$($CC -dumpmachine 2>/dev/null || true)
+case "$(uname -s)" in
+    Darwin) target=$(uname -m)-apple-darwin ;;
+    Linux) target=$(uname -m)-unknown-linux-gnu ;;
+    FreeBSD) target=$(uname -m)-unknown-freebsd-gnu ;;
+    *) echo 'SKIP: focused native fixture target unsupported'; exit 0 ;;
+esac
+
+digest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+write_proof() {
+    cat >"$1" <<EOF
+schema=simple/no-unwind-proof/v1
+profile=release-small
+target_triple=$target
+closure_digest=$digest
+toolchain_digest=$digest
+proof_digest=$digest
+all_objects_classified=true
+all_foreign_boundaries_classified=true
+exceptions_absent=true
+foreign_unwind_absent=true
+cleanup_landing_pads_absent=true
+stack_unwind_absent=true
+rtti_absent=true
+personality_absent=true
+EOF
+}
+
+cat >"$tmp/clean.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+"$CC" -Oz -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-rtti "$tmp/clean.c" -o "$tmp/clean" 2>/dev/null || {
+    "$CC" -Oz -fno-unwind-tables -fno-asynchronous-unwind-tables "$tmp/clean.c" -o "$tmp/clean"
+}
+write_proof "$tmp/proof.env"
+sh "$CHECKER" --binary "$tmp/clean" --proof "$tmp/proof.env" --target "$target" >/dev/null
+
+reject() {
+    label=$1; shift
+    if sh "$CHECKER" "$@" >/dev/null 2>&1; then
+        echo "FAIL: checker accepted mutation $label" >&2
+        exit 1
+    fi
+}
+
+cp "$tmp/proof.env" "$tmp/incomplete.env"
+sed 's/all_foreign_boundaries_classified=true/all_foreign_boundaries_classified=false/' "$tmp/incomplete.env" >"$tmp/incomplete.next"
+mv "$tmp/incomplete.next" "$tmp/incomplete.env"
+reject incomplete-proof --binary "$tmp/clean" --proof "$tmp/incomplete.env" --target "$target"
+
+cp "$tmp/proof.env" "$tmp/duplicate.env"
+printf '%s\n' 'rtti_absent=true' >>"$tmp/duplicate.env"
+reject duplicate-proof-key --binary "$tmp/clean" --proof "$tmp/duplicate.env" --target "$target"
+
+cat >"$tmp/personality.c" <<'EOF'
+void __gxx_personality_v0(void) {}
+int main(void) { __gxx_personality_v0(); return 0; }
+EOF
+"$CC" -g -fno-unwind-tables -fno-asynchronous-unwind-tables "$tmp/personality.c" -o "$tmp/personality"
+reject personality-symbol --binary "$tmp/personality" --proof "$tmp/proof.env" --target "$target"
+
+cat >"$tmp/unwind.c" <<'EOF'
+void _Unwind_Injected(void) {}
+int main(void) { _Unwind_Injected(); return 0; }
+EOF
+"$CC" -g -fno-unwind-tables -fno-asynchronous-unwind-tables "$tmp/unwind.c" -o "$tmp/unwind"
+reject unwind-symbol --binary "$tmp/unwind" --proof "$tmp/proof.env" --target "$target"
+
+cat >"$tmp/exception.c" <<'EOF'
+void __cxa_throw(void) {}
+int main(void) { __cxa_throw(); return 0; }
+EOF
+"$CC" -g -fno-unwind-tables -fno-asynchronous-unwind-tables "$tmp/exception.c" -o "$tmp/exception"
+reject exception-symbol --binary "$tmp/exception" --proof "$tmp/proof.env" --target "$target"
+
+cat >"$tmp/rtti.c" <<'EOF'
+void _ZTIInjected(void) {}
+int main(void) { _ZTIInjected(); return 0; }
+EOF
+"$CC" -g -fno-unwind-tables -fno-asynchronous-unwind-tables "$tmp/rtti.c" -o "$tmp/rtti"
+reject rtti-symbol --binary "$tmp/rtti" --proof "$tmp/proof.env" --target "$target"
+
+echo 'PASS: release-small unwind/RTTI checker mutations rejected'

@@ -1,0 +1,57 @@
+use compiler.backend.linker.runtime_feature_closure.{
+    RuntimeFeatureClosureV1,
+    RuntimeFeatureRootKindV1,
+    RuntimeFeatureRootV1,
+    runtime_feature_closure_receipt_v1,
+    runtime_feature_closure_v1
+}
+
+fn root(identity: text, symbol: text, reason: text,
+        kind: RuntimeFeatureRootKindV1) -> RuntimeFeatureRootV1:
+    RuntimeFeatureRootV1(
+        identity: identity,
+        symbol: symbol,
+        reason: reason,
+        kind: kind
+    )
+
+describe "RuntimeFeatureClosureV1":
+    it "retains exact demand action and provider roots with reasons":
+        val result = runtime_feature_closure_v1("entry:hello", [
+            root("action:print", "rt_print", "demand-action:print",
+                RuntimeFeatureRootKindV1.DemandAction),
+            root("provider:stdout", "rt_stdout", "provider:stdout",
+                RuntimeFeatureRootKindV1.Provider)
+        ], ["rt_print", "rt_stdout"])
+        expect(result.is_ok()).to_equal(true)
+        val closure = result.unwrap()
+        expect(closure.roots.len()).to_equal(2)
+        expect(closure.digest.len()).to_equal(64)
+        expect(runtime_feature_closure_receipt_v1(closure)).to_contain(
+            "provider|provider:stdout|rt_stdout|provider:stdout")
+
+    it "rejects an undeclared retained root":
+        val result = runtime_feature_closure_v1("entry:hello", [], ["rt_hidden"])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(
+            "runtime-feature-closure-undeclared-root:rt_hidden")
+
+    it "rejects a declaration that was not retained":
+        val result = runtime_feature_closure_v1("entry:hello", [
+            root("provider:db", "rt_db", "provider:db",
+                RuntimeFeatureRootKindV1.Provider)
+        ], [])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(
+            "runtime-feature-closure-unretained-declaration:rt_db")
+
+    it "is independent of declared root order":
+        val first = root("action:a", "rt_a", "demand-action:a",
+            RuntimeFeatureRootKindV1.DemandAction)
+        val second = root("provider:b", "rt_b", "provider:b",
+            RuntimeFeatureRootKindV1.Provider)
+        val left = runtime_feature_closure_v1(
+            "entry:hello", [first, second], ["rt_a", "rt_b"]).unwrap()
+        val right = runtime_feature_closure_v1(
+            "entry:hello", [second, first], ["rt_a", "rt_b"]).unwrap()
+        expect(left.digest).to_equal(right.digest)

@@ -1,0 +1,43 @@
+# LLM Runtime Slang Local Readiness Evidence
+
+- status: `fail`
+- strict_native: `false`
+- native_streaming: `not_required`
+- native_reason: `default_local_readiness_only`
+- native_blocked_gates: `none`
+- native_primary_blocked_gate: `n/a`
+- native_next_action: `run with --strict-native when native streaming is release-completion evidence`
+- native_pass_integrity_status: `not_required`
+- native_env: `build/llm_runtime_slang_native_streaming/evidence.env`
+- spec_timeout_seconds: `120`
+- surface_manifest: `build/llm_runtime_slang_local_readiness/slang_local_readiness_surface_manifest.tsv`
+- surface_manifest_count: `16`
+- surface_manifest_size: `2077`
+- surface_manifest_sha256: `7421acdf4bce77574812b36023b45f9adb22ce79c790d53f092a3f75d457f251`
+- manifest: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/manifest.log`
+- manifest_log_size: `30`
+- manifest_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- tensor_bytes: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/tensor_bytes.log`
+- tensor_bytes_log_size: `30`
+- tensor_bytes_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- stream_plan: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/stream_plan.log`
+- stream_plan_log_size: `30`
+- stream_plan_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- transport: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/transport.log`
+- transport_log_size: `30`
+- transport_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- std_fs: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/std_fs.log`
+- std_fs_log_size: `30`
+- std_fs_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- streaming_readiness: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/streaming_readiness.log`
+- streaming_readiness_log_size: `30`
+- streaming_readiness_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- slang_pack_cli: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/slang_pack_cli.log`
+- slang_pack_cli_log_size: `30`
+- slang_pack_cli_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- slang_pack_log_modes: `fail` exit=`1` log=`build/llm_runtime_slang_local_readiness/slang_pack_log_modes.log`
+- slang_pack_log_modes_log_size: `30`
+- slang_pack_log_modes_log_sha256: `114661dd3873d54f987d09086bd15b5864edab3c10f57d12679b95b45b671bee`
+- env: `build/llm_runtime_slang_local_readiness/evidence.env`
+
+This evidence proves the local file-backed Slang pack CLI, manifest, tensor-byte, stream-plan, memory transport, std_fs, and streaming-readiness contracts. It does not prove native NVFS async scheduling, pinned buffer registration, device staging, or true streaming model loads. Run with `--strict-native` when those native gates must be release-completion evidence.

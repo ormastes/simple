@@ -1,0 +1,80 @@
+use app.spipe.testing.*
+use std.async.cancellation.{token_new}
+use std.common.io.file_read_policy.{
+    FileReadPolicyV1, FileViewTransportV1,
+    file_read_policy_allows_fallback_v1,
+    file_read_policy_selects_mapping_v1
+}
+use std.common.io.file_view_buffered.{
+    FileViewIdentityV1, file_view_identity_equal_v1,
+    file_view_range_valid_v1
+}
+use std.common.io.read_only_file_view.{
+    ReadOnlyFileViewErrorV1, ReadOnlyFileViewV1,
+    read_only_file_view_read_async_v1, read_only_file_view_read_v1
+}
+
+describe "common read-only file view":
+    it "implements four explicit mapping policies":
+        expect(file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.auto_map, true, true, 1000000, 65536, 1000000)).to_equal(true)
+        expect(file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.must_map, true, true, 10, 10, 10)).to_equal(true)
+        expect(file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.prefer_map, true, true, 10, 10, 10)).to_equal(true)
+        expect(file_read_policy_selects_mapping_v1(
+            FileReadPolicyV1.buffered, true, true, 10, 10, 10)).to_equal(false)
+
+    it "permits fallback for every policy except must map":
+        expect(file_read_policy_allows_fallback_v1(FileReadPolicyV1.auto_map)).to_equal(true)
+        expect(file_read_policy_allows_fallback_v1(FileReadPolicyV1.prefer_map)).to_equal(true)
+        expect(file_read_policy_allows_fallback_v1(FileReadPolicyV1.buffered)).to_equal(true)
+        expect(file_read_policy_allows_fallback_v1(FileReadPolicyV1.must_map)).to_equal(false)
+
+    it "rejects overflow and out of bounds ranges":
+        expect(file_view_range_valid_v1(8, 0, 8)).to_equal(true)
+        expect(file_view_range_valid_v1(8, 9, 0)).to_equal(false)
+        expect(file_view_range_valid_v1(8, 7, 2)).to_equal(false)
+        expect(file_view_range_valid_v1(18446744073709551615u64,
+            18446744073709551615u64, 1)).to_equal(false)
+
+    it "binds reads to exact snapshot and descriptor identity":
+        val first = FileViewIdentityV1(7, 11, 128, "snapshot-a")
+        expect(file_view_identity_equal_v1(first,
+            FileViewIdentityV1(7, 11, 128, "snapshot-a"))).to_equal(true)
+        expect(file_view_identity_equal_v1(first,
+            FileViewIdentityV1(7, 11, 128, "snapshot-b"))).to_equal(false)
+        expect(file_view_identity_equal_v1(first,
+            FileViewIdentityV1(7, 12, 128, "snapshot-a"))).to_equal(false)
+
+    it "fails cancellation before either transport can read":
+        var cancellation = token_new()
+        cancellation.cancel()
+        val view = ReadOnlyFileViewV1(
+            9, FileViewIdentityV1(1, 2, 4, "snapshot"),
+            FileReadPolicyV1.buffered, false, 1024, true)
+        val result = read_only_file_view_read_v1(&view, 0, 1, cancellation)
+        expect(result.is_err()).to_equal(true)
+
+    it "keeps synchronous callers over the asynchronous API":
+        val view = ReadOnlyFileViewV1(
+            -1, FileViewIdentityV1(1, 2, 4, "snapshot"),
+            FileReadPolicyV1.auto_map, true, 1024, false)
+        val cancellation = token_new()
+        val future = read_only_file_view_read_async_v1(&view, 0, 1, cancellation)
+        expect(future.is_ready()).to_equal(true)
+        expect(read_only_file_view_read_v1(
+            &view, 0, 1, cancellation).is_err()).to_equal(true)
+
+    it "returns owned bytes independent of mapped or buffered transport":
+        val mapped = FileViewTransportV1.mapped
+        val buffered = FileViewTransportV1.buffered
+        expect(mapped == buffered).to_equal(false)
+
+    it "rejects reads after close without touching the descriptor":
+        val view = ReadOnlyFileViewV1(
+            -1, FileViewIdentityV1(1, 2, 4, "snapshot"),
+            FileReadPolicyV1.must_map, true, 1024, false)
+        val result = read_only_file_view_read_v1(
+            &view, 0, 0, token_new())
+        expect(result.is_err()).to_equal(true)

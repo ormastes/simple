@@ -1,0 +1,117 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo_root/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-deploy-blockers.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fail() { echo "deployment atomicity blockers: FAIL — $1" >&2; exit 1; }
+expect_reject() { label=$1; shift; if "$@" >/dev/null 2>&1; then fail "$label accepted"; fi; }
+payload() { printf '%s\n' "$2" >"$1"; chmod "${3:-755}" "$1"; }
+
+release="$scratch/release"; platform=test-platform; deploy="$release/$platform"
+candidates="$scratch/candidates"; mkdir -p "$deploy" "$candidates"
+payload "$deploy/simple" legacy
+verify_state="$scratch/verify-state"
+printf 'pass\n' >"$verify_state"
+cat >"$scratch/verifier" <<EOF
+#!/bin/sh
+[ "\$(cat "$verify_state")" = pass ] || exit 1
+[ -f "\$1/authority.stage3-acceptance.env" ] || exit 1
+case "\$2" in publication|rollback) ;; *) exit 1 ;; esac
+EOF
+chmod 755 "$scratch/verifier"
+BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER="$scratch/verifier"; export BOOTSTRAP_DEPLOY_TX_AUTHORITY_VERIFIER
+
+for name in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do payload "$candidates/$name" "$name"; done
+stage4_sha=$(bootstrap_deploy_tx_hash_file "$candidates/simple")
+printf 'schema=simple-bootstrap-stage3-current-acceptance-v1\nstatus=verified\nstage4_candidate_sha256=%s\n' "$stage4_sha" >"$candidates/stage3-acceptance"
+for name in simple_mcp_server simple_lsp_mcp_server; do
+  bootstrap_deploy_tx_hash_file "$candidates/$name" >"$candidates/$name.sha256"
+done
+for name in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do payload "$candidates/launcher.$name" "launcher-$name"; done
+for name in stage4-provenance kernel-policy phase7 phase7-candidates performance-baseline performance-measurement; do payload "$candidates/$name" "$name" 644; done
+printf 'schema=simple-kernel-phase7-qualification-v2\nstatus=PASS\n' >"$candidates/phase7"
+
+add_full_set() {
+  omit=${1:-none}
+  for name in simple simple_seed simple_ui_backend simple_mcp_server simple_mcp_server.sha256 simple_lsp_mcp_server simple_lsp_mcp_server.sha256 \
+      launcher.simple launcher.simple_seed launcher.simple_ui_backend launcher.simple_mcp_server launcher.simple_lsp_mcp_server; do
+    [ "$name" = "$omit" ] && continue
+    mode=755; case "$name" in *.sha256) mode=644 ;; esac
+    bootstrap_deploy_tx_add "$name" "$candidates/$name" "$deploy/$name" "$mode" "$(bootstrap_deploy_tx_hash_file "$candidates/$name")"
+  done
+  for spec in authority.stage4-provenance.env:stage4-provenance authority.stage3-acceptance.env:stage3-acceptance \
+      authority.kernel-policy.sdn:kernel-policy authority.phase7.env:phase7 authority.phase7-candidates.env:phase7-candidates \
+      authority.performance-baseline.env:performance-baseline authority.performance-measurement.env:performance-measurement; do
+    name=${spec%%:*}; source=${spec#*:}; [ "$name" = "$omit" ] && continue
+    bootstrap_deploy_tx_add "$name" "$candidates/$source" "$deploy/$name" 644 "$(bootstrap_deploy_tx_hash_file "$candidates/$source")"
+  done
+}
+
+write_metadata() {
+  stage4_sha=$(bootstrap_deploy_tx_hash_file "$candidates/simple")
+  bootstrap_deploy_tx_write_receipt_entries "$bootstrap_deploy_tx_dir/receipt-entries.env"
+  entries_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_dir/receipt-entries.env")
+  cat >"$bootstrap_deploy_tx_dir/bootstrap-generation.env" <<EOF
+schema=bootstrap-deploy-generation-v1
+generation_id=$bootstrap_deploy_tx_id
+generation_kind=provenance-qualified
+transaction_entries_path=$bootstrap_deploy_tx_final_dir/receipt-entries.env
+transaction_entries_sha256=$entries_sha
+EOF
+  manifest_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_dir/bootstrap-generation.env")
+  cat >"$bootstrap_deploy_tx_dir/bootstrap-deploy-receipt.env" <<EOF
+schema=bootstrap-deploy-receipt-v3
+generation_id=$bootstrap_deploy_tx_id
+generation_path=$bootstrap_deploy_tx_final_dir
+generation_manifest_path=$bootstrap_deploy_tx_final_dir/bootstrap-generation.env
+generation_manifest_sha256=$manifest_sha
+current_pointer_target=$bootstrap_deploy_tx_pointer_target
+deployment_status=pass
+stage4_candidate_path=$bootstrap_deploy_tx_final_dir/simple
+stage4_candidate_sha256=$stage4_sha
+stage4_provenance_path=$bootstrap_deploy_tx_final_dir/authority.stage4-provenance.env
+stage4_provenance_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/stage4-provenance")
+stage3_current_acceptance_status=verified
+stage3_current_acceptance_receipt=$bootstrap_deploy_tx_final_dir/authority.stage3-acceptance.env
+stage3_current_acceptance_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/stage3-acceptance")
+policy_authority_path=$bootstrap_deploy_tx_final_dir/authority.kernel-policy.sdn
+policy_authority_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/kernel-policy")
+phase7_receipt_path=$bootstrap_deploy_tx_final_dir/authority.phase7.env
+phase7_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/phase7")
+phase7_candidate_manifest_path=$bootstrap_deploy_tx_final_dir/authority.phase7-candidates.env
+phase7_candidate_manifest_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/phase7-candidates")
+performance_baseline_receipt_path=$bootstrap_deploy_tx_final_dir/authority.performance-baseline.env
+performance_baseline_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/performance-baseline")
+performance_measurement_receipt_path=$bootstrap_deploy_tx_final_dir/authority.performance-measurement.env
+performance_measurement_receipt_sha256=$(bootstrap_deploy_tx_hash_file "$candidates/performance-measurement")
+kernel_k1_policy=llvm-cranelift
+simple_abi_policy=v1
+plugin_manifest_policy=simple-sdn
+coverage_cutover_policy=atomic-apk-only
+coverage_implementation=apk-only
+performance_threshold_mode=baseline-relative-10-percent
+performance_baseline_scope=admitted-per-architecture-receipt
+performance_steady_rss_percent=110
+performance_growth_percent=10
+performance_warm_request_count=20
+previous_pointer_target=$bootstrap_deploy_tx_previous_target
+previous_generation_id=$bootstrap_deploy_tx_previous_generation
+previous_generation_path=$bootstrap_deploy_tx_previous_path
+previous_generation_manifest_path=$bootstrap_deploy_tx_previous_manifest
+previous_generation_manifest_sha256=$bootstrap_deploy_tx_previous_manifest_sha256
+EOF
+}
+
+begin_case() { bootstrap_deploy_tx_begin "$release" "$platform" "$1"; add_full_set "${2:-none}"; write_metadata; }
+
+begin_case partial simple_seed; expect_reject partial-generation bootstrap_deploy_tx_seal; bootstrap_deploy_tx_abort
+begin_case launcherless launcher.simple; expect_reject launcher-closure bootstrap_deploy_tx_seal; bootstrap_deploy_tx_abort
+begin_case companionless simple_mcp_server.sha256; expect_reject companion-closure bootstrap_deploy_tx_seal; bootstrap_deploy_tx_abort
+begin_case first; bootstrap_deploy_tx_seal; printf 'reject\n' >"$verify_state"; expect_reject publication-authority bootstrap_deploy_tx_apply
+printf 'pass\n' >"$verify_state"; bootstrap_deploy_tx_apply; bootstrap_deploy_tx_commit
+begin_case second; bootstrap_deploy_tx_seal; bootstrap_deploy_tx_apply; bootstrap_deploy_tx_commit
+printf 'reject\n' >"$verify_state"
+expect_reject rollback-authority bootstrap_deploy_tx_rollback_generation "$release" "$platform" second "$scratch/rollback.env"
+echo 'deployment atomicity blockers: PASS — four focused mutation criteria'

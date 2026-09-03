@@ -4,7 +4,9 @@ use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
     BackendPluginRequestV1}
 use compiler.backend_plugin.transport.{BACKEND_PLUGIN_BRIDGE_MAGIC_V1,
     BACKEND_PLUGIN_BRIDGE_VERSION_V1, BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1,
-    BACKEND_PLUGIN_REQUEST_SIZE_V1, backend_plugin_request_encode_v1,
+    BACKEND_PLUGIN_REQUEST_SIZE_V1, BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1,
+    BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1,
+    backend_plugin_request_encode_v1, backend_plugin_provider_handle_encode_v1,
     backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1}
 
 fn transport_request() -> BackendPluginRequestV1:
@@ -32,6 +34,14 @@ describe "backend plugin packed transport":
         expect(decoded.payload).to_equal([1, 2, 255])
         expect(decoded.diagnostic).to_equal("bad provider")
 
+    it "encodes only the retained admitted provider handle for execution":
+        val wire = backend_plugin_provider_handle_encode_v1(0x123456)
+        expect(wire.len()).to_equal(BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1)
+        expect(wire[0] as i64).to_equal(
+            BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1 & 255)
+        expect(wire[4] as i64).to_equal(BACKEND_PLUGIN_BRIDGE_VERSION_V1)
+        expect(backend_plugin_provider_handle_encode_v1(0).len()).to_equal(0)
+
     it "fails closed for bad magic, truncation, and trailing bytes":
         var valid = backend_plugin_envelope_encode_v1(0, 1, [9], "")
         var bad_magic = valid
@@ -44,14 +54,17 @@ describe "backend plugin packed transport":
         expect(backend_plugin_envelope_decode_v1(valid).reason).to_equal(
             "trailing-envelope-bytes")
 
-    it "keeps the wrapper on canonical MIR serialization and the boxed byte extern":
+    it "keeps the legacy ABI while production sends no provider pathname":
         val source = file_read("src/compiler/70.backend/backend_plugin/transport.spl")
         expect(source).to_contain(
             "extern fn spl_backend_plugin_run_v1(")
         expect(source).to_contain(
-            "path_bytes: [u8], request_bytes: [u8], mir_bytes: [u8]")
+            "provider_bytes: [u8], request_bytes: [u8], mir_bytes: [u8]")
         expect(source).to_contain(
             "text_to_bytes(serialize_mir_module(module))")
+        expect(source).to_contain(
+            "backend_plugin_provider_handle_encode_v1(")
+        expect(source.contains("text_to_bytes(provider_path)")).to_equal(false)
         expect(source).to_contain(
             "backend_plugin_envelope_decode_v1(response)")
         expect(source).to_contain("unsafe(capabilities: [ffi])")
@@ -62,6 +75,8 @@ describe "backend plugin packed transport":
         expect(header).to_contain("0x31504253")
         expect(header).to_contain("SIMPLE_BACKEND_BRIDGE_VERSION_V1 UINT32_C(1)")
         expect(header).to_contain("SIMPLE_BACKEND_BRIDGE_HEADER_SIZE_V1 UINT32_C(32)")
+        expect(header).to_contain(
+            "SIMPLE_BACKEND_BRIDGE_PROVIDER_HANDLE_MAGIC_V1")
         expect(header).to_contain(
             "magic:u32, version:u32, status:i32, result_kind:u32, payload_len:u64")
 
@@ -76,3 +91,5 @@ describe "backend plugin packed transport":
             "envelope.result_kind != BACKEND_PLUGIN_FINAL_OBJECT_RESULT_KIND_V1")
         expect(source).to_contain("if envelope.payload.len() == 0:")
         expect(source).to_contain("CodegenOutput.object(module.name, envelope.payload)")
+        expect(source).to_contain("self.lease.admitted_handle()")
+        expect(source.contains("self.provider_path")).to_equal(false)

@@ -1,0 +1,78 @@
+use compiler.driver.perf.demand_compile_counters.{
+    DemandCompileCountersV1, demand_compile_counters_canonical_v1,
+    demand_compile_counters_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DemandCompileReceiptV1:
+    schema_version: i64
+    snapshot_digest: text
+    binary_digest: text
+    host_digest: text
+    command_digest: text
+    fixture_digest: text
+    counters: DemandCompileCountersV1
+    receipt_digest: text
+
+fn demand_compile_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    for character in digest:
+        if not ((character >= '0' and character <= '9') or
+            (character >= 'a' and character <= 'f')):
+            return false
+    true
+
+fn demand_compile_receipt_canonical_v1(receipt: DemandCompileReceiptV1) -> text:
+    if receipt.schema_version != 1 or
+        not demand_compile_digest_valid_v1(receipt.snapshot_digest) or
+        not demand_compile_digest_valid_v1(receipt.binary_digest) or
+        not demand_compile_digest_valid_v1(receipt.host_digest) or
+        not demand_compile_digest_valid_v1(receipt.command_digest) or
+        not demand_compile_digest_valid_v1(receipt.fixture_digest) or
+        demand_compile_counters_validate_v1(receipt.counters) != "ok":
+        return ""
+    var encoded = "simple-demand-compile-receipt-v1\n"
+    encoded = encoded + "snapshot={receipt.snapshot_digest}\n"
+    encoded = encoded + "binary={receipt.binary_digest}\n"
+    encoded = encoded + "host={receipt.host_digest}\n"
+    encoded = encoded + "command={receipt.command_digest}\n"
+    encoded = encoded + "fixture={receipt.fixture_digest}\n"
+    encoded = encoded + demand_compile_counters_canonical_v1(receipt.counters)
+    encoded
+
+fn demand_compile_receipt_digest_v1(receipt: DemandCompileReceiptV1) -> text:
+    val canonical = demand_compile_receipt_canonical_v1(receipt)
+    if canonical == "":
+        return ""
+    sha256_text(canonical)
+
+fn demand_compile_receipt_validate_v1(receipt: DemandCompileReceiptV1) -> text:
+    val expected = demand_compile_receipt_digest_v1(receipt)
+    if expected == "":
+        return "demand-compile-receipt-authority-invalid"
+    if not demand_compile_digest_valid_v1(receipt.receipt_digest):
+        return "demand-compile-receipt-digest-invalid"
+    if receipt.receipt_digest != expected:
+        return "demand-compile-receipt-digest-mismatch"
+    "ok"
+
+fn demand_compile_receipt_create_v1(
+    snapshot_digest: text, binary_digest: text, host_digest: text,
+    command_digest: text, fixture_digest: text,
+    counters: DemandCompileCountersV1
+) -> Result<DemandCompileReceiptV1, text>:
+    val unsigned = DemandCompileReceiptV1(
+        1, snapshot_digest, binary_digest, host_digest, command_digest,
+        fixture_digest, counters, "")
+    val digest = demand_compile_receipt_digest_v1(unsigned)
+    if digest == "":
+        return Err("demand-compile-receipt-authority-invalid")
+    Ok(DemandCompileReceiptV1(
+        1, snapshot_digest, binary_digest, host_digest, command_digest,
+        fixture_digest, counters, digest))
+
+export DemandCompileReceiptV1
+export demand_compile_receipt_canonical_v1, demand_compile_receipt_digest_v1
+export demand_compile_receipt_validate_v1
+export demand_compile_receipt_create_v1

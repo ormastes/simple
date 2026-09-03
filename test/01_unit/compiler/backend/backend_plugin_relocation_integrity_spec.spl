@@ -1,0 +1,43 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+describe "backend plugin relocation integrity":
+    it "registers the relocated VHDL and Vulkan implementations exactly once":
+        val registry = file_read(
+            "src/plugins/backend_registry/full_static_backend_registry.spl")
+        val ports = file_read(
+            "src/plugins/backend_registry/full_static_backend_ports.spl")
+
+        expect(registry).to_contain(
+            "_entry(BackendKind.Vhdl, vhdl_backend_port_v1(), CodegenOutputKind.TextSource)")
+        expect(registry).to_contain(
+            "_entry(BackendKind.Vulkan, vulkan_backend_port_v1(), CodegenOutputKind.GpuCode)")
+        expect(ports).to_contain(
+            "use plugins.backend_vhdl.vhdl_backend.{VhdlBackend}")
+        expect(ports).to_contain(
+            "use plugins.backend_vulkan.vulkan_backend.{VulkanCodegenBackend}")
+        expect(ports).not.to_contain(
+            "use compiler.backend.vhdl_backend.{VhdlBackend}")
+        expect(ports).not.to_contain(
+            "use compiler.backend.vulkan_backend.{VulkanCodegenBackend}")
+
+    it "keeps relocated driver wiring outside the compiler facade":
+        val registry = file_read(
+            "src/plugins/backend_registry/full_static_backend_registry.spl")
+        val compiler_output = file_read(
+            "src/compiler/80.driver/driver_aot_output.spl")
+
+        expect(registry).to_contain(
+            "use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*")
+        expect(compiler_output.contains("driver_aot_vhdl_output")).to_equal(false)
+
+    it "uses plugin-specific nominal names for the Vulkan capability probe":
+        val probe = file_read(
+            "src/plugins/backend_vulkan/mir_test_builder.spl")
+
+        expect(probe).to_contain("enum VulkanProbeTarget:")
+        expect(probe).to_contain("class VulkanProbeBuilder:")
+        expect(probe).to_contain("class VulkanProbeCase:")
+        expect(probe).not.to_contain("enum BackendTarget:")
+        expect(probe).not.to_contain("class MirTestBuilder:")
+        expect(probe).not.to_contain("class MirTestCase:")

@@ -1,0 +1,30 @@
+<!-- codex-research -->
+# macOS Bootstrap Reverse-Reference Harmonization NFRs
+
+Status: SELECTED.
+
+Decision source: user-final-performance-authority-2026-09-02
+
+- **MBH-NFR-001 — Determinism.** Clean and compatible-reuse outputs shall be
+  byte-identical, or identical after a documented normalization of unavoidable
+  nondeterministic fields.
+- **MBH-NFR-002 — Incremental no-op.** A valid warm no-op shall parse, lower,
+  and emit zero modules where producer-neutral caches apply, and shall not link
+  when the ordered link-input receipt is unchanged.
+- **MBH-NFR-003 — Bounded residency.** Evidence shall record wall time, CPU,
+  peak/retained RSS, cache counts, and critical path. Each architecture shall
+  supply an admitted baseline receipt bound to that architecture, its baseline
+  evidence digest, the producer and server digests, the final user decision
+  source, and this document digest. Across exactly 20 warm requests, maximum
+  steady RSS shall be at most 110% of baseline RSS and nonnegative RSS growth
+  shall be at most 10% of baseline RSS. Missing, shared, inferred, stale, or
+  unbound baselines fail closed.
+- **MBH-NFR-004 — Integrity.** All admitted artifacts and reuse decisions shall
+  carry cryptographic digests and durable provenance. Any mismatch shall fail
+  closed with a stable reason code.
+- **MBH-NFR-005 — Native evidence.** Architecture, Mach-O load commands,
+  provider archives, deployment target, SDK, compiler, and per-slice hashes
+  shall be captured from the executing native runner.
+- **MBH-NFR-006 — Concurrency safety.** Shared publication, when introduced,
+  shall prove identical/conflicting writers, pinned readers, crash recovery,
+  and lease-aware garbage collection before enabling shared mutable state.

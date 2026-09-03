@@ -1,0 +1,47 @@
+use compiler.driver.cache.dirty_module_record.{
+    DirtyModuleRecordV1, FrozenSourceReadSetV1,
+    dirty_module_record_validate_v1, dirty_module_records_sort_validate_v1
+}
+
+val DIGEST = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn dirty_record(package_id: text, module_id: text) -> DirtyModuleRecordV1:
+    val path = "/snapshot/{package_id}/{module_id}.spl"
+    DirtyModuleRecordV1(
+        package_id, module_id, path, "revision", "tree", DIGEST,
+        DIGEST, DIGEST, DIGEST, DIGEST, DIGEST,
+        [], [], [FrozenSourceReadSetV1(path, 0, 16, true, DIGEST)],
+        "generation", DIGEST, DIGEST)
+
+describe "dirty module record authority":
+    it "accepts one complete whole-file frozen read set":
+        expect(dirty_module_record_validate_v1(
+            dirty_record("pkg", "pkg.main"))).to_equal("ok")
+
+    it "sorts records deterministically by package and module":
+        val result = dirty_module_records_sort_validate_v1([
+            dirty_record("z", "z.main"), dirty_record("a", "a.second"),
+            dirty_record("a", "a.first")])
+        expect(result.is_ok()).to_equal(true)
+        val records = result.unwrap()
+        expect(records[0].module_id).to_equal("a.first")
+        expect(records[1].module_id).to_equal("a.second")
+        expect(records[2].module_id).to_equal("z.main")
+
+    it "rejects duplicate module authority":
+        val record = dirty_record("pkg", "pkg.main")
+        expect(dirty_module_records_sort_validate_v1(
+            [record, record]).is_err()).to_equal(true)
+
+    it "rejects a read set not bound to the frozen source":
+        var record = dirty_record("pkg", "pkg.main")
+        record.read_set = [FrozenSourceReadSetV1(
+            "/live/pkg/main.spl", 0, 16, true, DIGEST)]
+        expect(dirty_module_record_validate_v1(record)).to_equal(
+            "read_set_invalid")
+
+    it "rejects ambiguous dependency facts":
+        var record = dirty_record("pkg", "pkg.main")
+        record.direct_dependency_module_ids = ["dep.main", "dep.main"]
+        expect(dirty_module_record_validate_v1(record)).to_equal(
+            "dependency_ambiguous")

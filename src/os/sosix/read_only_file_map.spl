@@ -1,0 +1,123 @@
+"""SOSIX adapter for immutable read-only file mappings.
+
+The caller supplies an already opened no-follow handle and expected identity.
+This adapter verifies identity before and after mapping and never falls back to
+buffered I/O. Whole-file and bounded-window policy remains explicit.
+"""
+
+use os.hal.read_only_file_map_port.{
+    ReadOnlyFileIdentityV1,
+    ReadOnlyFileMapCapabilityV1,
+    ReadOnlyFileMapErrorKind,
+    ReadOnlyFileMapErrorV1,
+    ReadOnlyFileMapPortV1,
+    ReadOnlyFileMapRequestV1,
+    ReadOnlyFileMapResultV1,
+    read_only_file_identity_same_v1,
+    read_only_file_map_error_v1,
+    read_only_file_map_request_error_v1,
+    read_only_file_map_success_v1
+}
+
+pub struct SosixReadOnlyFileMapBackendV1:
+    page_bytes: u64
+    supports_whole: bool
+    supports_windows: bool
+    stat_handle_no_follow: fn(i64) -> Result<ReadOnlyFileIdentityV1, text>
+    map_handle_read_only: fn(i64, u64, u64) -> Result<(i64, u64), i64>
+    unmap_read_only: fn(i64, u64) -> i64
+
+pub class SosixReadOnlyFileMapPortV1:
+    backend: SosixReadOnlyFileMapBackendV1
+    next_token: u64
+
+    static fn create(backend: SosixReadOnlyFileMapBackendV1) -> SosixReadOnlyFileMapPortV1:
+        SosixReadOnlyFileMapPortV1(backend: backend, next_token: 1u64)
+
+fn _sosix_map_error(kind: ReadOnlyFileMapErrorKind, status: i64, reason: text) -> ReadOnlyFileMapResultV1:
+    read_only_file_map_error_v1(kind, status, reason)
+
+impl ReadOnlyFileMapPortV1 for SosixReadOnlyFileMapPortV1:
+    fn provider_name() -> text:
+        "sosix-read-only-file-map-v1"
+
+    fn page_size() -> u64:
+        self.backend.page_bytes
+
+    fn supports_whole_file() -> bool:
+        self.backend.supports_whole
+
+    fn supports_window() -> bool:
+        self.backend.supports_windows
+
+    me map_read_only(request: ReadOnlyFileMapRequestV1) -> ReadOnlyFileMapResultV1:
+        val request_error = read_only_file_map_request_error_v1(request)
+        if request_error != "":
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.InvalidRequest, -22, request_error)
+        if self.backend.page_bytes == 0u64:
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.Unsupported, -95, "mapping-page-size-unavailable")
+        if request.whole_file and not self.backend.supports_whole:
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.Unsupported, -95, "whole-file-mapping-unsupported")
+        if not request.whole_file and not self.backend.supports_windows:
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.Unsupported, -95, "window-mapping-unsupported")
+
+        val before = self.backend.stat_handle_no_follow(request.file_handle)
+        if before.is_err():
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.NotRegularFile, -22, before.unwrap_err())
+        if not read_only_file_identity_same_v1(before.unwrap(), request.identity):
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.IdentityMismatch, -116, "opened-file-identity-mismatch")
+
+        val visible_offset = if request.whole_file: 0u64 else: request.offset
+        val visible_length = if request.whole_file: request.identity.byte_length else: request.length
+        val map_offset = visible_offset - (visible_offset % self.backend.page_bytes)
+        val delta = visible_offset - map_offset
+        if visible_length > 18446744073709551615u64 - delta:
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.InvalidRequest, -75, "mapping-length-overflow")
+        val map_length = visible_length + delta
+
+        val mapped = self.backend.map_handle_read_only(request.file_handle, map_offset, map_length)
+        if mapped.is_err():
+            val status = mapped.unwrap_err()
+            val kind = if status == -12 or status == -23 or status == -24:
+                ReadOnlyFileMapErrorKind.ResourceExhausted
+            else:
+                ReadOnlyFileMapErrorKind.MappingFailed
+            return _sosix_map_error(kind, status, "read-only-map-failed")
+        val pair = mapped.unwrap()
+        if pair.0 <= 0 or pair.1 != map_length:
+            if pair.0 > 0 and pair.1 > 0u64:
+                _ = self.backend.unmap_read_only(pair.0, pair.1)
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.MappingFailed, -5, "mapping-result-invalid")
+
+        val after = self.backend.stat_handle_no_follow(request.file_handle)
+        if after.is_err() or not read_only_file_identity_same_v1(after.unwrap(), request.identity):
+            _ = self.backend.unmap_read_only(pair.0, pair.1)
+            return _sosix_map_error(ReadOnlyFileMapErrorKind.IdentityMismatch, -116, "opened-file-changed-during-map")
+
+        val token = self.next_token
+        self.next_token = self.next_token + 1u64
+        read_only_file_map_success_v1(ReadOnlyFileMapCapabilityV1(
+            address: pair.0,
+            mapped_offset: map_offset,
+            mapped_length: map_length,
+            visible_offset: delta,
+            visible_length: visible_length,
+            identity: request.identity,
+            provider: self.provider_name(),
+            token: token))
+
+    me release_read_only(capability: ReadOnlyFileMapCapabilityV1) -> ReadOnlyFileMapErrorV1?:
+        if capability.provider != self.provider_name() or capability.token == 0u64 or
+            capability.address <= 0 or capability.mapped_length == 0u64:
+            return ReadOnlyFileMapErrorV1(
+                kind: ReadOnlyFileMapErrorKind.InvalidRequest,
+                status: -22,
+                reason: "mapping-capability-invalid")
+        val status = self.backend.unmap_read_only(capability.address, capability.mapped_length)
+        if status != 0:
+            return ReadOnlyFileMapErrorV1(
+                kind: ReadOnlyFileMapErrorKind.ReleaseFailed,
+                status: status,
+                reason: "read-only-unmap-failed")
+        nil
+

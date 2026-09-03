@@ -21,8 +21,11 @@ use compiler.hir.hir_definitions.*
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
+use compiler.mono.shape.monomorphization_policy.*
+use compiler.mono.shape.shape_specialization_policy.*
 use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{env_get}
+use std.common.crypto.sha256.{sha256_text}
 
 fn mono_arg_value(a: HirCallArg) -> HirExpr:
     """Typed-parameter accessor for HirCallArg.value (stage4 ANY-erasure
@@ -95,6 +98,7 @@ class MonomorphizationPass:
     spec_queue: [text]
     # Mangled name -> SymbolId allocated for the specialized function.
     spec_symbols: Dict<text, i64>
+    shape_baseline_symbols: Dict<text, i64>
     # Next free symbol id (seeded past every id seen while collecting).
     next_symbol: i64
     # Local-inference environment for the function being rewritten:
@@ -118,6 +122,10 @@ struct MonoStats:
     # inferable, or an instantiation chain that never terminates). Each one
     # has a matching entry in `MonomorphizationPass.diagnostics`.
     unresolved_generic_calls: i64
+    shape_baselines_created: i64
+    shape_baselines_reused: i64
+    explicit_specializations: i64
+    profile_specializations: i64
 
 impl MonomorphizationPass:
     static fn create() -> MonomorphizationPass:
@@ -143,6 +151,7 @@ impl MonomorphizationPass:
             fn_returns: {},
             spec_queue: [],
             spec_symbols: {},
+            shape_baseline_symbols: {},
             next_symbol: 1,
             env: {},
             diagnostics: [],
@@ -153,7 +162,11 @@ impl MonomorphizationPass:
                 generic_classes_found: 0,
                 call_sites_found: 0,
                 specializations_created: 0,
-                unresolved_generic_calls: 0
+                unresolved_generic_calls: 0,
+                shape_baselines_created: 0,
+                shape_baselines_reused: 0,
+                explicit_specializations: 0,
+                profile_specializations: 0
             )
         )
 
@@ -373,6 +386,23 @@ impl MonomorphizationPass:
         self.next_symbol = self.next_symbol + 1
         self.spec_symbols[mangled] = sym
         val template: HirFunction = self.generic_functions[func_name]
+        val shape_plan = monomorphization_shape_plan_v1(
+            sha256_text("generic-body:{func_name}"), type_args, false,
+            ShapeSpecializationEvidenceV1(0, 0, 0, ""))
+        if not shape_plan.valid:
+            self.diagnostics = self.diagnostics.push(
+                "E-MONO-034: invalid ABI/layout shape authority for `{func_name}`")
+            return -1
+        val baseline_key = shape_plan.decision.baseline_body_key
+        if self.shape_baseline_symbols.has(baseline_key):
+            self.stats.shape_baselines_reused = self.stats.shape_baselines_reused + 1
+        else:
+            self.shape_baseline_symbols[baseline_key] = sym
+            self.stats.shape_baselines_created = self.stats.shape_baselines_created + 1
+        match shape_plan.decision.kind:
+            case Explicit: self.stats.explicit_specializations = self.stats.explicit_specializations + 1
+            case ProfileGuided: self.stats.profile_specializations = self.stats.profile_specializations + 1
+            case Baseline: pass
         var specialized: HirFunction = specialize_function_with_types(template, type_args)
         specialized.name = mangled
         specialized.symbol = SymbolId.new(sym)

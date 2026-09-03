@@ -1,0 +1,167 @@
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use compiler.driver.cache.pinned_archive_capability.{PinnedArchiveCapability}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+
+val IMPORT_MATERIALIZATION_WAIT_BUDGET_V1: i64 = 65536
+
+enum ImportDemandV1:
+    declaration
+    body
+    mir
+    native
+
+enum ImportMaterializationStateV1:
+    Unrequested
+    MetadataReady
+    BodyReady
+    MirReady
+    NativeReady
+    Materializing
+    Failed
+
+enum ImportMaterializationErrorV1:
+    invalid_snapshot_identity
+    invalid_archive_authority
+    missing_declaration_section
+    missing_body_section
+    missing_mir_section
+    missing_native_section
+    archive_read_failed
+    snapshot_identity_mismatch
+    owner_publication_conflict
+    wait_exhausted
+    cached_failure
+
+struct ImportSnapshotIdentityV1:
+    revision: text
+    tree_digest: text
+    inventory_digest: text
+
+struct FrozenImportCapabilityV1:
+    snapshot: ImportSnapshotIdentityV1
+    receipt: PackageArchiveReceiptV1
+    archive: PinnedArchiveCapability
+
+struct ImportMaterializedPayloadV1:
+    declaration_bytes: [u8]
+    body_bytes: [u8]
+    mir_bytes: [u8]
+    native_bytes: [u8]
+
+struct ImportMaterializationFailureV1:
+    error: ImportMaterializationErrorV1
+    package_key: text
+    symbol_key: text
+    snapshot: ImportSnapshotIdentityV1
+    archive_digest: text
+    demand: ImportDemandV1
+
+struct ImportMaterializationReceiptV1:
+    package_key: text
+    symbol_key: text
+    snapshot: ImportSnapshotIdentityV1
+    archive_digest: text
+    receipt_digest: text
+    state: ImportMaterializationStateV1
+    owner: bool
+    waited: bool
+
+class ImportMaterializationV1:
+    package_key: text
+    symbol_key: text
+    snapshot: ImportSnapshotIdentityV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+    atomic_state: AtomicI64
+    waiter_count: AtomicI64
+    payload: ImportMaterializedPayloadV1
+    failure: ImportMaterializationFailureV1?
+
+fn import_materialization_new_v1(
+    package_key: text,
+    symbol_key: text,
+    authority: FrozenImportCapabilityV1
+) -> ImportMaterializationV1:
+    ImportMaterializationV1(
+        package_key: package_key,
+        symbol_key: symbol_key,
+        snapshot: authority.snapshot,
+        receipt: authority.receipt,
+        capability: authority.archive,
+        atomic_state: atomic_i64_new(0),
+        waiter_count: atomic_i64_new(0),
+        payload: ImportMaterializedPayloadV1([], [], [], []),
+        failure: nil)
+
+fn import_demand_level_v1(demand: ImportDemandV1) -> i64:
+    match demand:
+        case declaration: 1
+        case body: 2
+        case mir: 3
+        case native: 4
+
+fn import_materialization_state_v1(
+    materialization: ImportMaterializationV1
+) -> ImportMaterializationStateV1:
+    val encoded = materialization.atomic_state.load(MemoryOrdering.Acquire)
+    if encoded >= 16:
+        return ImportMaterializationStateV1.Materializing
+    match encoded:
+        case 0: ImportMaterializationStateV1.Unrequested
+        case 1: ImportMaterializationStateV1.MetadataReady
+        case 2: ImportMaterializationStateV1.BodyReady
+        case 3: ImportMaterializationStateV1.MirReady
+        case 4: ImportMaterializationStateV1.NativeReady
+        case _: ImportMaterializationStateV1.Failed
+
+fn import_materialization_snapshot_valid_v1(
+    identity: ImportSnapshotIdentityV1
+) -> bool:
+    identity.revision != "" and identity.tree_digest.len() == 64 and
+        identity.inventory_digest.len() == 64
+
+fn import_materialization_try_claim_v1(
+    materialization: ImportMaterializationV1, demand: ImportDemandV1
+) -> i64:
+    val target = import_demand_level_v1(demand)
+    val observed = materialization.atomic_state.load(MemoryOrdering.Acquire)
+    if observed < 0 or observed >= target:
+        return -1
+    if materialization.atomic_state.compare_exchange(
+            observed, 16 + target,
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+        return observed
+    -1
+
+fn import_materialization_publish_ready_v1(
+    materialization: ImportMaterializationV1, demand: ImportDemandV1
+) -> bool:
+    val target = import_demand_level_v1(demand)
+    materialization.atomic_state.compare_exchange(
+        16 + target, target, MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+fn import_materialization_publish_failure_v1(
+    materialization: ImportMaterializationV1,
+    demand: ImportDemandV1,
+    error: ImportMaterializationErrorV1
+) -> bool:
+    val target = import_demand_level_v1(demand)
+    materialization.failure = Some(ImportMaterializationFailureV1(
+        error, materialization.package_key, materialization.symbol_key,
+        materialization.snapshot, materialization.receipt.archive_digest,
+        demand))
+    materialization.atomic_state.compare_exchange(
+        16 + target, -1, MemoryOrdering.Release, MemoryOrdering.Acquire)
+
+export IMPORT_MATERIALIZATION_WAIT_BUDGET_V1
+export ImportDemandV1, ImportMaterializationStateV1
+export ImportMaterializationErrorV1, ImportSnapshotIdentityV1
+export FrozenImportCapabilityV1
+export ImportMaterializedPayloadV1, ImportMaterializationFailureV1
+export ImportMaterializationReceiptV1, ImportMaterializationV1
+export import_materialization_new_v1, import_demand_level_v1
+export import_materialization_state_v1
+export import_materialization_snapshot_valid_v1
+export import_materialization_try_claim_v1
+export import_materialization_publish_ready_v1
+export import_materialization_publish_failure_v1

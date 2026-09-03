@@ -1,0 +1,81 @@
+use app.spipe.testing.*
+use lib.compiler_artifact_service.profile.*
+use lib.compiler_artifact_service.protocol.*
+use lib.compiler_artifact_service.service.*
+
+fn profile() -> ArtifactServiceProfileV1:
+    artifact_service_profile_v1(
+        "compiler", "compiler-v1",
+        ["io", "parse", "semantic", "mir", "cranelift", "link"],
+        100, true)
+
+fn request(action_id: text, priority: i64) -> ArtifactRequestV1:
+    ArtifactRequestV1(action_id, "compiler-v1", "scv-7", priority, 1048576)
+
+describe "compiler artifact service library":
+    it "binds profiles to compatibility and resource policy":
+        expect(artifact_service_profile_validate_v1(profile())).to_equal("ok")
+        expect(artifact_service_profile_digest_v1(profile()) == "").to_equal(false)
+
+    it "rejects incompatible requests deterministically":
+        val bad = ArtifactRequestV1("a", "wrong", "scv-7", 10, 1048576)
+        val service = artifact_service_enqueue_v1(ArtifactServiceV1(profile(), []), bad)
+        expect(service.entries[0].state).to_equal(ArtifactRequestStateV1.rejected)
+        expect(service.entries[0].error_code).to_equal("compatibility-mismatch")
+
+    it "keeps background work behind foreground priority":
+        var service = ArtifactServiceV1(profile(), [])
+        service = artifact_service_enqueue_v1(service, request("background", 10))
+        val deferred = artifact_service_claim_v1(service, "worker", "lease", 1, 1048576, 100)
+        expect(deferred.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+
+    it "claims the highest eligible priority with an explicit lease":
+        var service = ArtifactServiceV1(profile(), [])
+        service = artifact_service_enqueue_v1(service, request("low", 10))
+        service = artifact_service_enqueue_v1(service, request("high", 20))
+        service = artifact_service_claim_v1(service, "worker", "lease-1", 7, 1048576, -1)
+        expect(service.entries[0].state).to_equal(ArtifactRequestStateV1.queued)
+        expect(service.entries[1].state).to_equal(ArtifactRequestStateV1.leased)
+
+    it "cancels queued and leased work without publishing":
+        var service = ArtifactServiceV1(profile(), [])
+        service = artifact_service_enqueue_v1(service, request("a", 10))
+        service = artifact_service_claim_v1(service, "worker", "lease-1", 7, 1048576, -1)
+        service = artifact_service_cancel_v1(service, "a")
+        expect(service.entries[0].state).to_equal(ArtifactRequestStateV1.cancelled)
+        expect(service.entries[0].cas_artifact_digest).to_equal("")
+
+    it "validates ordered framed output":
+        val frames = [
+            artifact_result_frame_v1("a", 0, ArtifactFrameStreamV1.stdout, "first"),
+            artifact_result_frame_v1("a", 1, ArtifactFrameStreamV1.stderr, "second"),
+        ]
+        val result = ArtifactResultV1("a", "compiler-v1", "scv-7", "cas-digest", frames, true, false, "")
+        expect(artifact_result_validate_v1(result, 4096)).to_equal("ok")
+
+    it "rejects malformed frames and non-CAS success":
+        val wrong = artifact_result_frame_v1("a", 1, ArtifactFrameStreamV1.stdout, "wrong")
+        val malformed = ArtifactResultV1("a", "compiler-v1", "scv-7", "cas", [wrong], true, false, "")
+        expect(artifact_result_validate_v1(malformed, 4096)).to_equal("frame-order-invalid")
+        val no_cas = ArtifactResultV1("a", "compiler-v1", "scv-7", "", [], true, false, "")
+        expect(artifact_result_validate_v1(no_cas, 4096)).to_equal("cas-authority-missing")
+
+    it "publishes only a compatible leased CAS result":
+        var service = ArtifactServiceV1(profile(), [])
+        service = artifact_service_enqueue_v1(service, request("a", 10))
+        service = artifact_service_claim_v1(service, "worker", "lease-1", 7, 1048576, -1)
+        val lease = ArtifactLeaseV1("lease-1", "a", "worker", 7, false)
+        val result = ArtifactResultV1("a", "compiler-v1", "scv-7", "cas-digest", [], true, false, "")
+        service = artifact_service_complete_v1(service, lease, result)
+        expect(service.entries[0].state).to_equal(ArtifactRequestStateV1.completed)
+        expect(service.entries[0].cas_artifact_digest).to_equal("cas-digest")
+
+    it "rejects stale leases and snapshot mismatches":
+        var service = ArtifactServiceV1(profile(), [])
+        service = artifact_service_enqueue_v1(service, request("a", 10))
+        service = artifact_service_claim_v1(service, "worker", "lease-1", 7, 1048576, -1)
+        val stale = ArtifactLeaseV1("stale", "a", "worker", 7, false)
+        val result = ArtifactResultV1("a", "compiler-v1", "other", "cas-digest", [], true, false, "")
+        service = artifact_service_complete_v1(service, stale, result)
+        expect(service.entries[0].state).to_equal(ArtifactRequestStateV1.rejected)
+        expect(service.entries[0].error_code).to_equal("lease-mismatch")

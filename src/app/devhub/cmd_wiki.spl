@@ -17,6 +17,7 @@ use app.devhub.wiki_git.{sanitize_owner_repo_slug, wiki_git_ensure_synced, wiki_
 use app.devhub.convert_storage.{storage_to_markdown}
 use std.common.text_advanced.{escape_json}
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.io.editor_temp_file.{EditorTempFile, editor_temp_create, editor_temp_read, editor_temp_cleanup}
 
 # Real (non-mocked) file I/O, used by both backends' edit/create $EDITOR
 # temp-file round-trips below. std.nogc_sync_mut.file_system.file_ops is a
@@ -28,7 +29,7 @@ use std.nogc_sync_mut.io.process_ops.{process_run}
 # the $EDITOR round-trip never actually read/wrote the edited page) — fixed
 # by switching them onto the canonical real-I/O facade also used by the
 # github functions.
-use std.io_runtime.{file_exists, file_write, read_file_text}
+use std.io_runtime.{file_exists, read_file_text}
 
 
 fn handle_wiki(args: [text]) -> i64:
@@ -273,36 +274,39 @@ fn _wiki_edit(args: [text]) -> i64:
         print_error("failed to get page {page_id}: {_raw}")
         return 1
 
-    val version = content.ref.version
-    val title = content.ref.title
+    match editor_temp_create("devhub-wiki", "html", content.body_storage):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(temp):
+            _wiki_edit_continue(config, page_id, content, message, temp)
 
-    # Write to temp file via the extracted _wiki_edit_write_temp/
-    # _wiki_edit_read_temp helpers below (real file I/O; see bug
-    # wiki-confluence-mock-file-io)
-    val tmp_path = "/tmp/itf_edit_{page_id}.html"
-    val _write_tmp = _wiki_edit_write_temp(tmp_path, content.body_storage)
 
-    # Open editor
+fn _wiki_edit_continue(config: ItfConfig, page_id: text, content: PageContent, message: text, temp: EditorTempFile) -> i64:
+    """Run the editor and always remove its exclusively-created exchange file."""
     val editor = _resolve_editor(config)
-    val (_, _, editor_code) = process_run(editor, [tmp_path])
+    val (_, _, editor_code) = process_run(editor, [temp.path])
     if editor_code != 0:
+        val _clean = editor_temp_cleanup(temp)
         print_error("editor exited with code {editor_code}")
         return 2
 
-    # Read edited content
-    val (read_ok, edited) = _wiki_edit_read_temp(tmp_path)
-    if not read_ok:
-        print_error("could not read edited file")
+    val edited = match editor_temp_read(temp):
+        Err(msg):
+            val _clean = editor_temp_cleanup(temp)
+            print_error("could not read edited file: {msg}")
+            return 1
+        Ok(value): value
+    if not editor_temp_cleanup(temp):
+        print_error("could not remove editor temp file: {temp.path}")
         return 1
 
-    # Check if changed
     if edited == content.body_storage:
         print "No changes made."
         return 0
 
-    # Upload
     val commit_msg = if message != "": message else: "Edited via itf CLI"
-    val (update_ok, updated_ref, update_raw) = confluence_update_page(config, page_id, title, edited, version, commit_msg)
+    val (update_ok, updated_ref, update_raw) = confluence_update_page(config, page_id, content.ref.title, edited, content.ref.version, commit_msg)
     if not update_ok:
         print_error("failed to update page: {update_raw}")
         return 1
@@ -315,8 +319,8 @@ fn _wiki_edit(args: [text]) -> i64:
 
 fn _wiki_read_file_if_exists(path: text) -> (bool, text):
     """Real (non-mocked) file read: returns (ok, content); ok is false if
-    `path` does not exist. Shared by _wiki_create's --from-file read and
-    _wiki_edit_read_temp below — both used to go through the
+    `path` does not exist. Used by _wiki_create's --from-file read, which
+    previously went through the
     std.nogc_sync_mut.file_system.file_ops mock (bug
     wiki-confluence-mock-file-io: file_exists_mock only checks the path
     prefix, so the $EDITOR round-trip never touched the real file), now
@@ -324,22 +328,6 @@ fn _wiki_read_file_if_exists(path: text) -> (bool, text):
     if not file_exists(path):
         return (false, "")
     (true, read_file_text(path))
-
-
-fn _wiki_edit_write_temp(tmp_path: text, content: text) -> bool:
-    """Write the current page body to the $EDITOR temp file (real file
-    I/O — rt_file_write_text). Extracted out of _wiki_edit so
-    wiki_backend_routing_spec.spl can exercise the write/read round-trip
-    directly against a temp path, without invoking a real editor or
-    Confluence auth."""
-    file_write(tmp_path, content)
-
-
-fn _wiki_edit_read_temp(tmp_path: text) -> (bool, text):
-    """Read the edited $EDITOR temp file back. Returns (ok, content); ok
-    is false if the file no longer exists (e.g. the editor process
-    deleted it or never wrote it)."""
-    _wiki_read_file_if_exists(tmp_path)
 
 
 fn _wiki_create(args: [text]) -> i64:
@@ -589,19 +577,33 @@ fn _wiki_github_edit_continue(cache_dir: text, page: text, original: text, args:
     (Simple's nested-closure capture can read but not modify outer vars;
     passing the resolved value as a plain argument sidesteps that instead
     of relying on match-arm mutation of an enclosing var)."""
-    val tmp_path = "/tmp/itf_wiki_github_edit_{page}.md"
-    val _write_tmp = file_write(tmp_path, original)
+    match editor_temp_create("devhub-wiki", "md", original):
+        Err(msg):
+            print_error(msg)
+            1
+        Ok(temp):
+            _wiki_github_edit_temp(cache_dir, page, original, args, temp)
+
+
+fn _wiki_github_edit_temp(cache_dir: text, page: text, original: text, args: [text], temp: EditorTempFile) -> i64:
+    """Run the GitHub-wiki editor exchange and clean it on every exit path."""
 
     val editor = _resolve_editor(load_config())
-    val (_e_out, _e_err, editor_code) = process_run(editor, [tmp_path])
+    val (_e_out, _e_err, editor_code) = process_run(editor, [temp.path])
     if editor_code != 0:
+        val _clean = editor_temp_cleanup(temp)
         print_error("editor exited with code {editor_code}")
         return 2
 
-    if not file_exists(tmp_path):
-        print_error("could not read edited file")
+    val edited = match editor_temp_read(temp):
+        Err(msg):
+            val _clean = editor_temp_cleanup(temp)
+            print_error("could not read edited file: {msg}")
+            return 1
+        Ok(value): value
+    if not editor_temp_cleanup(temp):
+        print_error("could not remove editor temp file: {temp.path}")
         return 1
-    val edited = read_file_text(tmp_path)
     if edited == original:
         print "No changes made."
         return 0

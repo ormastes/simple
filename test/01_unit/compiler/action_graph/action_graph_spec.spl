@@ -1,0 +1,82 @@
+use compiler.driver.action_graph.build_action_v1.*
+use compiler.driver.action_graph.persisted_graph.*
+use compiler.driver.action_graph.coordinator.*
+use std.spec.*
+
+fn action(id: text, edges: [text], pool: BuildActionPoolV1, priority: i64, memory: i64, restat: text) -> BuildActionV1:
+    BuildActionV1(id, "cmd:{id}", ["in:{id}"], edges, ["out:{id}"], pool, priority, "snapshot-1", memory, restat)
+
+fn graph(actions: [BuildActionV1]) -> PersistedBuildGraphV1:
+    val provisional = PersistedBuildGraphV1("pending", "", "snapshot-1", actions)
+    PersistedBuildGraphV1(persisted_graph_digest_v1(provisional), "", "snapshot-1", actions)
+
+describe "BuildActionV1":
+    it "binds dynamic edges pool budget snapshot and restat into identity":
+        val first = action("a", [], BuildActionPoolV1.parse, 2, 64, "same")
+        val second = action("a", [], BuildActionPoolV1.llvm, 2, 64, "same")
+        expect(build_action_validate_v1(first)).to_equal("ok")
+        expect(build_action_digest_v1(first) == build_action_digest_v1(second)).to_equal(false)
+
+    it "rejects malformed and self-dependent actions":
+        val invalid = action("a", ["a"], BuildActionPoolV1.parse, 0, 0, "")
+        expect(build_action_validate_v1(invalid)).to_equal("memory-budget-invalid")
+
+    it "round trips a complete persisted dynamic graph":
+        val original = graph([action("b", ["a"], BuildActionPoolV1.mir, 3, 128, "restat"), action("a", [], BuildActionPoolV1.semantic, 2, 64, "")])
+        val decoded = persisted_graph_decode_v1(persisted_graph_encode_v1(original))
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().generation).to_equal(original.generation)
+        expect(decoded.unwrap().actions[0].dynamic_edges).to_equal(["a"])
+
+describe "action graph coordinator":
+    it "orders ready work deterministically and enforces single flight":
+        val build_graph = graph([action("b", [], BuildActionPoolV1.parse, 1, 10, ""), action("a", [], BuildActionPoolV1.parse, 1, 10, "")])
+        var coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 20)])
+        expect(coordinator_ready_actions_v1(coordinator)).to_equal(["a", "b"])
+        expect(coordinator_claim_v1(&mut coordinator, "a", "worker-1").valid).to_equal(true)
+        expect(coordinator_claim_v1(&mut coordinator, "a", "worker-2").reason).to_equal("single-flight")
+
+    it "commits worker results only through the owning parent":
+        val build_graph = graph([action("a", [], BuildActionPoolV1.semantic, 1, 10, "stable")])
+        var coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.semantic, 1, 10)])
+        coordinator_claim_v1(&mut coordinator, "a", "owner")
+        val result = BuildActionResultV1("a", "snapshot-1", true, false, "output", "stable", ["z", "a"], 9)
+        expect(coordinator_commit_v1(&mut coordinator, "other", result).accepted).to_equal(false)
+        val committed = coordinator_commit_v1(&mut coordinator, "owner", result)
+        expect(committed.accepted).to_equal(true)
+        expect(committed.restat_unchanged).to_equal(true)
+
+    it "respects dependency SCC boundaries pool memory and cancellation":
+        val build_graph = graph([action("base", [], BuildActionPoolV1.llvm, 1, 80, ""), action("next", ["base"], BuildActionPoolV1.llvm, 1, 80, "")])
+        var coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.llvm, 2, 100)])
+        expect(coordinator_ready_actions_v1(coordinator)).to_equal(["base"])
+        coordinator_claim_v1(&mut coordinator, "base", "owner")
+        expect(coordinator_ready_actions_v1(coordinator)).to_equal([])
+        coordinator_cancel_v1(&mut coordinator)
+        expect(coordinator_claim_v1(&mut coordinator, "next", "owner").reason).to_equal("cancelled")
+
+    it "admits a strongly connected component without dependency deadlock":
+        val build_graph = graph([action("a", ["b"], BuildActionPoolV1.semantic, 1, 10, ""), action("b", ["a"], BuildActionPoolV1.semantic, 1, 10, "")])
+        val coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.semantic, 2, 20)])
+        expect(coordinator_ready_actions_v1(coordinator)).to_equal(["a", "b"])
+
+    it "enforces pool memory and rejects late success after cancellation":
+        val build_graph = graph([action("a", [], BuildActionPoolV1.llvm, 1, 80, ""), action("b", [], BuildActionPoolV1.llvm, 1, 80, "")])
+        var coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.llvm, 2, 100)])
+        expect(coordinator_claim_v1(&mut coordinator, "a", "owner-a").valid).to_equal(true)
+        expect(coordinator_claim_v1(&mut coordinator, "b", "owner-b").reason).to_equal("not-ready")
+        coordinator_cancel_v1(&mut coordinator)
+        val late = BuildActionResultV1("a", "snapshot-1", true, false, "a", "", [], 80)
+        expect(coordinator_commit_v1(&mut coordinator, "owner-a", late).reason).to_equal("cancelled-result-required")
+
+    it "buffers diagnostics by canonical action order":
+        val build_graph = graph([action("b", [], BuildActionPoolV1.parse, 1, 10, ""), action("a", [], BuildActionPoolV1.parse, 1, 10, "")])
+        var coordinator = coordinator_new_v1(build_graph, [BuildPoolBudgetV1(BuildActionPoolV1.parse, 2, 20)])
+        coordinator_claim_v1(&mut coordinator, "b", "wb")
+        coordinator_claim_v1(&mut coordinator, "a", "wa")
+        coordinator_commit_v1(&mut coordinator, "wb", BuildActionResultV1("b", "snapshot-1", true, false, "b", "", ["b0"], 1))
+        coordinator_commit_v1(&mut coordinator, "wa", BuildActionResultV1("a", "snapshot-1", true, false, "a", "", ["a0", "a1"], 1))
+        val frames = coordinator_diagnostics_v1(coordinator)
+        expect(frames[0].action_id).to_equal("a")
+        expect(frames[1].ordinal).to_equal(1)
+        expect(frames[2].action_id).to_equal("b")

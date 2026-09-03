@@ -1,0 +1,92 @@
+use app.spipe.testing.*
+use compiler.driver.cache.package_archive_cache.{
+    package_archive_aggregate_entry_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use compiler.hir.archive.interface_action_archive.{
+    CompileActionRegistry, CompileArchiveActionV1,
+    InterfaceActionArchiveV1, InterfaceArchiveSymbolV1, SemanticContext,
+    route_archive_install_begin_v1, route_archive_install_stage_v1,
+    route_archive_install_commit_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn aggregate_entry_v1(package_key: text, module_key: text) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_key, module_key, "/snapshot/{module_key}.spl",
+        sha256_text("source-{module_key}"), sha256_text("smf-{module_key}"),
+        sha256_text("export-{module_key}"), sha256_text("abi-{module_key}"),
+        sha256_text("init-{module_key}"), sha256_text("provider-{module_key}"),
+        sha256_text("action-{module_key}"), sha256_text("manifest-{module_key}"),
+        "scc.alpha", [], [])
+
+fn aggregate_archive_v1(package_key: text, symbol_name: text) -> InterfaceActionArchiveV1:
+    InterfaceActionArchiveV1(
+        package_key, ConfigVariantKeyV1("target", "backend", [], "debug", "v1", [], []),
+        sha256_text("producer"), [], sha256_text("interface-{package_key}"),
+        sha256_text("action-{package_key}"),
+        [InterfaceArchiveSymbolV1(
+            symbol_name, "function", "fn()->i64", sha256_text(symbol_name))],
+        [CompileArchiveActionV1(
+            "{symbol_name}.native", "native-codegen", symbol_name,
+            sha256_text("{symbol_name}.native"))])
+
+describe "package aggregate archive route transaction":
+    it "aggregates every module under one package identity":
+        val aggregate = package_archive_aggregate_entry_v1([
+            aggregate_entry_v1("pkg.alpha", "pkg.alpha.first"),
+            aggregate_entry_v1("pkg.alpha", "pkg.alpha.second")])
+        expect(aggregate != nil).to_equal(true)
+        expect(aggregate!.package_identity).to_equal("pkg.alpha")
+        expect(aggregate!.module_identity).to_contain("pkg.alpha.first")
+        expect(aggregate!.module_identity).to_contain("pkg.alpha.second")
+
+    it "accepts a multi-package SCC and commits both owners once":
+        var transaction = route_archive_install_begin_v1()
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.alpha", "alpha.run")
+        ).is_ok()).to_equal(true)
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.beta", "beta.run")
+        ).is_ok()).to_equal(true)
+        var semantic_owner = SemanticContext([], [])
+        var action_owner = CompileActionRegistry([], [])
+        val committed = route_archive_install_commit_v1(
+            &mut transaction, &mut semantic_owner, &mut action_owner)
+        expect(committed.is_ok()).to_equal(true)
+        expect(semantic_owner.archive_package_keys.len()).to_equal(2)
+        expect(action_owner.archive_package_keys.len()).to_equal(2)
+
+    it "rejects a duplicate package module aggregate":
+        val aggregate = package_archive_aggregate_entry_v1([
+            aggregate_entry_v1("pkg.alpha", "pkg.alpha.same"),
+            aggregate_entry_v1("pkg.alpha", "pkg.alpha.same")])
+        expect(aggregate == nil).to_equal(true)
+
+    it "rejects duplicate package identity before owner commit":
+        var transaction = route_archive_install_begin_v1()
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.alpha", "alpha.one")
+        ).is_ok()).to_equal(true)
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.alpha", "alpha.two")
+        ).is_err()).to_equal(true)
+
+    it "rolls back every owner mutation after a late package conflict":
+        var transaction = route_archive_install_begin_v1()
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.alpha", "shared.run")
+        ).is_ok()).to_equal(true)
+        expect(route_archive_install_stage_v1(
+            &mut transaction, aggregate_archive_v1("pkg.beta", "shared.run")
+        ).is_ok()).to_equal(true)
+        var semantic_owner = SemanticContext([], [])
+        var action_owner = CompileActionRegistry([], [])
+        val committed = route_archive_install_commit_v1(
+            &mut transaction, &mut semantic_owner, &mut action_owner)
+        expect(committed.is_err()).to_equal(true)
+        expect(semantic_owner.archive_package_keys.len()).to_equal(0)
+        expect(semantic_owner.archive_symbols.len()).to_equal(0)
+        expect(action_owner.archive_package_keys.len()).to_equal(0)
+        expect(action_owner.archive_actions.len()).to_equal(0)
