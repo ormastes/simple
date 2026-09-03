@@ -8,9 +8,12 @@ use std.common.aspect_pack.{
     apk_loader_set_host_offer_v1, apk_load_facet, apk_loader_generation,
     apk_try_facet, APK_ENTRY_FACET, APK_ACT_LAZY_FACET
 }
-use std.sffi.dynamic_versioned.{VersionedDynLib}
+use std.sffi.dynamic_versioned.{VersionedDynLib, MultiVersionLoader}
 
 extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 
 val PHASE6_FIXTURE_SOURCE = "test/fixtures/sffi/plugin_entry_v1_fixture.c"
 val PHASE6_FIXTURE_DIR = "build/kpm-phase6-acceptance"
@@ -103,11 +106,23 @@ describe "kernel plugin Phase 6 end-to-end acceptance":
             accepted_library.lib.close()
 
         print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=BEGIN expected=PLUG-E-DIGEST")
+        val unload_marker = "{PHASE6_FIXTURE_DIR}/digest-refusal.closed"
+        rt_file_delete(unload_marker)
+        expect(rt_file_exists(unload_marker)).to_equal(false)
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        val loaded_before = MultiVersionLoader.instance().loaded_keys().len()
         val refused = VersionedDynLib.load_plugin_path(
             phase6_build_provider("digest-mutant", "-DPLUGIN_ABI=1 -DPLUGIN_DEFERRED=0 -DPLUGIN_DIGEST='\"sha256:mutated\"'"),
             "phase6-refused", phase6_host_abi([]))
+        val escaped_handle = refused.is_ok()
         val refusal_code = if refused.is_err(): refused.unwrap_err().code() else: "OK"
-        if refusal_code != "PLUG-E-DIGEST":
-            print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST actual={refusal_code}")
+        val unloaded = rt_file_exists(unload_marker)
+        val loaded_after = MultiVersionLoader.instance().loaded_keys().len()
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", "")).to_equal(true)
+        if refusal_code != "PLUG-E-DIGEST" or escaped_handle or not unloaded or loaded_after != loaded_before:
+            print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST actual={refusal_code} handle={escaped_handle} unloaded={unloaded} loaded_before={loaded_before} loaded_after={loaded_after}")
         expect(refusal_code).to_equal("PLUG-E-DIGEST")
-        print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST handle=0")
+        expect(escaped_handle).to_equal(false)
+        expect(unloaded).to_equal(true)
+        expect(loaded_after).to_equal(loaded_before)
+        print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST handle=false unloaded=true cache_delta=0")
