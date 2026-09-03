@@ -12,3 +12,4 @@ mod module_boundary;
 mod branch_coverage;
 mod seed_regression_tests;
 mod closure_call_types;
+mod deref_lvalue_tests;

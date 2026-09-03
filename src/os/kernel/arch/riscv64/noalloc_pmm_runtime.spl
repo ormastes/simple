@@ -21,11 +21,15 @@ val RV64_QEMU_RESERVED_END: u64 = 0x80400000
 val RV64_QEMU_HEAP_START: u64 = 0x87000000
 val RV64_QEMU_HEAP_SIZE: u64 = 16 * 1024 * 1024
 
-@extern("runtime", "rt_riscv_uart_put")
-fn _riscv_uart_put_raw(byte: u64)
+# Plain `extern fn` rather than @extern("runtime", "rt_riscv_uart_put"): the
+# seed's native backend does not honour that attribute -- it emitted the SIMPLE
+# name `_riscv_uart_put_raw` as an undefined reference instead of the C name,
+# so the rv64 WM kernel failed to link. The plain form is the one proven to
+# work in this same link (every extern in display.spl resolves).
+extern fn rt_riscv_uart_put(byte: u64)
 
 fn _uart_put(byte: u64):
-    _riscv_uart_put_raw(byte)
+    rt_riscv_uart_put(byte)
 
 fn _crlf():
     _uart_put(13)
@@ -73,8 +77,15 @@ fn rv64_noalloc_pmm_initialize_default() -> i64:
         RV64_QEMU_HEAP_START
     )
 
-@export("C", name: "rt_riscv_noalloc_alloc_page")
-fn rv64_noalloc_allocate_page() -> u64:
+# Named `spl_`-prefixed rather than carrying @export("C", name: ...): the seed's
+# native backend silently emits NO C alias for that attribute (measured: zero
+# rt_riscv_* symbols in this module's object despite ten such annotations), so
+# the C boot code could never reach this page allocator. A `spl_` prefix is a
+# documented keep-the-ABI-name convention in the seed's mangler
+# (native_project/mangle.rs), so this symbol is emitted unmangled and the
+# freestanding VirtIO-GPU backend can call it -- while PMM policy stays owned
+# by Simple, which is the whole point of routing the allocation through here.
+fn spl_riscv_noalloc_alloc_page() -> u64:
     riscv_noalloc_alloc_page()
 
 @export("C", name: "rt_riscv_noalloc_pmm_is_ready")
