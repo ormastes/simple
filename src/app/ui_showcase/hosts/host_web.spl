@@ -25,6 +25,7 @@
 # produces, decoded and converted by the same landed helpers the WM host uses.
 
 use std.io_runtime.{env_get, file_exists, file_read, write_file, mkdir_p}
+use common.string_builder.{StringBuilder}
 use common.ui.draw_ir_v3.{
     DrawIrV3Scene, draw_ir_v3_geometry_at, draw_ir_v3_paint_at,
     draw_ir_v3_text_run_at, draw_ir_v3_glyph_at, draw_ir_v3_path_span_at,
@@ -63,21 +64,22 @@ fn web_color_css(argb: u32) -> text:
 
 fn web_html_escape(value: text) -> text:
     """Escape text placed in HTML text or attribute content."""
-    var out = ""
+    val out = StringBuilder.new()
     var segment = 0
     var i = 0
     while i < value.len():
         val ch = value.slice(i, i + 1)
         if ch == "&" or ch == "<" or ch == ">" or ch == "\"" or ch == "'":
-            out = out + value.slice(segment, i)
-            if ch == "&": out = out + "&amp;"
-            elif ch == "<": out = out + "&lt;"
-            elif ch == ">": out = out + "&gt;"
-            elif ch == "\"": out = out + "&quot;"
-            else: out = out + "&#39;"
+            out.push(value.slice(segment, i))
+            if ch == "&": out.push("&amp;")
+            elif ch == "<": out.push("&lt;")
+            elif ch == ">": out.push("&gt;")
+            elif ch == "\"": out.push("&quot;")
+            else: out.push("&#39;")
             segment = i + 1
         i = i + 1
-    out + value.slice(segment, value.len())
+    out.push(value.slice(segment, value.len()))
+    out.to_text()
 
 fn web_glyph_char(glyph_id: u32) -> text:
     val id = glyph_id.to_i64()
@@ -98,7 +100,8 @@ fn web_glyph_html(glyph_id: u32, x: i32, baseline_y: i32, color: u32, scale: i32
     val safe_scale = if scale < 1: 1 else: scale
     val top = baseline_y - 7 * safe_scale
     val ch = web_html_escape(web_glyph_char(glyph_id))
-    var pixels = ""
+    val shadows = StringBuilder.new()
+    var lit_cells = 0
     var row = 0
     while row < 7:
         val bits = glyph_row_bits(glyph_id.to_i64() as i32, row)
@@ -106,10 +109,17 @@ fn web_glyph_html(glyph_id: u32, x: i32, baseline_y: i32, color: u32, scale: i32
         while col < 5:
             val mask = 1 << (4 - col)
             if (bits & mask) != 0:
-                pixels = pixels + "<i style=\"position:absolute;left:{col * safe_scale}px;top:{row * safe_scale}px;width:{safe_scale}px;height:{safe_scale}px;background:{web_color_css(color)}\"></i>"
+                if lit_cells > 0:
+                    shadows.push(",")
+                shadows.push("{col * safe_scale}px {row * safe_scale}px 0 0 currentColor")
+                lit_cells = lit_cells + 1
             col = col + 1
         row = row + 1
-    "<span data-cmd=\"{cmd_index}\" data-glyph=\"{glyph_id}\" aria-label=\"{ch}\" style=\"position:absolute;left:{x}px;top:{top}px;width:{5 * safe_scale}px;height:{7 * safe_scale}px\">{pixels}</span>"
+    var pixel_html = ""
+    if lit_cells > 0:
+        val shadow_css = shadows.to_text()
+        pixel_html = "<i aria-hidden=\"true\" style=\"position:absolute;left:0;top:0;width:{safe_scale}px;height:{safe_scale}px;color:{web_color_css(color)};box-shadow:{shadow_css}\"></i>"
+    "<span data-cmd=\"{cmd_index}\" data-glyph=\"{glyph_id}\" aria-label=\"{ch}\" style=\"position:absolute;left:{x}px;top:{top}px;width:{5 * safe_scale}px;height:{7 * safe_scale}px\">{pixel_html}</span>"
 
 fn web_text_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -> (text, bool):
     """Glyph spans for one TEXT command. off_x/off_y shift every glyph, so a
@@ -119,38 +129,72 @@ fn web_text_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -
     if not run.present or run.glyph_count == 0u32:
         return ("", false)
     val scale = web_text_scale(run.font_size_milli)
-    var out = ""
+    val out = StringBuilder.new()
     var i: i64 = 0
     while i < run.glyph_count.to_i64():
         val glyph = draw_ir_v3_glyph_at(scene.text_runs, run.glyph_start + i.to_u32())
         if not glyph.present:
             return ("", false)
-        out = out + web_glyph_html(glyph.glyph_id, glyph.x + off_x, glyph.y + off_y, run.color, scale, cmd_index)
+        out.push(web_glyph_html(glyph.glyph_id, glyph.x + off_x, glyph.y + off_y, run.color, scale, cmd_index))
         i = i + 1
-    (out, true)
+    (out.to_text(), true)
+
+fn web_text_valid(scene: DrawIrV3Scene, cmd_index: i64) -> bool:
+    """Validate TEXT table references without constructing discarded HTML."""
+    val cmd = scene.commands[cmd_index]
+    val run = draw_ir_v3_text_run_at(scene.text_runs, cmd.text_run_id)
+    if not run.present or run.glyph_count == 0u32:
+        return false
+    var i: i64 = 0
+    while i < run.glyph_count.to_i64():
+        if not draw_ir_v3_glyph_at(
+                scene.text_runs, run.glyph_start + i.to_u32()).present:
+            return false
+        i = i + 1
+    true
 
 fn web_path_d(scene: DrawIrV3Scene, path_id: u32) -> (text, bool):
     val span = draw_ir_v3_path_span_at(scene.path_points, path_id)
     if not span.present or span.point_count == 0u32:
         return ("", false)
-    var d = ""
+    val d = StringBuilder.new()
     var i: i64 = 0
     while i < span.point_count.to_i64():
         val point = draw_ir_v3_path_point_at(scene.path_points, span.point_start + i.to_u32())
         if not point.present:
             return ("", false)
         if point.verb == DRAW_IR_V3_VERB_MOVE:
-            d = d + "M {point.x} {point.y} "
+            d.push("M {point.x} {point.y} ")
         elif point.verb == DRAW_IR_V3_VERB_LINE:
-            d = d + "L {point.x} {point.y} "
+            d.push("L {point.x} {point.y} ")
         elif point.verb == DRAW_IR_V3_VERB_CLOSE:
-            d = d + "Z "
+            d.push("Z ")
         else:
             # v3 stores one point per verb; quadratic/cubic control points
             # need multiple points and cannot be guessed from this record.
             return ("", false)
         i = i + 1
-    (d.trim(), true)
+    (d.to_text().trim(), true)
+
+fn web_path_valid(scene: DrawIrV3Scene, cmd_index: i64) -> bool:
+    """Validate PATH tables and supported verbs without building SVG text."""
+    val cmd = scene.commands[cmd_index]
+    val span = draw_ir_v3_path_span_at(scene.path_points, cmd.path_span_id)
+    if not span.present or span.point_count == 0u32:
+        return false
+    if not draw_ir_v3_paint_at(scene.paint, cmd.paint_id).present:
+        return false
+    var i: i64 = 0
+    while i < span.point_count.to_i64():
+        val point = draw_ir_v3_path_point_at(
+            scene.path_points, span.point_start + i.to_u32())
+        if (not point.present or
+            (point.verb != DRAW_IR_V3_VERB_MOVE and
+             point.verb != DRAW_IR_V3_VERB_LINE and
+             point.verb != DRAW_IR_V3_VERB_CLOSE)):
+            return false
+        i = i + 1
+    true
 
 fn web_path_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -> (text, bool):
     """SVG element for one PATH command. The path data keeps its authored
@@ -164,8 +208,13 @@ fn web_path_html(scene: DrawIrV3Scene, cmd_index: i64, off_x: i32, off_y: i32) -
     if not paint.present:
         return ("", false)
     val stroke_width = paint.stroke_width_milli / 1000
-    val stroke = if stroke_width > 0: "stroke:{web_color_css(paint.stroke_color)};stroke-width:{stroke_width}px;" else: "stroke:none;"
-    ("<svg data-cmd=\"{cmd_index}\" style=\"position:absolute;left:{off_x}px;top:{off_y}px;width:100%;height:100%;overflow:visible\"><path d=\"{path_d}\" style=\"fill:{web_color_css(paint.fill_color)};{stroke}\"></path></svg>", true)
+    # Raster DrawIR treats PATH/EDGE points as one-pixel line segments and
+    # uses fill_color when no explicit stroke exists. Mirror that contract;
+    # `fill:<color>;stroke:none` makes every open polyline disappear in SVG.
+    val stroke_color = if stroke_width > 0: paint.stroke_color else: paint.fill_color
+    val stroke_px = if stroke_width > 0: stroke_width else: 1
+    val stroke = "stroke:{web_color_css(stroke_color)};stroke-width:{stroke_px}px;"
+    ("<svg data-cmd=\"{cmd_index}\" style=\"position:absolute;left:{off_x}px;top:{off_y}px;width:100%;height:100%;overflow:visible\"><path d=\"{path_d}\" style=\"fill:none;{stroke}\"></path></svg>", true)
 
 fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
     """Count visible records not owned by this projection.
@@ -183,12 +232,10 @@ fn web_scene_unsupported_count(scene: DrawIrV3Scene) -> i64:
         val cmd = scene.commands[i]
         if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN) and cmd.kind != DRAW_IR_V3_KIND_GROUP:
             if cmd.kind == DRAW_IR_V3_KIND_TEXT:
-                val (ignored_html, valid) = web_text_html(scene, i, 0, 0)
-                if not valid: count = count + 1
-            elif cmd.kind == DRAW_IR_V3_KIND_PATH:
-                val (ignored_path, valid) = web_path_html(scene, i, 0, 0)
-                if not valid: count = count + 1
-            elif cmd.kind != DRAW_IR_V3_KIND_RECT and cmd.kind != DRAW_IR_V3_KIND_EDGE:
+                if not web_text_valid(scene, i): count = count + 1
+            elif cmd.kind == DRAW_IR_V3_KIND_PATH or cmd.kind == DRAW_IR_V3_KIND_EDGE:
+                if not web_path_valid(scene, i): count = count + 1
+            elif cmd.kind != DRAW_IR_V3_KIND_RECT:
                 count = count + 1
         i = i + 1
     count
@@ -206,7 +253,7 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
     synthesises translations with an identity matrix, nothing else exists
     to apply.
     """
-    var body = ""
+    val body = StringBuilder.new()
     var i: i64 = 0
     val n = scene.commands.len().to_i64()
     # Open-group cursor: which GROUP owns the commands being walked, the
@@ -220,7 +267,7 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
         val cmd = scene.commands[i]
         if cmd.kind == DRAW_IR_V3_KIND_GROUP and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
             if wrapper_open:
-                body = body + "</div>\n"
+                body.push_line("</div>")
                 wrapper_open = false
             cur_group_id = cmd.component_id
             var dx: i32 = 0
@@ -234,7 +281,7 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
             if cmd.clip_id != DRAW_IR_V3_NO_ID:
                 val clip = draw_ir_v3_clip_at(scene.clips, cmd.clip_id)
                 if clip.present and clip.width > 0 and clip.height > 0:
-                    body = body + "<div data-cmd=\"{i}\" style=\"position:absolute;left:{dx + clip.x}px;top:{dy + clip.y}px;width:{clip.width}px;height:{clip.height}px;overflow:hidden\">\n"
+                    body.push_line("<div data-cmd=\"{i}\" style=\"position:absolute;left:{dx + clip.x}px;top:{dy + clip.y}px;width:{clip.width}px;height:{clip.height}px;overflow:hidden\">")
                     wrapper_open = true
                     clipped = true
                     # The wrapper origin already carries dx/dy and the clip
@@ -249,12 +296,12 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
                 # Walked past the current group's children (or never had a
                 # group): close any wrapper and fall back to absolute coords.
                 if wrapper_open:
-                    body = body + "</div>\n"
+                    body.push_line("</div>")
                     wrapper_open = false
                 cur_group_id = DRAW_IR_V3_NO_ID
                 cur_off_x = 0
                 cur_off_y = 0
-            if (cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE) and cmd.geometry_id != DRAW_IR_V3_NO_ID and
+            if cmd.kind == DRAW_IR_V3_KIND_RECT and cmd.geometry_id != DRAW_IR_V3_NO_ID and
                     not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
                 val geom = draw_ir_v3_geometry_at(scene.geometry, cmd.geometry_id)
                 val paint = draw_ir_v3_paint_at(scene.paint, cmd.paint_id)
@@ -270,16 +317,16 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
                             # authored geometry, matching the raster hosts.
                             val stroke_px = paint.stroke_width_milli / 1000
                             style = style + "border:{stroke_px}px solid {web_color_css(paint.stroke_color)};box-sizing:border-box;"
-                    body = body + "<div data-cmd=\"{i}\" style=\"" + style + "\"></div>\n"
+                    body.push_line("<div data-cmd=\"{i}\" style=\"" + style + "\"></div>")
             elif cmd.kind == DRAW_IR_V3_KIND_TEXT and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
                 val (text_html, valid) = web_text_html(scene, i, cur_off_x, cur_off_y)
-                if valid: body = body + text_html + "\n"
-            elif cmd.kind == DRAW_IR_V3_KIND_PATH and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
+                if valid: body.push_line(text_html)
+            elif (cmd.kind == DRAW_IR_V3_KIND_PATH or cmd.kind == DRAW_IR_V3_KIND_EDGE) and not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
                 val (path_html, valid) = web_path_html(scene, i, cur_off_x, cur_off_y)
-                if valid: body = body + path_html + "\n"
+                if valid: body.push_line(path_html)
         i = i + 1
     if wrapper_open:
-        body = body + "</div>\n"
+        body.push_line("</div>")
     val unsupported = web_scene_unsupported_count(scene)
     var receipt = ""
     if unsupported > 0:
@@ -294,7 +341,7 @@ fn web_scene_to_html(scene: DrawIrV3Scene, width: i32, height: i32) -> text:
         "<style>html,body{margin:0;padding:0;background:" + web_color_css(RASTER_BG) + ";}</style>" +
         "</head><body>\n" +
         "<div id=\"showcase-root\" style=\"position:relative;width:{width}px;height:{height}px\">\n" +
-        body + "</div>\n" + receipt + "</body></html>\n"
+        body.to_text() + "</div>\n" + receipt + "</body></html>\n"
 
 fn web_read_event_at(event_dir: text, seq: i64) -> HostInputEvent?:
     """Next browser-posted event, or nil when it has not arrived."""

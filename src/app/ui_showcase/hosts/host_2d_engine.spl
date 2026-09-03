@@ -28,6 +28,14 @@ fn _composition_target(backend: text) -> text:
         return DRAW_IR_BACKEND_GPU
     DRAW_IR_BACKEND_CPU
 
+fn _composition_has_resolved_font(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        for command in batch.commands:
+            for style in command.computed_style:
+                if style.key == "font-identity" and style.value != "":
+                    return true
+    false
+
 class Screen2dEngineHost:
     var w: i32
     var h: i32
@@ -38,6 +46,7 @@ class Screen2dEngineHost:
     var last_pixels: [u32]
     var last_receipt: text
     var last_rejection: text
+    var host_valid: bool
 
     static fn open(w: i32, h: i32, script: text, backend: text) -> Screen2dEngineHost?:
         val requested = backend.trim().to_lower()
@@ -50,7 +59,8 @@ class Screen2dEngineHost:
         Screen2dEngineHost(
             w: w, h: h, requested_backend: requested, engine: engine,
             queue: screen_2d_parse_script(script), cursor: 0,
-            last_pixels: [], last_receipt: "", last_rejection: "not-rendered"
+            last_pixels: [], last_receipt: "", last_rejection: "not-rendered",
+            host_valid: true
         )
 
     me _reject(reason: text) -> bool:
@@ -60,6 +70,8 @@ class Screen2dEngineHost:
         false
 
     me present_composition(composition: DrawIrComposition) -> bool:
+        if not self.host_valid:
+            return self._reject("engine-resize-rejected")
         val expected_target = _composition_target(self.requested_backend)
         if composition.backend_target != expected_target:
             return self._reject("composition-backend-target-mismatch")
@@ -79,6 +91,9 @@ class Screen2dEngineHost:
             result.readback_source != "device_readback" or
             result.backend_handle <= 0 or result.device_identity <= 0):
             return self._reject("metal-device-readback-required")
+        if _composition_has_resolved_font(composition) and (
+            result.font_identity == "" or result.font_execution_target == ""):
+            return self._reject("resolved-font-execution-required")
         val native_hits_after = engine2d_simd_native_hits()
         if self.requested_backend == "cpu_simd" and native_hits_after <= native_hits_before:
             return self._reject("cpu-simd-native-execution-required")
@@ -87,6 +102,7 @@ class Screen2dEngineHost:
             "renderer={self.requested_backend} source={result.readback_source} " +
             "backend_handle={result.backend_handle} device_identity={result.device_identity} " +
             "checksum={result.readback_checksum} rendered={result.rendered_command_count} " +
+            "font_target={result.font_execution_target} font_identity={result.font_identity} " +
             "native_simd_hits={native_hits_after - native_hits_before} fallback=false"
         )
         self.last_rejection = ""
@@ -106,6 +122,24 @@ impl ScreenHost for Screen2dEngineHost:
             return nil
         val event = self.queue[self.cursor]
         self.cursor = self.cursor + 1
+        match event:
+            HostInputEvent.Resize(resize_w, resize_h):
+                if resize_w > 0 and resize_h > 0:
+                    val replacement = Engine2D.create_with_backend_fast(
+                        resize_w, resize_h, self.requested_backend)
+                    if replacement.backend_name() != self.requested_backend:
+                        replacement.shutdown()
+                        self.host_valid = false
+                    else:
+                        self.engine.shutdown()
+                        self.engine = replacement
+                        self.w = resize_w
+                        self.h = resize_h
+                        self.last_pixels = []
+                        self.last_receipt = ""
+                        self.last_rejection = "not-rendered-after-resize"
+            _:
+                pass
         event
     me shutdown():
         self.cursor = self.queue.len().to_i64()
@@ -125,7 +159,8 @@ fn showcase_run_with_exact_engine_backend(
         frames = frames + 1
         var event = host.poll_input()
         while event != nil:
-            state = showcase_apply(state, event!, w, h)
+            val (event_w, event_h) = host.size()
+            state = showcase_apply(state, event!, event_w, event_h)
             event = host.poll_input()
     showcase_report(state, host.host_name(), frames)
 

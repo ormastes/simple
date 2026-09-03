@@ -111,6 +111,37 @@ class RasterSurface:
         self.pixels[idx] = (4278190080 + r * 65536 + g * 256 + b).to_u32()
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        val alpha = ((color >> 24) & 255u32).to_i32()
+        if alpha == 0:
+            return
+        if alpha == 255:
+            # Clip once, then write contiguous rows. The previous opaque path
+            # paid bounds, clip, alpha, and index branches for every 8K pixel.
+            var x0 = x.to_i64()
+            var y0 = y.to_i64()
+            var x1 = x.to_i64() + w.to_i64()
+            var y1 = y.to_i64() + h.to_i64()
+            if x0 < 0: x0 = 0
+            if y0 < 0: y0 = 0
+            if x0 < self.clip_x.to_i64(): x0 = self.clip_x.to_i64()
+            if y0 < self.clip_y.to_i64(): y0 = self.clip_y.to_i64()
+            if x1 > self.width.to_i64(): x1 = self.width.to_i64()
+            if y1 > self.height.to_i64(): y1 = self.height.to_i64()
+            val clip_x1 = self.clip_x.to_i64() + self.clip_w.to_i64()
+            val clip_y1 = self.clip_y.to_i64() + self.clip_h.to_i64()
+            if x1 > clip_x1: x1 = clip_x1
+            if y1 > clip_y1: y1 = clip_y1
+            var row = y0
+            while row < y1:
+                var index = row * self.width.to_i64() + x0
+                val end = row * self.width.to_i64() + x1
+                while index < end:
+                    self.pixels[index] = color
+                    index = index + 1
+                row = row + 1
+            return
         var yy = y
         val y_end = y + h
         val x_end = x + w
@@ -287,7 +318,7 @@ fn raster_scene_into(surface: RasterSurface, scene: DrawIrV3Scene) -> i64:
                 cur_off_y = 0
                 surface.clear_clip()
             if not draw_ir_v3_has_flag(cmd, DRAW_IR_V3_FLAG_HIDDEN):
-                if cmd.kind == DRAW_IR_V3_KIND_RECT or cmd.kind == DRAW_IR_V3_KIND_EDGE:
+                if cmd.kind == DRAW_IR_V3_KIND_RECT:
                     if cmd.geometry_id != DRAW_IR_V3_NO_ID:
                         _raster_rect(surface, scene, cmd, cur_off_x, cur_off_y)
                         painted = painted + 1
@@ -295,7 +326,7 @@ fn raster_scene_into(surface: RasterSurface, scene: DrawIrV3Scene) -> i64:
                     if cmd.text_run_id != DRAW_IR_V3_NO_ID:
                         _raster_text_run(surface, scene, cmd, cur_off_x, cur_off_y)
                         painted = painted + 1
-                else if cmd.kind == DRAW_IR_V3_KIND_PATH:
+                else if cmd.kind == DRAW_IR_V3_KIND_PATH or cmd.kind == DRAW_IR_V3_KIND_EDGE:
                     if cmd.path_span_id != DRAW_IR_V3_NO_ID:
                         _raster_path(surface, scene, cmd, cur_off_x, cur_off_y)
                         painted = painted + 1
