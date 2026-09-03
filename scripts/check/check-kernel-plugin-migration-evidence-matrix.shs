@@ -6,12 +6,56 @@ ROOT=${KPM_ROOT_DIR:-$REPO_ROOT}
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+blocked() { echo "STATUS: BLOCKED $1" >&2; exit 2; }
+
 require_file() {
     [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] || fail "phase $phase missing regular implementation seam: $1"
 }
 
 require_text() {
     grep -Fq -- "$2" "$ROOT/$1" || fail "phase $phase implementation invariant failed: $2"
+}
+
+phase1_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 1 ABI behavior runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 1 ABI behavior runtime unusable: $runtime"
+    printf '%s\n' "$runtime"
+}
+
+phase1_abi_behavior_probe() {
+    probe_root=$1
+    runtime=$(phase1_runtime)
+    output=${TMPDIR:-/tmp}/kpm-phase1-abi-output.$$
+    if ! (cd "$probe_root" && env SIMPLE_LIB="$probe_root/src" "$runtime" test \
+        test/01_unit/compiler/interface_compat/compile_interface_spec.spl \
+        --mode=interpreter) >"$output" 2>&1; then
+        cat "$output" >&2
+        rm -f "$output"
+        return 1
+    fi
+    rm -f "$output"
+}
+
+phase1_overlay() {
+    source_root=$1
+    overlay_root=$2
+    mkdir -p "$overlay_root"
+    for entry in "$source_root"/* "$source_root"/.[!.]* "$source_root"/..?*; do
+        [ -e "$entry" ] || continue
+        ln -s "$entry" "$overlay_root/$(basename "$entry")"
+    done
+    rm "$overlay_root/src"
+    mkdir "$overlay_root/src"
+    for entry in "$source_root/src"/*; do ln -s "$entry" "$overlay_root/src/$(basename "$entry")"; done
+    rm "$overlay_root/src/compiler"
+    mkdir "$overlay_root/src/compiler"
+    for entry in "$source_root/src/compiler"/*; do ln -s "$entry" "$overlay_root/src/compiler/$(basename "$entry")"; done
+    rm "$overlay_root/src/compiler/20.hir"
+    mkdir "$overlay_root/src/compiler/20.hir"
+    for entry in "$source_root/src/compiler/20.hir"/*; do ln -s "$entry" "$overlay_root/src/compiler/20.hir/$(basename "$entry")"; done
+    rm "$overlay_root/src/compiler/20.hir/abi_interface.spl"
+    cp "$source_root/src/compiler/20.hir/abi_interface.spl" "$overlay_root/src/compiler/20.hir/abi_interface.spl"
 }
 
 probe_phase() {
@@ -30,6 +74,7 @@ probe_phase() {
             require_text "$seam" 'HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"'
             require_text "$seam" 'canon_field("type", self.type_identity(field.type_))'
             require_text "$seam" 'pub fn hir_abi_interface_digest_v1'
+            phase1_abi_behavior_probe "$ROOT"
             ;;
         2)
             seam=src/lib/common/plugin/aspect_params.spl
@@ -139,7 +184,20 @@ selftest() {
     while [ "$current" -le 8 ]; do
         seam=$(phase_seam "$current")
         rm -rf "$tmp/root"; mkdir -p "$tmp/root/$(dirname "$seam")"
-        mutate_phase "$current" < "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+        if [ "$current" -eq 1 ]; then
+            rm -rf "$tmp/root"
+            phase1_overlay "$REPO_ROOT" "$tmp/root"
+            sed '/canon_field("type", self.type_identity(field.type_)),/d' \
+                "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 1 field-type mutation did not change ABI implementation'
+            if phase1_abi_behavior_probe "$tmp/root" >/dev/null 2>&1; then
+                fail 'phase 1 field-type mutation was accepted by ABI behavior probe'
+            fi
+            current=$((current + 1))
+            continue
+        else
+            mutate_phase "$current" < "$REPO_ROOT/$seam" > "$tmp/root/$seam"
+        fi
         if KPM_ROOT_DIR="$tmp/root" "$0" --phase "$current" >/dev/null 2>&1; then
             fail "phase $current implementation/input mutation was accepted"
         fi
