@@ -11,11 +11,12 @@ use os.smf.provider_loader.{
     PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
     ProviderAdmissionRequestV1, ProviderCallableEvidenceV1,
     ProviderAdmissionResultV1, ProviderDynamicAdmissionV1,
-    ProviderLoaderSessionV1, ProviderSessionQueryV1,
+    ProviderLoaderSessionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1,
     provider_admit_evidence_v1, provider_admit_dynamic_v1,
     provider_session_query_v1, provider_session_release_v1,
     provider_session_close_v1
 }
+use os.posix.dynlib_sffi.{ProviderQueryCallV1}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1
 }
@@ -82,6 +83,33 @@ pub class KpfSmfNativeSessionV1:
     generation_pin: KpfPinHandle
     var pinned: bool
     var open: bool
+
+impl KpfSmfNativeSessionV1:
+    pub fn invoke_cli(command: text, args: [text], operation: u32,
+            output_capacity: u32) -> ProviderSessionCliInvokeV1:
+        val result = SimpleProviderQueryResultV1(
+            status: SIMPLE_PROVIDER_OK,
+            provided_major: self.receipt.interface_major,
+            provided_minor: self.receipt.interface_minor,
+            descriptor_size: 60,
+            interface_handle: self.receipt.operation_table.interface_handle,
+            provider_context: self.receipt.operation_table.provider_context,
+            provider_identity_digest: 0,
+            implementation_digest: 0,
+            abi_digest: self.receipt.abi_digest)
+        val query_status = if self.open and self.pinned: PROVIDER_SESSION_OK else: 1
+        val call_status = if self.receipt.admitted: SIMPLE_PROVIDER_OK else: -1
+        val query = ProviderSessionQueryV1(
+            status: query_status,
+            pin_id: self.provider_pin_id,
+            call: ProviderQueryCallV1(
+                ok: self.receipt.admitted,
+                call_status: call_status,
+                result: result,
+                diagnostic: self.receipt.reason),
+            reason: self.receipt.reason)
+        provider_session_invoke_cli_v1(
+            self.loader, query, command, args, operation, output_capacity)
 
 pub struct KpfSmfNativeAdmissionV1:
     receipt: KpfSmfAdmissionReceiptV1
