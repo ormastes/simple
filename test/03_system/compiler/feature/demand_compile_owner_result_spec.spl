@@ -7,6 +7,17 @@ use compiler.driver.action_graph.coordinator.{
     coordinator_claim_v1, coordinator_complete_v1, coordinator_new_v1
 }
 use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
+use compiler.driver.action_graph.demand_compile_integration.{
+    demand_compile_begin_v1, demand_compile_complete_scc_outputs_v1
+}
+use compiler.driver.action_graph.scc_compile_outputs.{SccCompileOutputsV1}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, ForegroundBackendBudgetV1,
+    PrecompiledPlatformIdentityV1
+}
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
+use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
+use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
 
 fn action(action_id: text, dependencies: [text], memory: i64) -> BuildActionV1:
     BuildActionV1(
@@ -19,6 +30,42 @@ fn coordinator(actions: [BuildActionV1], max_running: i64, memory: i64) -> Build
         [BuildPoolBudgetV1(BuildActionPoolV1.semantic, max_running, memory)])
 
 describe "Demand compile owner-result completion":
+    it "should return the execution owner when SCC publication is rejected":
+        step("Create a valid demand execution owner")
+        val execution = demand_compile_begin_v1(
+            PackageIndexRouteV1(true, "ok", [], [], [], []),
+            DemandBackendIdentityV1(
+                "revision", "tree", "inventory", "semantic", "host", "variant",
+                PrecompiledPlatformIdentityV1(
+                    "runtime-action", "runtime-abi", "std-action", "std-abi")),
+            ForegroundBackendBudgetV1(1, 64, 1000, false),
+            true, false, false, 7)
+        expect(execution.valid).to_equal(true)
+        expect(execution.coordinator == nil).to_equal(false)
+        val baseline_action_id = execution.baseline_action_id
+        step("Reject an empty SCC publication through the owned transfer")
+        val rejected = demand_compile_complete_scc_outputs_v1(
+            execution, "/tmp/cache",
+            PackageArchiveAuthorityV1(
+                "producer", "generation", "variant", "revision", "tree", "inventory"),
+            MirAdmissionV1(1, "revision", "tree", "inventory", "closure", "deps", 0),
+            SccCompileOutputsV1("scc", [], []), "artifact", "digest")
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.reason).to_equal("publication-input-invalid")
+        expect(rejected.execution.valid).to_equal(true)
+        expect(rejected.execution.coordinator == nil).to_equal(false)
+        expect(rejected.execution.baseline_action_id).to_equal(baseline_action_id)
+        expect(rejected.execution.build_ordinal).to_equal(7)
+        step("Consume the returned owner again without aliasing")
+        val retried = demand_compile_complete_scc_outputs_v1(
+            rejected.execution, "/tmp/cache",
+            PackageArchiveAuthorityV1(
+                "producer", "generation", "variant", "revision", "tree", "inventory"),
+            MirAdmissionV1(1, "revision", "tree", "inventory", "closure", "deps", 0),
+            SccCompileOutputsV1("scc", [], []), "artifact", "digest")
+        expect(retried.reason).to_equal("publication-input-invalid")
+        expect(retried.execution.baseline_action_id).to_equal(baseline_action_id)
+
     it "should preserve a running reservation and its owner after validation failure":
         step("Claim an action for its original owner")
         val claimed = coordinator_claim_v1(

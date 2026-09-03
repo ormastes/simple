@@ -57,6 +57,11 @@ struct DemandCompileFinalizeV1:
     execution: DemandCompileExecutionV1
     accepted: bool
 
+struct DemandCompileSccCompletionV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
+    reason: text
+
 fn demand_archive_action_id_v1(package_identity: text) -> text:
     "archive:{package_identity}"
 
@@ -251,45 +256,49 @@ fn demand_compile_diagnostics_v1(execution: DemandCompileExecutionV1) -> [text]:
     result
 
 fn demand_compile_complete_scc_outputs_v1(
-    execution: &mut DemandCompileExecutionV1, cache_root: text,
+    execution: DemandCompileExecutionV1, cache_root: text,
     authority: PackageArchiveAuthorityV1,
     admission: MirAdmissionV1,
     outputs: SccCompileOutputsV1,
     baseline_artifact_identity: text,
     baseline_artifact_digest: text
-) -> bool:
+) -> DemandCompileSccCompletionV1:
     val started_ns = demand_compile_counter_now_ns_v1()
-    if not execution.valid or execution.coordinator == nil or
+    var owned = execution
+    if not owned.valid or owned.coordinator == nil or
             cache_root == "" or outputs.modules.len() == 0:
-        return false
+        return DemandCompileSccCompletionV1(
+            owned, false, "publication-input-invalid")
     if (admission.snapshot_revision != authority.scv_revision_id or
             admission.snapshot_tree_digest != authority.scv_tree_id or
             admission.snapshot_inventory_digest != authority.inventory_digest or
             admission.demand_closure_digest == "" or
             admission.dependency_set_digest == ""):
-        return false
+        return DemandCompileSccCompletionV1(
+            owned, false, "publication-authority-mismatch")
     for output in outputs.modules:
         val action_id = output.compiler_action_identity
         var completed = false
-        for runtime in execution.coordinator!.runtime:
+        for runtime in owned.coordinator!.runtime:
             if runtime.action_id == action_id and runtime.result != nil and
                     runtime.result!.success:
                 completed = true
         if not completed:
-            return false
+            return DemandCompileSccCompletionV1(
+                owned, false, "compiler-action-incomplete")
     val published = scc_compile_outputs_publish_v1(
         cache_root, authority, outputs, admission.dependency_set_digest,
         baseline_artifact_identity, baseline_artifact_digest)
     if published.is_ok():
-        var counters = execution.counters
+        var counters = owned.counters
         _ = demand_compile_counter_add_phase_v1(
             &mut counters, "link", started_ns)
-        execution.counters = counters
-        return true
-    false
+        owned.counters = counters
+        return DemandCompileSccCompletionV1(owned, true, "ok")
+    DemandCompileSccCompletionV1(owned, false, "publication-rejected")
 
 export DemandCompileExecutionV1, DemandCompileCompletionV1
-export DemandCompileFinalizeV1
+export DemandCompileFinalizeV1, DemandCompileSccCompletionV1
 export demand_archive_action_id_v1, demand_source_action_id_v1
 export demand_compile_begin_v1, demand_compile_complete_action_v1
 export demand_compile_bind_mir_admission_v1
