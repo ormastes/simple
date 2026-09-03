@@ -256,7 +256,7 @@ async function main() {
       y: 60,
       width: 320,
       height: 220,
-      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
+      html: '<div id="font-proof" style="display:inline-block;font-family:SimplePinnedMono,monospace;font-size:16px;line-height:20px;color:#111827">${receipt.text}</div><div id="scroll-panel" data-canonical-id="win1#scroll-panel" style="height:48px;overflow-y:scroll"><div style="height:160px">Scrollable panel</div></div><input id="field" data-canonical-id="win1#field" value=""><button id="ok" data-canonical-id="win1#ok">OK</button>'
     });
     await new Promise((resolve, reject) => {
       const startedAt = Date.now();
@@ -408,6 +408,19 @@ async function main() {
     const bodyButton = eventTarget('#ok');
     dispatch(bodyButton, 'pointerdown', { clientX: 80, clientY: 122 });
     dispatch(bodyButton, 'pointerup', { clientX: 80, clientY: 122 });
+    const scrollPanel = eventTarget('#scroll-panel');
+    let scrollEventCount = 0;
+    scrollPanel.addEventListener('scroll', () => { scrollEventCount += 1; });
+    const scrollPanelBefore = scrollPanel.scrollTop;
+    scrollPanel.scrollTop = 40;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const scrollPanelStyle = getComputedStyle(scrollPanel);
+    out.scroll_panel_overflow_y = scrollPanelStyle.overflowY;
+    out.scroll_panel_client_height = scrollPanel.clientHeight;
+    out.scroll_panel_scroll_height = scrollPanel.scrollHeight;
+    out.scroll_panel_before = scrollPanelBefore;
+    out.scroll_panel_after = scrollPanel.scrollTop;
+    out.scroll_panel_event_count = scrollEventCount;
     if (performanceNowAvailable && animationFrameAvailable) {
       await new Promise(resolve => requestAnimationFrame(resolve));
       inputToPaintMs = Math.max(0, window.performance.now() - interactionStart);
@@ -466,6 +479,11 @@ async function main() {
       out.text_input_count >= 1 &&
       out.pointer_down_count >= 1 &&
       out.pointer_up_count >= 1 &&
+      out.scroll_panel_overflow_y === 'scroll' &&
+      out.scroll_panel_scroll_height > out.scroll_panel_client_height &&
+      out.scroll_panel_before === 0 &&
+      out.scroll_panel_after === 40 &&
+      out.scroll_panel_event_count >= 1 &&
       out.performance_now_available === true &&
       out.performance_now_delta_ms >= 0 &&
       out.input_to_paint_ms > 0 &&

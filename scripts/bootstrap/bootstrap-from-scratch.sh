@@ -1575,6 +1575,7 @@ bootstrap_native_build_main() {
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
@@ -2629,6 +2630,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
       stage2_rejected_receipt="${stage2_rejected_dir}/rejection.env"
       mkdir -p "${stage2_rejected_dir}"
+      # A previous rejection left both artifacts chmod 400/0500, so `mv` onto the
+      # binary and `>` onto the receipt both fail with "Permission denied" and the
+      # run silently keeps the PREVIOUS run's rejection.env -- a stale receipt that
+      # reads as authoritative. Clear them first so every run records truthfully.
+      rm -f "${stage2_rejected_bin}" "${stage2_rejected_receipt}"
       mv "${stage2_bin}" "${stage2_rejected_bin}"
       chmod 400 "${stage2_rejected_bin}"
       {
@@ -2820,6 +2826,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=0 \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=0 \

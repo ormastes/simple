@@ -64,6 +64,12 @@ var mir_lower_type_probe_state: i64 = -1
 # pathological run cannot flood the log.
 var mir_lower_type_probe_seq: i64 = 0
 
+# Bound for the E-MIR-TYPE-ZeroKind RAISE-SITE probe (see
+# `unreachable_hir_type_kind`). The probe only fires in the ZeroKind branch, so
+# it is already bounded by the fatal count (2-6 per Stage-3 run), but a cap is
+# cheap insurance against a run that raises far more than observed.
+var mir_zerokind_raise_probe_seq: i64 = 0
+
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
@@ -239,14 +245,55 @@ impl MirLowering:
                 # A previous "diagnostic-only" round that read five extra
                 # fields off `.span` was NOT behaviour-neutral (see :1112), so
                 # this stays minimal and default-off.
-                # SCOPED to the suspect functions. An unscoped probe printed one
-                # line per parameter per function across all 760 modules and drove
-                # RSS to 10 GB in 3 minutes on a host whose swap is already
-                # committed -- it would have OOM-killed the run and taught us
-                # nothing. Only the ZeroKind victims matter here.
-                if _mir_tag_probe_enabled() and fn_.name.contains("compile_specialized_template"):
-                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_)
-                    eprint("[mir-tag-probe] fn={fn_.name} param={pmi} caller_disc={probe_disc}")
+                # SCOPE BY THE ANOMALY, NOT BY A NAME (2026-09-03). The filter
+                # here used to be `fn_.name.contains("compile_specialized_
+                # template")`, i.e. scoped by the name the ZeroKind fatal
+                # reports. Lines 1144-1150 of THIS SAME FILE document that name
+                # as a fixed TAIL LABEL of an installed `current_function_names`
+                # array -- never pushed/popped, identical for every fatal raised
+                # while that list is installed, and explicitly "NOT the function
+                # being lowered". So the one remaining experiment was scoped by
+                # a label its own file declares carries no victim information:
+                # it can only fire if the producer happens to sit inside one of
+                # the three `compile_specialized_template*` wrappers, which is
+                # precisely the reading runs B-F of
+                # zerokind_roams_between_victims_avoidance_edits_are_not_fixes
+                # _2026-09-02.md refuted five times over.
+                #
+                # The real constraint the old scoping was solving is OUTPUT
+                # VOLUME: an unscoped probe printed one line per parameter per
+                # function across all 760 modules and drove RSS to 10 GB in 3
+                # minutes. Filtering on the DISCRIMINANT instead of on a name
+                # keeps that bound and drops the false premise -- the probe now
+                # reads every parameter (a cheap SFFI discriminant, no output)
+                # and prints only when the caller side is ALREADY anomalous.
+                # `_sffi_hir_type_discriminant` returns -1 for a non-enum
+                # argument, which is exactly what a raw-0 (never-written) or nil
+                # `kind` produces, so the print count is bounded by the number of
+                # ZeroKind/NilType fatals (2 in the current Stage-3 run), not by
+                # 760 modules. Still default-off behind SIMPLE_MIR_TAG_PROBE=1.
+                #
+                # ARGUMENT FIX, same date and load-bearing for the above.
+                # `_sffi_hir_type_discriminant` is `rt_enum_discriminant(value)`
+                # (:46-49) -- it discriminates its OWN ARGUMENT, so it answers -1
+                # for anything that is not an enum. The probe used to pass
+                # `fn_.params[pmi].type_`, a HirType STRUCT, which is never an
+                # enum: that call returned -1 unconditionally and carried no
+                # information at all, in addition to being scoped by a
+                # meaningless name. Pass `.kind` -- the enum -- mirroring the two
+                # existing correct uses, :1189 (`type_.kind`) and :735 (`kind`).
+                # Without this the anomaly filter below would match every
+                # parameter of every function and reproduce the exact 10 GB
+                # output flood the old name filter existed to prevent.
+                # `.kind` is the SAME field `lower_type` is about to read and
+                # round 1 proved safe to touch; `fn_.name` and
+                # `fn_.params[pmi].name` belong to HirFunction/HirParam, not to
+                # the suspect HirType, so the :1112 round-2 hazard (reading
+                # further fields OFF THE CORRUPT OBJECT) is not reintroduced.
+                if _mir_tag_probe_enabled():
+                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_.kind)
+                    if probe_disc == -1:
+                        eprint("[mir-tag-probe] ZERO-OR-NIL-KIND AT CALLER module={self.current_module_id} fn={fn_.name} param={pmi} param_name={fn_.params[pmi].name} caller_disc={probe_disc}")
                 self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
@@ -1173,6 +1220,73 @@ impl MirLowering:
         # actually has two opposite fixes (repair the producer that left kind
         # unwritten vs add a lower_type arm for a real variant).
         if type_.kind == 0:
+            # RAISE-SITE PROBE (2026-09-03, OFF unless SIMPLE_MIR_TAG_PROBE=1).
+            #
+            # WHY HERE. Every crossing-side probe sees only its own crossing;
+            # the raise site sees EVERY producer. The param-crossing probe at
+            # :287 reported ZERO lines across a run that raised this fatal, so
+            # the producer is not on that path and a further crossing probe
+            # would be another 65-minute guess. This one cannot miss.
+            #
+            # WHY THE SCOPE-TAIL LABEL IS NOT ENOUGH. `fn_ctx` above is a fixed
+            # tail of a whole-array-assigned `current_function_names` (see the
+            # comment at the top of this method): identical for every fatal in a
+            # module, so it localises nothing. `type_.span` is the real source
+            # location and is the field this probe exists to recover.
+            #
+            # SAFETY, and why this does not repeat the round-2 failure
+            # documented at the bottom of this method. Round 2 dereferenced
+            # `.span`'s subfields UNGUARDED and UNGATED on the default path, and
+            # the worker died silently. Three changes make this different:
+            #   1. It is behind `_mir_tag_probe_enabled()` -- default-off, so a
+            #      normal run is byte-for-byte unchanged and cannot regress.
+            #   2. `zk_span` is guarded by BOTH `== nil` AND `== 0` before any
+            #      subfield read. The nil sentinel here is raw 3, so a ZEROED
+            #      slot passes `== nil`; the `or ... == 0` half is the in-repo
+            #      idiom from `copy_local_hir_type_metadata`
+            #      (mir_lowering_types.spl:595) for exactly this raw-0 class.
+            #      Round 2 had no such guard.
+            #   3. The emit is STAGED into two lines. Line A reads nothing off
+            #      `type_` beyond `kind` (round 1 proved that safe) and is
+            #      written BEFORE any span deref, so even if line B were to kill
+            #      the worker, line A survives and still names the module.
+            #
+            # THE GUARD RESULT IS ITSELF EVIDENCE. `spanzero=true` means the
+            # whole HirType came from a zeroed block (the producer allocated and
+            # never wrote it); `spanzero=false` plus a real file:line:col in line
+            # B is the producing construct's source address, which is the one
+            # thing no previous run has printed.
+            #
+            # Additive only: both `error_fatal` calls in this method are
+            # untouched, and nothing outside this `if` is decorated.
+            if _mir_tag_probe_enabled() and mir_zerokind_raise_probe_seq < 16:
+                mir_zerokind_raise_probe_seq = mir_zerokind_raise_probe_seq + 1
+                val zk_span = type_.span
+                val zk_span_nil = zk_span == nil
+                val zk_span_zero = zk_span == 0
+                eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} module={self.current_module_id} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil} spannil={zk_span_nil} spanzero={zk_span_zero} scope_hint={fn_ctx}\n")
+                # The `else` branch here USED to deref zk_span.file/.line/.col.
+                # It was removed 2026-09-03 after a live run proved it repeats
+                # the exact mistake the "Round 2 REVERTED" comment below already
+                # documents: this object is corrupt (disc=-1, kind not an enum),
+                # so NO further field of it is a safe read -- including span's,
+                # even though span passes both `== nil` and `== 0`.
+                #
+                # Measured: with the deref in place the probe emitted line A
+                # twice and line B ZERO times (0 occurrences of `at=` in an
+                # 8,924,312-byte log AND in the 492,027-byte full stderr), while
+                # the run continued and exited normally. The print was silently
+                # swallowed mid-eprint.
+                #
+                # That silent swallow IS the finding, so it is reported rather
+                # than retried: a span that is neither nil nor zero yet cannot be
+                # dereferenced is a dangling read, which means the whole HirType
+                # is a corrupt aggregate -- NOT a producer that merely forgot to
+                # write `kind`.
+                if zk_span_nil or zk_span_zero:
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=zeroed-or-nil -- producer never wrote span either\n")
+                else:
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=non-nil-non-zero-but-UNDEREFERENCEABLE -- corrupt aggregate, not an unset field (see comment; do not re-add the deref)\n")
             self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type", nil)
             return MirType.i64()
         # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
