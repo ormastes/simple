@@ -5,7 +5,10 @@
 
 use std.spec.step
 use tool.kernel_plugin_schema.compiler.{compile_kpf_schema}
+use tool.kernel_plugin_schema.compatibility.{check_kpf_compatibility}
 use tool.kernel_plugin_schema.generate_c.{generate_c_header}
+use tool.kernel_plugin_schema.generate_cpp.{generate_cpp_schema_header}
+use tool.kernel_plugin_schema.generate_rust.{generate_rust_schema_module}
 
 fn schema_ab() -> text:
     """package: example.echo
@@ -68,6 +71,62 @@ describe "KPF schema compiler":
         expect(first.interfaces[1].required_operation_mask).to_equal(2)
         expect(first.interfaces[1].interface_id.len()).to_equal(32)
 
+    it "generates deterministic matching Rust and C++ schema projections":
+        step("generate Rust and C++ outputs from reordered equivalent schemas")
+        val package_ir = compile_kpf_schema(schema_ab()).unwrap()
+        val rust_first = generate_rust_schema_module(package_ir)
+        val rust_second = generate_rust_schema_module(compile_kpf_schema(schema_ba()).unwrap())
+        val cpp_first = generate_cpp_schema_header(package_ir)
+        val cpp_second = generate_cpp_schema_header(compile_kpf_schema(schema_ba()).unwrap())
+        expect(rust_first).to_equal(rust_second)
+        expect(cpp_first).to_equal(cpp_second)
+        expect(rust_first).to_contain("pub const OPERATION_poll_SLOT: u32 = 0")
+        expect(rust_first).to_contain("pub const OPERATION_submit_SLOT: u32 = 1")
+        expect(cpp_first).to_contain("inline constexpr std::uint32_t operation_poll_slot = 0")
+        expect(cpp_first).to_contain("inline constexpr std::uint64_t required_operation_mask = 2ULL")
+
+    it "accepts append-only optional operations and rejects breaking evolution":
+        step("compare canonical schema revisions")
+        val previous = compile_kpf_schema(schema_ab()).unwrap()
+        val appended = compile_kpf_schema("""package: example.echo
+version: 1.1
+interfaces:
+  - name: Query
+    major: 1
+    operations:
+      - name: poll
+        required: false
+      - name: submit
+        required: true
+      - name: trace
+        required: false
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+""").unwrap()
+        val breaking = compile_kpf_schema("""package: example.echo
+version: 2.0
+interfaces:
+  - name: Query
+    major: 1
+    operations:
+      - name: poll
+        required: true
+      - name: submit
+        required: true
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+""").unwrap()
+        expect(check_kpf_compatibility(previous, appended).compatible).to_be(true)
+        val result = check_kpf_compatibility(previous, breaking)
+        expect(result.compatible).to_be(false)
+        expect(result.summary).to_contain("optional operation Query.poll became required")
+
     it "rejects duplicate interface names":
         step("compile a schema with duplicate interface names")
         val result = compile_kpf_schema("""package: duplicate.interfaces
@@ -115,6 +174,20 @@ interfaces:
 """)
         expect(result.is_err()).to_be(true)
         expect(result.unwrap_err()).to_contain("missing required interface Echo operation run.required")
+
+    it "rejects names that cannot produce portable SDK identifiers":
+        step("compile an interface with punctuation in an operation name")
+        val result = compile_kpf_schema("""package: invalid.identifiers
+version: 1
+interfaces:
+  - name: Echo
+    major: 1
+    operations:
+      - name: run-now
+        required: true
+""")
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("must use ASCII letters, digits, or underscore")
 
     it "rejects duplicate SDN keys rather than accepting last-wins input":
         step("compile a schema containing a duplicate package key")
