@@ -1,0 +1,25 @@
+use os.tooling.rust_analyzer_worker.json_ingest.{ingest_rust_json_lines}
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustSuggestionApplicability}
+
+describe "Rust lint worker structured ingestion":
+    it "normalizes compiler diagnostics and machine-applicable suggestions":
+        val input = "{\"reason\":\"compiler-message\",\"message\":\"unused variable\",\"code\":\"unused_variables\",\"level\":\"warning\",\"file_name\":\"src/lib.rs\",\"byte_start\":4,\"byte_end\":8,\"line_start\":1,\"line_end\":1,\"column_start\":5,\"column_end\":9,\"suggested_replacement\":\"_name\",\"suggestion_applicability\":\"MachineApplicable\"}"
+        val page = ingest_rust_json_lines(input, 4096, 8)
+        expect(page.state).to_equal(RustAnalysisState.Complete)
+        expect(page.diagnostics.len()).to_equal(1)
+        expect(page.diagnostics[0].span.file_name).to_equal("src/lib.rs")
+        expect(page.diagnostics[0].suggestions[0].applicability).to_equal(RustSuggestionApplicability.MachineApplicable)
+
+    it "marks malformed records partial rather than clean":
+        val page = ingest_rust_json_lines("not-json", 4096, 8)
+        expect(page.state).to_equal(RustAnalysisState.Partial)
+        expect(page.malformed_record_count).to_equal(1)
+
+    it "bounds bytes and diagnostic count":
+        val record = "{\"level\":\"warning\",\"message\":\"m\",\"file_name\":\"x.rs\"}"
+        val byte_limited = ingest_rust_json_lines(record, 4, 8)
+        expect(byte_limited.truncated).to_equal(true)
+        expect(byte_limited.state).to_equal(RustAnalysisState.Partial)
+        val count_limited = ingest_rust_json_lines(record + "\n" + record, 4096, 1)
+        expect(count_limited.diagnostics.len()).to_equal(1)
+        expect(count_limited.truncated).to_equal(true)

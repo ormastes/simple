@@ -1,0 +1,101 @@
+use os.tooling.rust_analyzer_worker.model.{RustAnalysisState, RustSuggestionApplicability, RustSpanV1, RustSuggestionV1, RustDiagnosticV1}
+
+pub struct RustJsonPageV1:
+    state: RustAnalysisState
+    diagnostics: [RustDiagnosticV1]
+    malformed_record_count: u32
+    truncated: bool
+
+fn json_field(record: text, name: text) -> text:
+    val marker = "\"" + name + "\""
+    val marker_index = record.find(marker)
+    if marker_index < 0: return ""
+    var index = marker_index + marker.len()
+    while index < record.len() and record.substring(index, index + 1) != ":": index = index + 1
+    if index >= record.len(): return ""
+    index = index + 1
+    while index < record.len() and (record.substring(index, index + 1) == " " or record.substring(index, index + 1) == "\t"): index = index + 1
+    if index >= record.len(): return ""
+    if record.substring(index, index + 1) == "\"":
+        index = index + 1
+        var output = ""
+        var escaped = false
+        while index < record.len():
+            val ch = record.substring(index, index + 1)
+            if escaped:
+                if ch == "n": output = output + "\n"
+                elif ch == "t": output = output + "\t"
+                else: output = output + ch
+                escaped = false
+            elif ch == "\\": escaped = true
+            elif ch == "\"": return output
+            else: output = output + ch
+            index = index + 1
+        return ""
+    var end = index
+    while end < record.len() and not ",}] \t\r\n".contains(record.substring(end, end + 1)): end = end + 1
+    record.substring(index, end)
+
+fn to_u64(value: text) -> u64:
+    if value == "": return 0
+    var number: u64 = 0
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return 0
+        number = number * 10 + (code - 48).to_u64()
+        index = index + 1
+    number
+
+fn applicability(value: text) -> RustSuggestionApplicability:
+    if value == "MachineApplicable": return RustSuggestionApplicability.MachineApplicable
+    if value == "MaybeIncorrect": return RustSuggestionApplicability.MaybeIncorrect
+    if value == "HasPlaceholders": return RustSuggestionApplicability.HasPlaceholders
+    RustSuggestionApplicability.Unspecified
+
+fn parse_diagnostic(record: text) -> Option<RustDiagnosticV1>:
+    val message = json_field(record, "message")
+    val level = json_field(record, "level")
+    val file_name = json_field(record, "file_name")
+    if message == "" or level == "" or file_name == "": return nil
+    val span = RustSpanV1(
+        file_name: file_name,
+        byte_start: to_u64(json_field(record, "byte_start")),
+        byte_end: to_u64(json_field(record, "byte_end")),
+        line_start: to_u64(json_field(record, "line_start")).to_u32(),
+        line_end: to_u64(json_field(record, "line_end")).to_u32(),
+        column_start: to_u64(json_field(record, "column_start")).to_u32(),
+        column_end: to_u64(json_field(record, "column_end")).to_u32()
+    )
+    var suggestions: [RustSuggestionV1] = []
+    val replacement = json_field(record, "suggested_replacement")
+    if replacement != "":
+        suggestions.push(RustSuggestionV1(replacement: replacement, applicability: applicability(json_field(record, "suggestion_applicability")), span: span))
+    Some(RustDiagnosticV1(code: json_field(record, "code"), level: level, message: message, span: span, suggestions: suggestions))
+
+pub fn ingest_rust_json_lines(output: text, maximum_bytes: u64, maximum_diagnostics: u32) -> RustJsonPageV1:
+    var page = RustJsonPageV1(state: RustAnalysisState.Complete, diagnostics: [], malformed_record_count: 0, truncated: false)
+    if output.len().to_u64() > maximum_bytes:
+        page.state = RustAnalysisState.Partial
+        page.truncated = true
+        return page
+    for line in output.split("\n"):
+        val record = line.trim()
+        if record == "": continue
+        if not record.starts_with("{") or not record.ends_with("}"):
+            page.malformed_record_count = page.malformed_record_count + 1
+            page.state = RustAnalysisState.Partial
+            continue
+        if not record.contains("\"reason\":\"compiler-message\"") and not record.contains("\"level\""):
+            continue
+        match parse_diagnostic(record):
+            Some(diagnostic):
+                if page.diagnostics.len() >= maximum_diagnostics:
+                    page.state = RustAnalysisState.Partial
+                    page.truncated = true
+                else:
+                    page.diagnostics.push(diagnostic)
+            nil:
+                page.malformed_record_count = page.malformed_record_count + 1
+                page.state = RustAnalysisState.Partial
+    page
