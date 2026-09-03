@@ -52,6 +52,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_readback_u32_into,
+    vulkan_sffi_copy_u32_into,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
@@ -1499,10 +1500,14 @@ impl RenderBackend for VulkanBackend:
                 device_identity: self.session.device,
                 pixel_count: pixels.len().to_i64(), checksum: checksum)
         var copy: [u32] = [0u32; self.w * self.h]
-        var i = 0
-        while i < self.w * self.h:
-            copy[i] = self.host_buf[i]
-            i = i + 1
+        # One native slot memcpy instead of an interpreted per-pixel loop. The
+        # loop was ~482 ms per 7680x4320 frame — more than half the frame, and
+        # ~100x the GPU transfer it accompanies. The facade falls back to the
+        # element loop itself when the native ABI is unavailable, so this stays
+        # correct on every lane; a failure here is a hard failure, never a
+        # partially-written destination.
+        if not vulkan_sffi_copy_u32_into(copy, self.host_buf, self.w * self.h):
+            return engine2d_readback([], "readback_failed")
         if self.cpu_fallback_used:
             engine2d_readback(copy, "cpu_fallback")
         else:
