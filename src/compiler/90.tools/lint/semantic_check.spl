@@ -1,0 +1,114 @@
+use common.kernel_plugin.ids.{kpf_digest256_zero}
+use common.lint_kernel.model.{AnalysisCoverageV1, LintRunResultV1, LintVerdict, lint_run_result}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.semantics.resolve.{resolve_methods}
+
+pub enum SimpleCheckCoverage:
+    SyntaxOnly
+    Semantic
+
+pub struct SimpleSemanticCheckResult:
+    coverage: SimpleCheckCoverage
+    proof: LintRunResultV1
+    diagnostics: [text]
+
+fn _check_proof(
+    coverage_mode: SimpleCheckCoverage,
+    syntax_complete: bool,
+    semantic_complete: bool,
+    diagnostic_count: u32,
+    infrastructure_failed: bool = false
+) -> LintRunResultV1:
+    val semantic_requested = coverage_mode == SimpleCheckCoverage.Semantic
+    val requested_rule_count: u32 = if semantic_requested: 2 else: 1
+    val completed_rule_count: u32 = if not syntax_complete:
+        0
+    elif semantic_requested and not semantic_complete:
+        1
+    else:
+        requested_rule_count
+    val requested_phase_bits: u64 = if semantic_requested: 3 else: 1
+    val completed_phase_bits: u64 = if not syntax_complete:
+        0
+    elif semantic_requested and not semantic_complete:
+        1
+    else:
+        requested_phase_bits
+    val completed_units: u32 = if syntax_complete and (not semantic_requested or semantic_complete): 1 else: 0
+    val partial_units: u32 = if syntax_complete and semantic_requested and not semantic_complete: 1 else: 0
+    val coverage = AnalysisCoverageV1(
+        requested_unit_count: 1,
+        admitted_unit_count: 1,
+        completed_unit_count: completed_units,
+        partial_unit_count: partial_units,
+        not_analyzed_unit_count: 0,
+        requested_rule_count: requested_rule_count,
+        completed_rule_count: completed_rule_count,
+        skipped_rule_count: requested_rule_count - completed_rule_count,
+        requested_phase_bits: requested_phase_bits,
+        completed_phase_bits: completed_phase_bits,
+        provider_receipt_digest: kpf_digest256_zero(),
+        input_revision_digest: kpf_digest256_zero())
+    lint_run_result(
+        coverage,
+        diagnostic_count,
+        diagnostic_count,
+        0,
+        false,
+        infrastructure_failed)
+
+pub fn simple_syntax_check_result(diagnostic_count: u32) -> SimpleSemanticCheckResult:
+    SimpleSemanticCheckResult(
+        coverage: SimpleCheckCoverage.SyntaxOnly,
+        proof: _check_proof(SimpleCheckCoverage.SyntaxOnly, diagnostic_count == 0, false, diagnostic_count),
+        diagnostics: [])
+
+pub fn simple_semantic_check_source(source: text, path: text) -> SimpleSemanticCheckResult:
+    val parsed = parse_and_build_module(source, path)
+    var lowering = HirLowering.with_filename(path)
+    val hir = lowering.lower_module(parsed)
+    var diagnostics: [text] = []
+    for message in lowering.diagnostic_messages:
+        diagnostics.push("HIR lowering: {message}")
+    if lowering.errors.len() > diagnostics.len():
+        diagnostics.push("HIR lowering failed with {lowering.errors.len()} error(s)")
+
+    if diagnostics.len() == 0:
+        var inference = HmInferContext.with_builtins()
+        inference.infer_module(hir)
+        for error in inference.errors:
+            diagnostics.push("{path}:{error.span().line}:{error.span().col}: error[semantic]: {error.message()}")
+
+        val (_, resolution_errors) = resolve_methods(hir)
+        for error in resolution_errors:
+            diagnostics.push("{path}: error[semantic]: {error.message}")
+
+    SimpleSemanticCheckResult(
+        coverage: SimpleCheckCoverage.Semantic,
+        proof: _check_proof(
+            SimpleCheckCoverage.Semantic,
+            true,
+            true,
+            diagnostics.len() as u32),
+        diagnostics: diagnostics)
+
+pub fn simple_check_coverage_name(coverage: SimpleCheckCoverage) -> text:
+    match coverage:
+        case SyntaxOnly: "syntax-only"
+        case Semantic: "semantic"
+
+pub fn simple_check_verdict_name(result: LintRunResultV1) -> text:
+    match result.verdict:
+        case CompleteClean: "clean"
+        case CompleteWithFindings: "findings"
+        case Partial: "partial"
+        case NotAnalyzed: "not-analyzed"
+        case Cancelled: "cancelled"
+        case Failed: "failed"
+
+pub fn simple_check_is_clean(result: SimpleSemanticCheckResult) -> bool:
+    result.proof.verdict == LintVerdict.CompleteClean
