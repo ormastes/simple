@@ -1,0 +1,71 @@
+use std.spec.*
+use compiler.driver.cache.shared_generation_store.{
+    shared_generation_publish_v1, shared_generation_publish_fault_v1,
+    shared_generation_pin_current_v1,
+    shared_generation_release_v1, shared_generation_gc_v1
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+describe "MBH-NFR-006 shared publication lifecycle":
+    it "pins a reader across publication and deterministic bounded GC":
+        val root = "/tmp/simple-shared-generation-lifecycle-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val first = shared_generation_publish_v1(root, "", 1, "payload-one")
+        expect(first.len()).to_equal(64)
+        val reader = shared_generation_pin_current_v1(root, "reader-1")
+        expect(reader.valid).to_equal(true)
+        expect(reader.payload).to_equal("payload-one")
+        val second = shared_generation_publish_v1(root, first, 2, "payload-two")
+        expect(second.len()).to_equal(64)
+        val pinned_gc = shared_generation_gc_v1(root, 1, 1)
+        expect(pinned_gc.valid).to_equal(true)
+        expect(pinned_gc.retained).to_contain(first)
+        expect(pinned_gc.retained).to_contain(second)
+        expect(shared_generation_release_v1(root, "reader-1")).to_equal(true)
+        val released_gc = shared_generation_gc_v1(root, 1, 1)
+        expect(released_gc.valid).to_equal(true)
+        expect(released_gc.retained).to_contain(second)
+        expect(released_gc.removed).to_contain(first)
+
+    it "rejects conflicting writers and ignores crash orphans":
+        val root = "/tmp/simple-shared-generation-crash-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all("{root}/generations")).to_equal(true)
+        expect(rt_file_write("{root}/generations/orphan.tmp.77", "partial")).to_equal(true)
+        expect(rt_file_write("{root}/CURRENT.tmp.77", "partial")).to_equal(true)
+        val winner = shared_generation_publish_v1(root, "", 1, "winner")
+        expect(winner.len()).to_equal(64)
+        expect(shared_generation_publish_v1(root, "", 1, "loser")).to_equal(
+            "parent-generation-changed")
+        val read = shared_generation_pin_current_v1(root, "reader-after-crash")
+        expect(read.valid).to_equal(true)
+        expect(read.payload).to_equal("winner")
+        expect(rt_file_exists("{root}/generations/orphan.tmp.77")).to_equal(true)
+        expect(shared_generation_release_v1(root, "reader-after-crash")).to_equal(true)
+
+    it "keeps the admitted generation across rename and fsync crash points":
+        val root = "/tmp/simple-shared-generation-fsync-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val stable = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(stable.len()).to_equal(64)
+        for fault in ["generation-fsync", "generation-rename", "before-pointer",
+                "pointer-fsync", "pointer-rename", "directory-fsync"]:
+            val result = shared_generation_publish_fault_v1(
+                root, stable, 2, "candidate-{fault}", fault)
+            expect(result.len() == 64).to_equal(false)
+            val reader = shared_generation_pin_current_v1(
+                root, "reader-{fault}")
+            expect(reader.valid).to_equal(true)
+            if fault == "directory-fsync":
+                expect(reader.payload).to_equal("candidate-directory-fsync")
+            else:
+                expect(reader.generation).to_equal(stable)
+                expect(reader.payload).to_equal("stable")
+            expect(shared_generation_release_v1(
+                root, "reader-{fault}")).to_equal(true)
