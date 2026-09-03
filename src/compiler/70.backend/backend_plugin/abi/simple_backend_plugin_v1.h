@@ -63,4 +63,13 @@ SIMPLE_BACKEND_PLUGIN_EXPORT const simple_backend_descriptor_v1 *simple_backend_
  * or a legacy path. Provider buffers are copied before release. */
 int64_t spl_backend_plugin_run_v1(int64_t provider_bytes, int64_t request_bytes,
                                   int64_t mir_bytes);
+/* Retained batch bridge. Open owns one provider session until close. Compile
+ * and finalize return runtime-owned copies, so provider buffers are released
+ * before each call returns. Negative open results are negated status codes. */
+int64_t spl_backend_plugin_batch_open_v1(int64_t provider_bytes,
+                                        int64_t request_bytes);
+int64_t spl_backend_plugin_batch_compile_v1(int64_t batch_handle,
+                                           int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_finalize_v1(int64_t batch_handle);
+int32_t spl_backend_plugin_batch_close_v1(int64_t batch_handle);
 #endif

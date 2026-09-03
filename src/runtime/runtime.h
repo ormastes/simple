@@ -1244,6 +1244,12 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
 int64_t rt_bytes_from_raw(int64_t ptr, int64_t len);
 int64_t spl_backend_plugin_run_v1(int64_t path_bytes, int64_t request_bytes,
                                   int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_open_v1(int64_t provider_bytes,
+                                         int64_t request_bytes);
+int64_t spl_backend_plugin_batch_compile_v1(int64_t batch_handle,
+                                            int64_t mir_bytes);
+int64_t spl_backend_plugin_batch_finalize_v1(int64_t batch_handle);
+int32_t spl_backend_plugin_batch_close_v1(int64_t batch_handle);
 SplArray* rt_strsplit(const char* value, const char* delimiter);
 
 /* ===== JIT Exec Manager (stubs) ===== */
