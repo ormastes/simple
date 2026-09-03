@@ -15,7 +15,7 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     local_list_contains,
     local_list_push_unique,
     var_reassign_analysis_hotspot_facts,
-    var_reassign_operand_local, local_count_increment}
+    var_reassign_operand_local}
 use std.io_runtime.{env_get_opt}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{var_reassign_local_id_value}
 
@@ -1138,9 +1138,16 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
             # landed var_reassign_written_local fix addressed.
             val written_id = _ssa_written_local_id(inst)
             if written_id >= 0:
-                val next_counts = local_count_increment(local_ids, counts, written_id)
-                local_ids = next_counts[0]
-                counts = next_counts[1]
+                # Keep both aligned arrays in this owner. The helper formerly
+                # returned `([i64], [i64])`; Stage-2 native tuple transport
+                # retained only part of that aggregate and silently omitted
+                # later multi-def locals from the alloca transform.
+                val count_index = local_count_index(local_ids, written_id)
+                if count_index >= 0:
+                    counts[count_index] = counts[count_index] + 1
+                else:
+                    local_ids.push(written_id)
+                    counts.push(1)
     var reassigned: [i64] = []
     var i = 0
     while i < local_ids.len():
