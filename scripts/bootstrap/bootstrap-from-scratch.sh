@@ -463,6 +463,8 @@ esac
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
 bootstrap_stage2_trust_root=0
+bootstrap_stage2_parent_override=
+bootstrap_stage2_parent_authority=
 if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
    { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
   # The first independently admitted pure-Simple parent cannot itself require
@@ -470,6 +472,24 @@ if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
   # than every ordinary/resume/deploy path: explicit Rust rebuild, native
   # Stage-2-only stop, dynload mode, and the full Stage 2 admission gates below.
   bootstrap_stage2_trust_root=1
+  bootstrap_stage2_parent_authority=explicit-full-bootstrap-stage2-trust-root
+  bootstrap_reason=stage2-trust-root-refresh
+elif [ "${stop_after_stage2}" -eq 1 ] &&
+   [ -n "${SIMPLE_BUILD_COMPILER:-}" ] &&
+   { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
+  # A previously admitted pure-Simple release may refresh the first Stage2
+  # producer without re-entering the Rust seed lane. Admission is bound to the
+  # executable bytes, host target, and exact version by the immutable runtime
+  # provenance record; a path or version string alone is never authority.
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/admit-stage2-parent.shs"
+  bootstrap_stage2_parent_admit \
+    "${SIMPLE_BUILD_COMPILER}" "${bootstrap_early_repo_root}" || {
+    echo "bootstrap-policy-error: stage2-parent-runtime-provenance-rejected" >&2
+    exit 64
+  }
+  bootstrap_stage2_trust_root=1
+  bootstrap_stage2_parent_override=${BOOTSTRAP_STAGE2_PARENT_PATH}
+  bootstrap_stage2_parent_authority=${BOOTSTRAP_STAGE2_PARENT_AUTHORITY}
   bootstrap_reason=stage2-trust-root-refresh
 elif [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
   # The named command must be one that PLANS a receipt, never one that starts a
@@ -2495,13 +2515,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 1
   }
 
-  # Stage 2: seed compiles bootstrap_main.spl
+  # Stage 2: the admitted parent compiles bootstrap_main.spl.
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
-  echo "Stage 2: seed → bootstrap_main.spl"
+  echo "Stage 2: admitted parent → bootstrap_main.spl"
   # Preserve the verified phase-1 (seed) compiler as an immutable lineage snapshot.
-  if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+  if [ -z "${bootstrap_stage2_parent_override}" ] &&
+     [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
     sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${seed_bin}" phase1 || \
       echo "  warning: phase1 snapshot preservation failed (non-fatal)" >&2
   fi
@@ -2524,8 +2545,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     native_verbose_arg="--verbose"
   fi
   stage_build_rust_log="${RUST_LOG:-error}"
-  stage2_seed_absolute="$(absolute_path \
-    "${stage2_runtime_authority}/simple${exe_suffix}")"
+  if [ -n "${bootstrap_stage2_parent_override}" ]; then
+    stage2_seed_absolute=${bootstrap_stage2_parent_override}
+  else
+    stage2_seed_absolute="$(absolute_path \
+      "${stage2_runtime_authority}/simple${exe_suffix}")"
+  fi
   stage2_output_absolute="${stage2_bin}"
   stage3_output_absolute="${stage3_bin}"
   stage2_admitted_absolute="$(absolute_path "${stage2_admitted_bin}")"
@@ -2880,7 +2905,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             "$(absolute_path "${runtime_admitted_snapshot}")" \
             "$(absolute_path "${tool_authority_before}")" \
             "$(absolute_path "${stage2_parent_sanity}")" \
-            "$(absolute_path "${stage2_parent_provenance}")" || {
+            "$(absolute_path "${stage2_parent_provenance}")" \
+            "${bootstrap_stage2_parent_authority}" || {
             echo "error: could not publish producer-bound Stage 2 parent receipts" >&2
             exit 1
           }

@@ -157,8 +157,11 @@ if [ "$stage2_parent_trust_root" = 1 ]; then
     [ "$(stage2_parent_value schema "$manifest")" = \
         simple-bootstrap-stage2-parent-provenance-v1 ] || exit 65
     [ "$(stage2_parent_value stage2-provenance "$manifest")" = pure-simple ] || exit 65
-    [ "$(stage2_parent_value authority "$manifest")" = \
-        explicit-full-bootstrap-stage2-trust-root ] || exit 65
+    case "$(stage2_parent_value authority "$manifest")" in
+        explicit-full-bootstrap-stage2-trust-root|\
+        admitted-pure-simple-runtime-stage2-trust-root) ;;
+        *) exit 65 ;;
+    esac
     stage2_parent_candidate_sha=$(stage2_parent_sha "$candidate") || exit 65
     stage2_parent_source_sha=$(stage2_parent_sha "$source_snapshot") || exit 65
     stage2_parent_runtime_sha=$(stage2_parent_sha "$runtime_snapshot") || exit 65

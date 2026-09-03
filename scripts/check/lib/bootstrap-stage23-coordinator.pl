@@ -470,7 +470,8 @@ sub prepare_parent_provenance {
             admission_receipt_sha256)) &&
         $parent_v1{schema} eq 'simple-bootstrap-stage2-parent-provenance-v1' &&
         $parent_v1{'stage2-provenance'} eq 'pure-simple' &&
-        $parent_v1{authority} eq 'explicit-full-bootstrap-stage2-trust-root' &&
+        ($parent_v1{authority} eq 'explicit-full-bootstrap-stage2-trust-root' ||
+         $parent_v1{authority} eq 'admitted-pure-simple-runtime-stage2-trust-root') &&
         $parent_v1{candidate_sha256} eq hash_fh($fh{candidate}) &&
         $parent_v1{source_snapshot_sha256} eq hash_fh($fh{source}) &&
         $parent_v1{runtime_snapshot_sha256} eq hash_fh($fh{runtime}) &&
