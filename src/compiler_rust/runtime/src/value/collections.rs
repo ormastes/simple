@@ -5212,12 +5212,36 @@ pub extern "C" fn rt_array_copy(array: RuntimeValue) -> RuntimeValue {
             return result;
         }
 
+        // GENERIC (tagged) layout. This is NOT a rare path: `[0u32; n]` lowers
+        // to rt_array_repeat -> rt_array_new, which sets neither U64_PACKED nor
+        // BYTE_PACKED, so every `[u32]`/`[i64]`/`[f64]`/class array binding
+        // reaches here -- the two packed branches above are near-dead for
+        // source-level `val b = a`.
+        //
+        // The old body pushed element-by-element through `rt_array_push`. That
+        // is one non-inlined extern call, one heap-handle untag, one capacity
+        // compare and one length store PER ELEMENT: measured 12.8 ms for a
+        // 480,000-element `[u32]` versus 3.9 ms for a hand-written Simple
+        // `while` loop, i.e. the runtime's own copy was 3.2x SLOWER than
+        // interpreted/JIT-ed source (engine2d perf register defect #7, which is
+        // why `backend_vulkan.spl:1504` still carries a hand loop).
+        //
+        // Bulk-copy the tagged words instead. This is semantics-preserving:
+        // `rt_array_push`'s generic branch is exactly `*data.add(len) = value;
+        // len += 1` after a capacity check (see rt_array_push_grow) -- no
+        // retain, no write barrier, no GC bookkeeping -- and `rt_array_new(len)`
+        // pre-allocates capacity `len`, so the growth branch could never fire
+        // for this loop anyway. Heap-pointer elements stay shared, which is what
+        // "shallow copy" already meant.
         let result = rt_array_new(len);
         if result.is_nil() {
             return result;
         }
-        for item in (*arr).as_slice() {
-            rt_array_push(result, *item);
+        let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+        if len > 0 && !(*arr).data.is_null() && !(*dst).data.is_null() {
+            debug_assert!((*dst).capacity >= len);
+            std::ptr::copy_nonoverlapping((*arr).data, (*dst).data, len as usize);
+            (*dst).len = len;
         }
         result
     }
