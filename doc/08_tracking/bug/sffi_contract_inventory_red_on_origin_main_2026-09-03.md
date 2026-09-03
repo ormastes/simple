@@ -32,7 +32,7 @@ only the source differs:
 | tree | rc | source_signature_variants |
 |---|---|---|
 | `origin/main` (detached worktree, pristine) | 1 (FAIL) | **416** |
-| `chore/repo-cleanup-2026-09-03` | see below | see below |
+| `chore/repo-cleanup-2026-09-03` | 1 (FAIL) | **416** |
 
 Corroborating, independent of the run: the cleanup branch adds and removes
 **zero** `extern fn` lines (`git diff origin/main..HEAD -- 'src/**.spl'
