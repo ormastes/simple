@@ -101,6 +101,43 @@ The gap is entirely host-side strategy, not the GPU or the shaders:
 3. per-rect FFI encoding (~1.3 ms; C pays ~0.12 ms for the same 64
    dispatches).
 
+## Resolution policy (user directive, 2026-09-03)
+
+**8K (7680x4320) is the PRIMARY optimization target.** Lower resolutions
+(800x600 through 4K) and resolutions ABOVE 8K must keep working correctly, but
+where a default value, tuning constant, threshold, buffer size, chunking
+strategy or allocation heuristic has to be chosen, it is chosen so the 8K case
+is well served BY THE DEFAULT — not tuned for 800x600 with 8K as an
+afterthought.
+
+Consequences for this lane:
+- A constant or heuristic sized for small framebuffers is itself a defect,
+  even where it is not yet the bottleneck.
+- No hard upper bound on resolution may be introduced.
+- Every perf change reports a resolution SWEEP (800x600 / 1080p / 4K / 8K), so
+  a fix that wins at 8K while regressing 800x600 is visible rather than
+  silently accepted.
+
+Measured 2026-09-03, identical workload (shared scene table, 64 rects, readback
+on), same device:
+
+| Resolution | C fps | Simple/Vulkan fps | Simple as % of C |
+|---|---|---|---|
+| 800x600 | 1414.6 | 142 | 10.0% |
+| 1920x1080 | 1245.6 | 56 | 4.5% |
+| 3840x2160 | 786.0 | 16 | 2.0% |
+| **7680x4320** | **377.2** | **4** | **1.06%** |
+
+The gap WIDENS with pixel count — C degrades 3.75x from 800x600 to 8K while
+Simple degrades 35x — which localises it to full-frame O(pixels) work, not
+per-primitive overhead. At 8K, `present` (115 ms) + `readback` (124 ms) are 98%
+of Simple's 244 ms frame; C pays 2.65 ms total because its framebuffer is
+HOST_COHERENT mapped memory, so readback is a map rather than a transfer.
+
+**NFR-2DP-004 (new): the ratio must not degrade with resolution.**
+`compare_ratio_x1000` at 8K must be within 2x of the ratio at 800x600. Today it
+is 11 vs 100 — a 9x degradation, FAILING.
+
 ## Targets
 
 | ID | Target | Verification |
