@@ -101,6 +101,49 @@ describe "G2DP002: per-element array copy loop":
         """
         expect(_has(LANE, "    dst[i] = src[j]", "G2DP002")).to_equal(false)
 
+describe "G2DP003: 1x1 draw inside a loop (one GPU dispatch per pixel)":
+
+    it "flags the per-pixel outline plot that ran 127x slower than the cpu backend":
+        """
+        The real shape from emu_draw_circle. draw_rect_filled is a memory write
+        on the cpu backend but a COMPUTE DISPATCH on vulkan, so an r=35 outline
+        cost ~200 dispatches: 16 us on cpu vs 2,025 us on vulkan.
+        """
+        step("Lint a 1x1 draw inside a loop")
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):\n" +
+            "    var y: i32 = 0\n" +
+            "    while y < r:\n" +
+            "        core.draw_rect_filled(cx, cy + y, 1, 1, color)\n" +
+            "        y = y + 1"
+
+        step("The per-pixel dispatch is reported")
+        expect(_has(LANE, src, "G2DP003")).to_equal(true)
+
+    it "does not flag a degenerate-case guard, which is one pixel and correct":
+        """
+        Twelve such guards exist in backend_emu.spl, firing when r <= 0 and
+        returning immediately. Flagging them would be pure noise and would
+        train reviewers to ignore the rule.
+        """
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):\n" +
+            "    if r <= 0:\n" +
+            "        core.draw_rect_filled(cx, cy, 1, 1, color)\n" +
+            "        return"
+        expect(_has(LANE, src, "G2DP003")).to_equal(false)
+
+    it "does not flag the span form, which is the fix":
+        """
+        emu_draw_circle_filled and emu_draw_circle_thick already emit one rect
+        per horizontal run. The rule must stay silent on the shape it is
+        steering people toward, or it would never go green.
+        """
+        val src = "fn f(core: RenderBackend, cx: i32, cy: i32, r: i32, w: i32, color: u32):\n" +
+            "    var y: i32 = 0\n" +
+            "    while y < r:\n" +
+            "        core.draw_rect_filled(cx, cy + y, w, 1, color)\n" +
+            "        y = y + 1"
+        expect(_has(LANE, src, "G2DP003")).to_equal(false)
+
 describe "gpu_2d_perf scope":
 
     it "only applies inside the 2D/GPU lane":
