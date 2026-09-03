@@ -51,8 +51,22 @@ static bool rt_msvc_x86_os_avx_enabled(void) {
 }
 #endif
 
+/* `&& !defined(_MSC_VER)` on the three GNU branches below is load-bearing.
+ * clang-cl defines __clang__, __x86_64__ AND _MSC_VER simultaneously, so
+ * without it the GNU branch wins and the MSVC __cpuid branch beneath it is
+ * dead code that never compiles. __builtin_cpu_supports() then lowers to
+ * references to compiler-rt's __cpu_model / __cpu_indicator_init, which a
+ * clang-cl link does not pull in:
+ *   runtime_simd_dispatch.obj : error LNK2019: unresolved external symbol
+ *     __cpu_indicator_init referenced in function rt_simd_has_sse
+ *     (also __cpu_model)  -> fatal error LNK1120
+ * measured 2026-09-02 on the MSVC Stage 2 receiver probe. The macro block a
+ * few lines above (SIMPLE_RUNTIME_TARGET_AVX2) already spells `!defined(
+ * _MSC_VER)` for exactly this reason; these three predicates simply missed it.
+ * CROSS-PLATFORM: _MSC_VER is undefined on every GCC/clang Unix build and on
+ * the mingw lane, so all of those keep taking the GNU branch unchanged. */
 bool rt_simd_has_sse(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("sse") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -65,7 +79,7 @@ bool rt_simd_has_sse(void) {
 }
 
 bool rt_simd_has_avx(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -76,7 +90,7 @@ bool rt_simd_has_avx(void) {
 }
 
 bool rt_simd_has_avx2(void) {
-#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__))
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx2") != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
