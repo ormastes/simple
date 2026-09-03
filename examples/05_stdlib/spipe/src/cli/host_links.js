@@ -22,6 +22,14 @@ function commandLinkPlan(hostRoot) {
   }
 }
 
+export function readConfiguredExampleProject(hostRoot) {
+  const configPath = join(resolve(hostRoot), ".spipe/config.sdn");
+  if (!existsSync(configPath)) return "examples/spipe";
+  const content = readFileSync(configPath, "utf8");
+  const match = content.match(/^\s*example_project_submodule:\s*([^\s#]+)\s*$/m);
+  return match ? match[1] : "examples/spipe";
+}
+
 export function readConfiguredDocRoot(hostRoot) {
   const configPath = join(resolve(hostRoot), ".spipe/config.sdn");
   if (!existsSync(configPath)) return "doc/llm_process";

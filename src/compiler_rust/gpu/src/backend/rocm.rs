@@ -4,7 +4,7 @@
 //! HIP provides a CUDA-like API that works on both AMD and NVIDIA GPUs.
 
 use std::collections::HashMap;
-use std::ffi::{c_void, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 use std::sync::Mutex;
 
@@ -48,7 +48,7 @@ extern "C" {
     fn hipGetDeviceCount(count: *mut i32) -> HipError;
     fn hipSetDevice(deviceId: i32) -> HipError;
     fn hipGetDevice(deviceId: *mut i32) -> HipError;
-    fn hipDeviceGetName(name: *mut i8, len: i32, device: HipDevice) -> HipError;
+    fn hipDeviceGetName(name: *mut c_char, len: i32, device: HipDevice) -> HipError;
     fn hipDeviceGetAttribute(pi: *mut i32, attrib: i32, deviceId: i32) -> HipError;
     fn hipDeviceTotalMem(bytes: *mut usize, device: HipDevice) -> HipError;
     fn hipDeviceSynchronize() -> HipError;
@@ -57,10 +57,10 @@ extern "C" {
     fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: i32) -> HipError;
     fn hipMemcpyAsync(dst: *mut c_void, src: *const c_void, size: usize, kind: i32, stream: HipStream) -> HipError;
     fn hipMemset(dst: HipDeviceptr, value: i32, size: usize) -> HipError;
-    fn hipModuleLoad(module: *mut HipModule, fname: *const i8) -> HipError;
+    fn hipModuleLoad(module: *mut HipModule, fname: *const c_char) -> HipError;
     fn hipModuleLoadData(module: *mut HipModule, image: *const c_void) -> HipError;
     fn hipModuleUnload(module: HipModule) -> HipError;
-    fn hipModuleGetFunction(function: *mut HipFunction, module: HipModule, name: *const i8) -> HipError;
+    fn hipModuleGetFunction(function: *mut HipFunction, module: HipModule, name: *const c_char) -> HipError;
     fn hipModuleLaunchKernel(
         f: HipFunction,
         gridDimX: u32,
@@ -265,7 +265,7 @@ impl Backend for RocmBackend {
             let device = index as HipDevice;
 
             // Get device name
-            let mut name_buf = [0i8; 256];
+            let mut name_buf = [0 as c_char; 256];
             hip_check(hipDeviceGetName(name_buf.as_mut_ptr(), 256, device))?;
             let name = std::ffi::CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
