@@ -1,0 +1,115 @@
+# @req REQ-KPF-SCHEMA-001
+# @req REQ-KPF-SCHEMA-002
+# @req REQ-KPF-SCHEMA-003
+# @cover src/tool/kernel_plugin_schema/compiler.spl
+
+use std.spec.step
+use tool.kernel_plugin_schema.compiler.{compile_kpf_schema}
+
+fn schema_ab() -> text:
+    """package: example.echo
+version: 1.0
+interfaces:
+  - name: Query
+    major: 1
+    operations:
+      - name: poll
+        required: false
+      - name: submit
+        required: true
+  - name: Admin
+    major: 2
+    operations:
+      - name: close
+        required: true
+"""
+
+fn schema_ba() -> text:
+    """version: 1.0
+package: example.echo
+interfaces:
+  - name: Admin
+    operations:
+      - required: true
+        name: close
+    major: 2
+  - operations:
+      - required: true
+        name: submit
+      - required: false
+        name: poll
+    major: 1
+    name: Query
+"""
+
+describe "KPF schema compiler":
+    it "canonicalizes equivalent SDN and assigns deterministic identities":
+        step("compile reordered equivalent KPF schemas")
+        val first = compile_kpf_schema(schema_ab()).unwrap()
+        val second = compile_kpf_schema(schema_ba()).unwrap()
+        expect(first.canonical_schema).to_equal(second.canonical_schema)
+        expect(first.schema_digest).to_equal(second.schema_digest)
+        expect(first.schema_digest.len()).to_equal(64)
+        expect(first.interfaces[0].name).to_equal("Admin")
+        expect(first.interfaces[1].operations[0].name).to_equal("poll")
+        expect(first.interfaces[1].operations[1].name).to_equal("submit")
+        expect(first.interfaces[1].required_operation_mask).to_equal(2)
+        expect(first.interfaces[1].interface_id.len()).to_equal(32)
+
+    it "rejects duplicate interface names":
+        step("compile a schema with duplicate interface names")
+        val result = compile_kpf_schema("""package: duplicate.interfaces
+version: 1
+interfaces:
+  - name: Echo
+    major: 1
+    operations:
+      - name: run
+        required: true
+  - name: Echo
+    major: 1
+    operations:
+      - name: stop
+        required: true
+""")
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("duplicate interface name Echo")
+
+    it "rejects duplicate operation names":
+        step("compile an interface with duplicate operation names")
+        val result = compile_kpf_schema("""package: duplicate.operations
+version: 1
+interfaces:
+  - name: Echo
+    major: 1
+    operations:
+      - name: run
+        required: true
+      - name: run
+        required: false
+""")
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("duplicate operation name Echo.run")
+
+    it "requires every operation to declare whether it is required":
+        step("compile an operation missing its required declaration")
+        val result = compile_kpf_schema("""package: missing.required
+version: 1
+interfaces:
+  - name: Echo
+    major: 1
+    operations:
+      - name: run
+""")
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("missing required interface Echo operation run.required")
+
+    it "rejects duplicate SDN keys rather than accepting last-wins input":
+        step("compile a schema containing a duplicate package key")
+        val result = compile_kpf_schema("""package: first
+package: second
+version: 1
+interfaces: []
+""")
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_contain("duplicate SDN key")
