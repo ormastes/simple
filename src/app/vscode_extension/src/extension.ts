@@ -102,7 +102,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     };
 
-    const cli = new SimpleCliService(services);
+    const cli = new SimpleCliService(services, context);
     const codeLensProvider = new TestCodeLensProvider();
     const testController = new SimpleTestController(cli, services);
     const runCliTestCommand = async (args: string[], resolveFrom?: string): Promise<void> => {

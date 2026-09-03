@@ -6,11 +6,25 @@
 use .tool_registry
 use .main_lazy_json.{extract_field, make_tool_result_status, shell_cmd, first_n_chars}
 use .main_lazy_diag_tools.{handle_simple_diagnostics, handle_simple_symbols}
+use std.io_runtime.{dir_create_all, getpid}
+use std.nogc_sync_mut.storage_roots.tooling_paths.{tooling_workspace_path, tooling_child_environment}
 
 # Largest tool payload returned to the client. `simple brief` alone prints
 # ~54k lines; anything past this is cut with an explicit marker so the JSON
 # escaper and the client stay bounded.
 val CLI_OUTPUT_LIMIT_BYTES = 262144
+
+fn _storage_shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn _storage_environment_prefix() -> text:
+    val projected = tooling_child_environment("simple:mcp-cli")
+    if projected.is_err():
+        return ""
+    var prefix = "env"
+    for binding in projected.unwrap().bindings:
+        prefix = prefix + " " + binding.key + "=" + _storage_shell_quote(binding.value)
+    prefix
 
 fn handle_cli_passthrough(id: text, body: text, entry: McpToolEntry) -> text:
     handle_cli_passthrough_direct(id, body, entry.tool_name, entry.cli_command, entry.timeout_s)
@@ -26,7 +40,10 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
     val effective_timeout_s = _effective_cli_timeout_s(name, body, timeout_s)
 
     # Build command: timeout <N> bin/simple <cli_command> <args...>
-    var cmd = "timeout " + str(effective_timeout_s) + " " + _bin + " " + cli_command
+    val environment_prefix = _storage_environment_prefix()
+    if environment_prefix == "":
+        return make_tool_result_status(id, "centralized child storage environment is unavailable", true)
+    var cmd = environment_prefix + " timeout " + str(effective_timeout_s) + " " + _bin + " " + cli_command
 
     # Extract known parameters from body and append as CLI args
     cmd = _append_cli_args_for_name(cmd, body, name)
@@ -40,7 +57,12 @@ fn handle_cli_passthrough_direct(id: text, body: text, name: text, cli_command: 
     # pipe; the file is read back after the command finishes.
     # < /dev/null is placed on the command itself so it never reads the MCP
     # stdin pipe. mktemp uses trailing X's only for BSD/macOS compatibility.
-    val wrapped = "tmp=$(mktemp /tmp/simple_mcp_cli_XXXXXX); " + cmd + " < /dev/null > \"$tmp\" 2>&1; EC=$?; head -c " + str(CLI_OUTPUT_LIMIT_BYTES + 1) + " \"$tmp\"; rm -f \"$tmp\"; exit $EC"
+    val temp_directory = tooling_workspace_path("mcp-cli", getpid().to_text(), "output")
+    if temp_directory.is_err():
+        return make_tool_result_status(id, "centralized worktree storage is unavailable", true)
+    dir_create_all(temp_directory.unwrap().value)
+    val temp_template = temp_directory.unwrap().value + "/simple_mcp_cli_XXXXXX"
+    val wrapped = "tmp=$(mktemp \"" + temp_template + "\"); " + cmd + " < /dev/null > \"$tmp\" 2>&1; EC=$?; head -c " + str(CLI_OUTPUT_LIMIT_BYTES + 1) + " \"$tmp\"; rm -f \"$tmp\"; exit $EC"
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = shell_cmd(wrapped)

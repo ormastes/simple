@@ -2,7 +2,7 @@
 #
 # Manages DAP server subprocesses via file-based IPC.
 # Each debug session spawns a `bin/simple dap --daemon --session <id>` process
-# and communicates via .build/dap_sessions/<id>/requests/ and responses/.
+# and stores any session IPC beneath the centralized worktree storage root.
 #
 # For now, this is a lightweight bridge that spawns DAP processes and
 # translates MCP tool calls to DAP requests via file-based IPC.
@@ -19,7 +19,18 @@ use std.common.debug.service_v1.{
     central_debug_service_v1_close, debug_policy_development_v1,
 }
 
-use std.io_runtime.{process_spawn_async, process_is_running, process_kill, time_now_unix_micros}
+use std.io_runtime.{process_is_running, process_kill, time_now_unix_micros}
+use app.io.process_env_ops.{process_spawn_async_env}
+use std.nogc_sync_mut.storage_roots.tooling_paths.{tooling_child_environment}
+
+fn dap_child_environment() -> {text: text}:
+    var environment: {text: text} = {}
+    val projected = tooling_child_environment("simple:mcp-dap")
+    if projected.is_err():
+        return environment
+    for binding in projected.unwrap().bindings:
+        environment[binding.key] = binding.value
+    environment
 
 # Session registry (in-process, per MCP server instance)
 class DapSession:
@@ -189,7 +200,11 @@ fn dap_create_session(program: text, target_type: text, transport: text, arch: t
         state = "failed"
     elif not dap_is_embedded_session(target_type, target, backend):
         val _bin = _mcp_find_simple_binary()
-        pid = process_spawn_async(_bin, ["dap", "--session", sid, program])
+        val environment = dap_child_environment()
+        if environment.len() == 0:
+            state = "failed"
+        else:
+            pid = process_spawn_async_env(_bin, ["dap", "--session", sid, program], environment)
         if pid > 0:
             state = "initialized"
         else:
