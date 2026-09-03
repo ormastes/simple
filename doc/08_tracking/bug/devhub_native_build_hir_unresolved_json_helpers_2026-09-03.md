@@ -64,3 +64,44 @@ Nothing was changed by this record. The failing resolution is in the bootstrap
 compiler front end, not in platform code, so it is likely reproducible on Unix
 with the corresponding stage3 binary — unverified here (no Unix host in this
 session).
+
+## UPDATE 2026-09-03 — census above is STALE; 175 -> 21
+
+Root-caused. The 78 `json_*` `unresolved name` errors and all 69
+`invalid export origin` errors were ONE defect class: the phase-1 entry
+closure never loads a facade's re-export owner modules, so `std.json` and
+`std.file_system` were parsed as empty facades. Filed as
+`entry_closure_drops_facade_reexport_owner_modules_2026-09-03.md`.
+
+Repaired data-side (compiler fix still open, needs a stage2 redeploy):
+- `6014aa5385d` — json facade owners declared as real `export use` edges
+- `0a3963ca0d5` — file_system facade owners likewise
+
+Re-measured with the same admitted Stage 2 binary, exit status read directly:
+
+| stage | errors |
+|---|---|
+| before | 175 |
+| after json facade fix | ~80 (all json families gone; file_system exposed) |
+| after file_system fix | 21 |
+
+Remaining 21, all OUTSIDE this record's scope and independently tracked:
+- 11 `unresolved type: Id` in `src/std/common/search/{types,ranking}.spl` —
+  `hir_generic_type_param_unresolved_cross_module_2026-09-03.md`
+- 5 from `print_raw` in `src/lib/nogc_sync_mut/tui/terminal.spl:38` (2 of them
+  the `terminal_stdout_is_tty` cascade into `src/app/devhub/output.spl:18`) —
+  `print_raw_builtin_unknown_to_selfhosted_hir_2026-09-03.md`
+- 2 `unresolved name: kind` in `src/app/devhub/errors.spl` —
+  `implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md`
+- 1 `time_now_unix_micros` — the same facade defect in
+  `src/lib/nogc_sync_mut/io/__init__.spl`, deliberately not patched (see that
+  record)
+- 1 `rt_env_cwd` in `src/lib/nogc_async_mut/env/platform.spl:21` — unfiled
+
+Still no devhub.exe: HIR is not yet clean, and separately the stage2 binary
+SEGVs (rc=139) after `monomorphize` on programs that DO clear HIR — reproduced
+on a 7-line json program. `[mir-lower] WARNING: unresolved method call
+'to_float' / 'chr' / 'keys' lowered to const-0 placeholder` and
+`[post-mono-verify] unhandled HirTypeKind variant at walk_type` both appear on
+those runs, so any future "successful" devhub build is suspect until they are
+addressed.
