@@ -2,7 +2,7 @@
 
 **Status:** Active implementation; incomplete
 **Date:** 2026-09-03
-**Audited integration head:** `67532532552dabb24208b6687e2c23b9ae6947a9`
+**Audited integration head:** `aa7370895d332a7ee79633f18f0678743d355c47`
 **KPF cutoff requested:** commits through `2157abcbe56`, plus the landed semantic-check lane
 **Requested starting point:** `3164fbc39376a2a543f5afa7fa92f1aca6d3d393` (ancestor of the published baseline)
 
@@ -15,6 +15,26 @@
 - **Remaining:** required plan scope lacks published implementation or sufficient acceptance evidence.
 
 Runtime-blocked work is neither failed nor passed. No wave or requirement is complete solely because files exist.
+
+## Independent Completion Audit Addendum
+
+The independent two-plan audit at
+`build/review/two_plan_completion_audit_current.md` found two current
+contradictions that supersede earlier narrative pass claims:
+
+- `scripts/check/check-kernel-closure.shs` fails with 33 forbidden
+  compiler/K0/K1-to-plugin imports. Original migration phases 0 and 5 are not
+  structurally complete at this head.
+- `scripts/check/kernel-plugin-fabric/benchmark-performance-capacity.shs`
+  fails because a faster measured table path underflows unsigned overhead
+  subtraction. The mutation-red benchmark passes, but the normal performance
+  gate is not reproducibly green.
+
+The audit also confirms that Stage4, M4, M5, reverse-reference publication,
+Stage2 receipt production, strict no-allocation, and performance mutation
+contracts have passing portable/native-focused checks. These do not provide
+the missing admitted Stage2-to-Stage3 chain, Intel-native evidence, universal
+execution, signing/notarization, or original phase 1–8 runtime qualification.
 
 ## Published Implementation
 
