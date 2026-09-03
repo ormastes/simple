@@ -191,7 +191,51 @@ bootstrap_planner_v2_canonical_argv_text() {
 # The exact environment the producer must exec the planner under. Fixed and
 # fully re-derivable: the planner runs with `env -i` plus these and nothing
 # else, so a matching digest proves no other variable could influence it.
+# Windows-only addendum to the canonical env; empty on every other platform.
+#
+# MSYS2/Git Bash rewrites arguments that look like POSIX paths when it spawns
+# a NATIVE Windows executable.  The planner is such an executable and one of
+# its arguments is a Bazel-style label, --bootstrap-target=//bootstrap:stage3.
+# The leading // is rewritten and the planner receives
+# --bootstrap-target=/bootstrap:stage3, which matches no target, so
+# planner_reason_allowed() rejects the pair and the planner exits 2 with
+# 'bootstrap-policy-error: typed-reason-required' -- a message about the REASON
+# for a defect in the TARGET, which is why it reads as a policy refusal rather
+# than the environment bug it is.  Measured 2026-09-03 on the MSVC lane:
+#   argv probe, plain:  --bootstrap-target=/bootstrap:stage3
+#   argv probe, EXCL:   --bootstrap-target=//bootstrap:stage3
+#   planner, plain:     bootstrap-policy-error: typed-reason-required   rc=2
+#   planner, EXCL:      bootstrap-policy-error: receipt-path-required   rc=2
+# With the exclusion the target/reason pair is ACCEPTED and the planner
+# advances to its next check.
+#
+# The value is the NARROW prefix form, deliberately not '*': MSYS conversion is
+# also what turns the POSIX --bootstrap-receipt=/d/... and SIMPLE_RUNTIME_PATH
+# into drive-letter form for the native planner, and a native tool cannot open
+# a /d/... path at all.  Excluding everything would fix the label and break the
+# paths.
+#
+# It must live in the CANONICAL text, not only in the producer's exec: the
+# receipt records build_env_sha256 over this text and the verifier re-derives
+# it, so an exec-only variable would make the receipt understate the
+# environment the planner actually ran under -- precisely what this digest
+# exists to prevent.
+#
+# CROSS-PLATFORM IMPACT: none.  On Linux/macOS/FreeBSD `uname -s` matches no
+# branch, this returns empty, and canonical_env_text emits the exact same seven
+# lines in the same order as before -- byte-identical text, hence a
+# byte-identical build_env_sha256 and unchanged verification.  Only a Windows
+# receipt hashes differently, which is correct because its environment genuinely
+# differs, and receipts are produced fresh per run.
+bootstrap_planner_v2_msys_arg_conv_excl() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*) printf '%s' '--bootstrap-target=' ;;
+        *) : ;;
+    esac
+}
+
 bootstrap_planner_v2_canonical_env_text() {
+    bootstrap_planner_v2_env_excl=$(bootstrap_planner_v2_msys_arg_conv_excl)
     printf '%s\n' \
         'LC_ALL=C' \
         'LANG=C' \
@@ -200,6 +244,9 @@ bootstrap_planner_v2_canonical_env_text() {
         'SOURCE_DATE_EPOCH=0' \
         'SIMPLE_BOOTSTRAP=1' \
         "SIMPLE_RUNTIME_PATH=$1"
+    if [ -n "$bootstrap_planner_v2_env_excl" ]; then
+        printf 'MSYS2_ARG_CONV_EXCL=%s\n' "$bootstrap_planner_v2_env_excl"
+    fi
 }
 
 bootstrap_planner_v2_hash_text() {
