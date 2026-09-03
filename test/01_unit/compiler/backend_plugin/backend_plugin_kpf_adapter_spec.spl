@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use compiler.common.backend_plugin.{
+    BackendRole, BackendCapability, BackendPluginRequestV1,
+    BackendPluginDescriptorV1, backend_plugin_vtable_v1_all_operations,
+    admit_backend_plugin_kpf_v1, backend_plugin_error_kpf_status_v1,
+    BackendPluginError
+}
+use compiler.backend_plugin.transport.{
+    BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1,
+    BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1,
+    backend_plugin_provider_handle_encode_v1,
+    backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1,
+    backend_plugin_copy_payload_v1
+}
+
+fn kpf_backend_request() -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, "llvm", "host", "generic", [], "debug",
+        "mir-v1", [BackendCapability.ObjectEmit], "", false)
+
+fn kpf_backend_descriptor() -> BackendPluginDescriptorV1:
+    BackendPluginDescriptorV1(
+        1, 9, "llvm", "1.0", "build-1", "mir-v1",
+        [BackendRole.CompilerAot], ["host"], [BackendCapability.ObjectEmit],
+        backend_plugin_vtable_v1_all_operations())
+
+describe "backend KPF compatibility adapter":
+    it "projects successful legacy admission into an accepted KPF receipt":
+        val admitted = admit_backend_plugin_kpf_v1(
+            kpf_backend_request(), kpf_backend_descriptor())
+        expect(admitted.is_ok()).to_equal(true)
+        val result = admitted.ok().unwrap()
+        expect(result.status.accepted()).to_equal(true)
+        expect(result.receipt.provider_identity).to_equal("llvm")
+        expect(result.receipt.hash().len()).to_equal(64)
+
+    it "maps ABI admission failure to a fail-closed KPF status":
+        expect(backend_plugin_error_kpf_status_v1(
+            BackendPluginError.AbiMismatch("bad")).code()).to_equal(1)
+
+    it "encodes the admitted provider handle instead of reopening its path":
+        val wire = backend_plugin_provider_handle_encode_v1(0x1234)
+        expect(wire.len()).to_equal(BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1)
+        expect(wire[0] as i64).to_equal(BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1 & 255)
+        expect(wire[8] as i64).to_equal(0x34)
+        expect(wire[9] as i64).to_equal(0x12)
+
+    it "copies equivalent static and dynamic payloads into caller-owned output":
+        val static_payload: [u8] = [7, 11, 13, 17]
+        val dynamic = backend_plugin_envelope_decode_v1(
+            backend_plugin_envelope_encode_v1(0, 2, static_payload, ""))
+        var caller_output: [u8] = [0, 0, 0, 0]
+        val copied = backend_plugin_copy_payload_v1(dynamic, caller_output)
+        expect(copied).to_equal(Ok(4))
+        expect(caller_output).to_equal(static_payload)
+
+    it "fails closed without mutating an undersized caller buffer":
+        val dynamic = backend_plugin_envelope_decode_v1(
+            backend_plugin_envelope_encode_v1(0, 2, [1, 2, 3], ""))
+        var caller_output: [u8] = [9, 9]
+        expect(backend_plugin_copy_payload_v1(dynamic, caller_output).is_err()).to_equal(true)
+        expect(caller_output).to_equal([9, 9])
