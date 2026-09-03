@@ -2215,6 +2215,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_push_constants_raw",
     "rt_vulkan_push_constants_array",
     "rt_vulkan_read_buffer_bytes",
+    "rt_vulkan_readback_u32_checksum",
     "rt_vulkan_reset_fence",
     "rt_vulkan_selected_device_driver_identity",
     "rt_vulkan_selected_device_driver_identity_hash",

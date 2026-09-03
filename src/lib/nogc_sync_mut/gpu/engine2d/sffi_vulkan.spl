@@ -78,6 +78,8 @@ extern fn rt_vulkan_copy_from_buffer_regions(data: [u8], handle: i64, regions: [
 extern fn rt_vulkan_copy_from_buffer_strided(data: [u8], handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> bool
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
+@unsafe(reason: "raw Vulkan one-call pixel readback ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
+extern fn rt_vulkan_readback_u32_checksum(pixels: [u32], pixel_count: i64, handle: i64, offset: i64) -> i64
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
@@ -875,6 +877,33 @@ fn vulkan_sffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
 @unsafe(reason: "raw Vulkan buffer-read facade", capabilities: [ffi])
 fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     _vulkan_read_buffer_bytes_abi(handle, byte_count, offset)
+
+@unsafe(reason: "raw Vulkan one-call pixel readback facade", capabilities: [ffi])
+fn vulkan_sffi_readback_u32_checksum(handle: i64, pixel_count: i32, offset: i64) -> ([u32], i64):
+    """Download pixels straight into a fresh [u32] and compute the readback
+    identity checksum in the same native pass (replaces the per-pixel
+    _bytes_to_pixel_array + checksum loops; measured 20.3ms + 8.1ms per
+    800x600 frame under JIT — see doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md).
+    Interpreter ABI cannot pass runtime arrays: falls back to the byte path
+    there. Returns ([], 0) on failure."""
+    var pixels: [u32] = [0u32; pixel_count]
+    if pixel_count <= 0:
+        return (pixels, 0)
+    if gpu_sffi_uses_interpreter_array_abi():
+        val bytes = _vulkan_read_buffer_bytes_abi(handle, pixel_count.to_i64() * 4, offset)
+        if bytes.len().to_i64() != pixel_count.to_i64() * 4:
+            return ([], 0)
+        var i: i64 = 0
+        var checksum: i64 = 0
+        while i < pixel_count.to_i64():
+            val off = i * 4
+            val px = bytes[off].to_i64() | (bytes[off + 1].to_i64() << 8) | (bytes[off + 2].to_i64() << 16) | (bytes[off + 3].to_i64() << 24)
+            pixels[i] = px.to_i32().to_u32()
+            checksum = (checksum + px) % 2147483647
+            i = i + 1
+        return (pixels, checksum)
+    val checksum = rt_vulkan_readback_u32_checksum(pixels, pixel_count.to_i64(), handle, offset)
+    (pixels, checksum)
 
 @unsafe(reason: "raw Vulkan strided buffer-read facade", capabilities: [ffi])
 fn vulkan_sffi_read_buffer_strided_bytes(handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> [u8]:

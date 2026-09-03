@@ -4,7 +4,7 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffe
 use std::sync::Arc;
 use crate::value::{
     byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len,
-    RuntimeValue,
+    HeapObjectType, RuntimeArray, RuntimeValue,
 };
 
 // A tightly packed 8K ARGB framebuffer is 132,710,400 bytes. Keep the raw ABI
@@ -427,6 +427,83 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_array(
         return 0;
     }
     status
+}
+
+/// One-call pixel readback: download a device buffer straight into a Simple
+/// `[u32]` array AND compute the readback identity checksum in the same pass.
+///
+/// Replaces the per-pixel Simple marshalling chain this used to pay per frame
+/// (`vulkan_sffi_read_buffer_bytes` → `_bytes_to_pixel_array` 4-byte-extract
+/// loop → `engine2d_readback_with_identity` modulo-checksum loop): measured at
+/// 800×600 under JIT those loops cost ~20.3 ms + ~8.1 ms per frame (see
+/// doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md). The checksum algorithm
+/// is byte-identical to `engine2d_readback_with_identity`
+/// ((acc + px) % 2147483647, in order), so receipts see the same values.
+///
+/// Returns the checksum on success, 0 on any failure (a failed call leaves
+/// the array unwritten; 0 is a reachable checksum value in principle, so
+/// callers verify success via pixel-count/identity checks as before).
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    data: RuntimeValue,
+    pixel_count: i64,
+    handle: i64,
+    offset: i64,
+) -> i64 {
+    if pixel_count <= 0 || offset < 0 {
+        return 0;
+    }
+    let Some(arr) =
+        crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array)
+    else {
+        return 0;
+    };
+    let (len, data_ptr) = unsafe { ((*arr).len, (*arr).data) };
+    let Ok(pixel_count_u64) = u64::try_from(pixel_count) else {
+        return 0;
+    };
+    if len < pixel_count_u64 || data_ptr.is_null() {
+        return 0;
+    }
+    let Some(byte_count) = pixel_count.checked_mul(4) else {
+        return 0;
+    };
+    if byte_count > MAX_RAW_TRANSFER_BYTES {
+        return 0;
+    }
+    let downloaded = {
+        let state = STATE.lock();
+        let Some(buf) = state.buffers.get(&handle) else {
+            return 0;
+        };
+        if offset + byte_count > buf.size() as i64 {
+            return 0;
+        }
+        match buf.download_range(offset as u64, byte_count as u64) {
+            Ok(bytes) => bytes,
+            Err(_) => return 0,
+        }
+    };
+    let slots = unsafe { std::slice::from_raw_parts_mut(data_ptr, pixel_count as usize) };
+    let mut checksum: i64 = 0;
+    for (slot, chunk) in slots.iter_mut().zip(downloaded.chunks_exact(4)) {
+        let px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
+        *slot = RuntimeValue::from_int(px);
+        checksum = (checksum + px) % 2_147_483_647;
+    }
+    checksum
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_readback_u32_checksum(
+    _data: RuntimeValue,
+    _pixel_count: i64,
+    _handle: i64,
+    _offset: i64,
+) -> i64 {
+    0
 }
 
 #[no_mangle]
