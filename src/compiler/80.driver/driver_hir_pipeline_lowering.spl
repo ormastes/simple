@@ -100,11 +100,11 @@ impl CompilerDriver:
             return Err("transient parser scope end failed for {source.path}")
         Ok(hir_module)
 
-    me lower_and_check_streaming_surfaces_impl() -> (CompileContext, bool):
+    me lower_and_check_streaming_surfaces_impl() -> bool:
         if (not self.streaming_surface_owner_ready or
             self.streaming_module_surfaces_owner == nil):
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
-            return (self.ctx, false)
+            return false
         # The driver owner is an explicit Option. Native class-field assignment
         # can preserve the readiness scalar while losing a raw class handle;
         # validate absence first, then unwrap. Never dereference a value merely
@@ -124,7 +124,7 @@ impl CompilerDriver:
         # different questions and keep different answers.
         if not self.streaming_module_surfaces_owner.?:
             self.ctx.add_error("Streaming module surface owner payload missing after phase 2")
-            return (self.ctx, false)
+            return false
         val surfaces = self.streaming_module_surfaces_owner ?? ModuleSurfacesByName.empty()
         # Fail closed on a malformed payload, never on a valid one. A
         # heap-typed payload must be a tagged pointer outside the zero page;
@@ -134,7 +134,7 @@ impl CompilerDriver:
         # it cannot false-reject a live owner.
         if not rt_heap_ref_wellformed(surfaces):
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
-            return (self.ctx, false)
+            return false
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
@@ -181,13 +181,13 @@ impl CompilerDriver:
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
-                return (self.ctx, false)
+                return false
             val surface_index = surfaces.index_by_name[source.module_name]
             val is_requested_bootstrap_entry = source_index == entry_source_index
 
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
                 self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
-                return (self.ctx, false)
+                return false
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
                 if not phase_hir_modules.contains_key(source.module_name):
@@ -237,7 +237,7 @@ impl CompilerDriver:
                         surfaces.surfaces[surface_index].content_hash,
                         source_index, source.path, source.module_name,
                         source_content_length, source_content_hash))
-                return (self.ctx, false)
+                return false
 
             val hir_stream_key: text = if hir_closure_digest != "":
                 hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry)
@@ -285,7 +285,7 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
-                        return (self.ctx, false)
+                        return false
                     hir_loop_pos = hir_loop_pos + 1
                     continue
                 hir_module = lower_result.unwrap()
@@ -326,7 +326,7 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
-                        return (self.ctx, false)
+                        return false
                     hir_loop_pos = hir_loop_pos + 1
                     continue
                 if (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
@@ -395,7 +395,7 @@ impl CompilerDriver:
         # defect that split has_errors() from error_message_at() in
         # driver_orchestration.spl.
         if (self.ctx.error_count_value > 0):
-            return (self.ctx, false)
+            return false
         var validation_error_count: i64 = 0
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
@@ -410,7 +410,7 @@ impl CompilerDriver:
                 validation_errors_shown = 10
             eprint("[post-hir-validation-fatal-count] count={validation_error_count} shown={validation_errors_shown}")
         if (self.ctx.error_count_value > 0):
-            return (self.ctx, false)
+            return false
         ast_reset()
         self.ctx.modules = {}
         lexer_release_parse_source_globals()
@@ -439,12 +439,10 @@ impl CompilerDriver:
         self.ctx.module_surfaces = nil
         self.streaming_module_surfaces_owner = nil
         self.streaming_surface_owner_ready = false
-        (self.ctx, true)
+        true
 
     me lower_and_check_impl() -> (CompileContext, bool):
         dtrace("[DRV] lac-canary=entry")
-        if self.streaming_surface_owner_ready:
-            return self.lower_and_check_streaming_surfaces_impl()
         val log = self.ctx.logger
 
         # Build module_name -> source_path map so each module gets the right

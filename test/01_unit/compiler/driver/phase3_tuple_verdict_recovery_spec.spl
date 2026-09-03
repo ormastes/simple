@@ -1,0 +1,50 @@
+# codex-system-test
+# Regression for the Phase-2 native tuple ABI failure observed while building
+# scripts/check/cert/redeploy_gate/fixtures/hello_world.spl on 2026-09-03.
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read}
+
+val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
+val LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+fn between(source: text, start_marker: text, end_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    val finish = source.index_of(end_marker)
+    if start < 0 or finish <= start:
+        return ""
+    source.slice(start, finish)
+
+describe "Phase 3 native tuple verdict recovery":
+    it "should keep the streaming owner path off aggregate tuple transport":
+        step("Read the Phase 3 routing and lowering owners")
+        val orchestration = file_read(ORCHESTRATION)
+        val lowering = file_read(LOWERING)
+        val streaming = between(
+            lowering,
+            "    me lower_and_check_streaming_surfaces_impl() -> bool:",
+            "    me lower_and_check_impl() -> (CompileContext, bool):"
+        )
+
+        step("Check the in-place streaming boolean interface")
+        expect(orchestration).to_contain("if hir_streaming_in_place:")
+        expect(orchestration).to_contain(
+            "analyze_ok_effective = self.lower_and_check_streaming_surfaces_impl()"
+        )
+        expect(streaming.len()).to_be_greater_than(0)
+        expect(streaming.contains("(self.ctx, false)")).to_be(false)
+        expect(streaming).to_contain("        true")
+
+    it "should recover only a malformed zero-error legacy tuple verdict":
+        step("Read the legacy tuple recovery gate")
+        val orchestration = file_read(ORCHESTRATION)
+
+        step("Check every fail-closed recovery precondition")
+        expect(orchestration).to_contain("not rt_heap_ref_wellformed(analyzed_ctx)")
+        expect(orchestration).to_contain("rt_heap_ref_wellformed(self.ctx)")
+        expect(orchestration).to_contain("self.ctx.error_count_value == 0")
+        expect(orchestration).to_contain("analyze_ok_effective = true")
+        expect(orchestration).to_contain("if not analyze_ok_effective:")
+        expect(orchestration).to_contain(
+            "self.monomorphize_impl(analyze_ok_effective)"
+        )
