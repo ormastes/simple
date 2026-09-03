@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+runtime=${SIMPLE_BIN:-bin/simple}
+case "$runtime" in
+  /*) ;;
+  *) runtime="$PWD/$runtime" ;;
+esac
+if [ ! -x "$runtime" ]; then
+  echo "STATUS: BLOCKED — compatible self-hosted runtime unavailable"
+  exit 2
+fi
+
+probe=${TMPDIR:-/tmp}/simple-native-zero-work-crash-probe.$$
+root=${TMPDIR:-/tmp}/simple-native-zero-work-crash-root.$$
+"$runtime" native-build --source src/compiler --source src/lib --entry-closure \
+  --entry test/03_system/compiler/feature/native_zero_work_crash_probe.spl \
+  --output "$probe"
+
+for point in generation-write generation-rename pointer-write pointer-rename; do
+  "$probe" reset "$root"
+  set +e
+  "$probe" crash "$root" "$point"
+  status=$?
+  set -e
+  [ "$status" -eq 86 ] || { echo "FAIL: crash point $point exited $status"; exit 1; }
+  "$probe" check-miss "$root"
+  "$probe" recover "$root"
+done
+echo "PASS: generation/pointer process-kill recovery"
