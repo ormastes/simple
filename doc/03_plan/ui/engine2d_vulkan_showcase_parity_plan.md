@@ -25,9 +25,9 @@ body (not by name). 34 primitives:
 
 | Class | n | Members |
 |---|---|---|
-| **GPU-native** | 13 | clear, draw_rect, draw_rect_filled, draw_line, draw_circle_filled, draw_triangle_filled, draw_gradient_rect, draw_image, draw_image_blend_checked, draw_shadow_rect, draw_text, draw_text_bg, set_clip |
+| **GPU-native** | 12 (was 13; see census correction) | clear, draw_rect, draw_rect_filled, draw_line, draw_circle_filled, draw_triangle_filled, draw_gradient_rect, draw_image, draw_image_blend_checked, draw_shadow_rect, draw_text, draw_text_bg, set_clip |
 | **CPU `emu_*`** | 16 | draw_circle, draw_arc, draw_bezier, draw_ellipse, draw_ellipse_filled, draw_polygon_filled, draw_polyline, draw_rounded_rect, draw_rounded_rect_outline, draw_rect_thick, draw_circle_thick, draw_triangle_outline, draw_gradient_rect_h, draw_radial_gradient, draw_image_scaled, draw_image_transform |
-| **Forced full readback per call** | 5 | draw_rect_blend, draw_image_blend, draw_image_scaled_blend, draw_blur_rect, draw_rect_blend_mode |
+| **Forced full readback per call** | 6 (incl. draw_shadow_rect) | draw_rect_blend, draw_image_blend, draw_image_scaled_blend, draw_blur_rect, draw_rect_blend_mode |
 
 Two findings that set the agenda:
 
@@ -39,6 +39,70 @@ Two findings that set the agenda:
    single `draw_rect_blend` costs more than an entire 64-rect GPU frame.
    This is research fix-list items 3 and 4, still open, now with a per-call
    cost attached.
+
+## MEASUREMENT REFRAME (2026-09-03) — read before using any per-primitive number
+
+Under frame batching (the default), descriptor sets are cached per pipeline and
+dispatches accumulate in ONE command buffer, executing only at a flush.
+Therefore **every per-primitive vulkan timing in this document measures
+CPU-side command RECORDING, not GPU execution.** The GPU work lands later, in
+`submit_batch` or in the next forced flush.
+
+Evidence: 12,226 dispatches were recorded between one flush and the next; that
+flush cost 344,754 us => ~28 us per dispatch, cross-checked against a second
+flush at 204,682 us / 8,553 dispatches => ~24 us.
+
+Three consequences:
+
+1. **`submit_batch` at 84,818x is confirmed deferred execution, not a
+   regression** — and its backlog is overwhelmingly the emu tier's per-pixel
+   output. It is emu-tier cost wearing another label.
+2. **The emu tier is WORSE than its logged 42.7x**, because its GPU execution
+   is excluded from its own rows and charged to `submit_batch` instead.
+3. A per-primitive row can only be compared to another per-primitive row, never
+   read as wall-clock cost of that primitive.
+
+### The ~330 ms one-time cost is LOCATED
+
+It is `_flush_for_host_fallback` DRAINING THE ACCUMULATED BATCH, not any
+allocation. Instrumented split at `backend_vulkan.spl:1601`:
+call 1 `flush_us=204682 emu_us=3660`; call 2 `flush_us=294 emu_us=3806`. ~94%
+is emu backlog drain. Reordering the readback tier ahead of the emu tier in the
+showcase drops first-blend 274 ms -> 19 ms.
+
+The three allocation hypotheses recorded earlier as "disproved" were disproved
+for the right reason: they were chasing a ghost. A residual first-submit warmup
+of ~12-82 ms (2 samples, wide) is NOT pinned; suspected MoltenVK pipeline/MSL
+compile.
+
+### CENSUS CORRECTION
+
+`draw_shadow_rect` was classified GPU-native. It is not: `backend_vulkan.spl:1671`
+is `draw_rect_filled` + **`draw_blur_rect`**, and `draw_blur_rect` is
+forced-readback tier. Warm (readback tier run first) it measures **7,623 us vs
+cpu 7,115 us — parity**; the reported 2.5x was first-flush warmup attribution.
+
+Corrected census: **12 GPU-native, 16 CPU `emu_*`, 6 forced-readback.**
+
+### `present` is an inherent limitation, not a defect
+
+`present` 2,317 us vs cpu 9 us is the full device->host mirror refresh
+(`SIMPLE_VK_PRESENT_TRACE`: `flush_us=8`, `refresh_us=3587`). The CPU backend's
+framebuffer IS host memory, so it has nothing to copy. This vanishes only under
+a real swapchain present (`presentation_swapchain=0` in these runs). **Do not
+"fix" it.**
+
+### Unresolved
+
+`draw_text_bg` 277 us vs cpu 124 us is stable across runs (277/293/463/518/525)
+so it is real, but no cause was located. Absolute cost 150-400 us; low stakes.
+
+### JIT fragility (affects how this bench must be edited)
+
+Any edit to the bench's `main()` beyond a pure statement reorder de-JITted it
+~500x, and the unmodified file once failed 12 consecutive attempts. The
+JIT-mode assertion proposed for the perf matrix is validated as NECESSARY, not
+merely nice to have.
 
 ## Comparison tiers
 
