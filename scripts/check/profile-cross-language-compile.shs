@@ -1,0 +1,288 @@
+#!/bin/sh
+set -eu
+
+# Fair, fail-closed compiler/startup matrix for Simple, C, Rust, Go, and Python.
+# Results are evidence only when a lane completes every requested sample.
+
+usage() {
+    cat <<'EOF'
+usage: sh scripts/check/profile-cross-language-compile.shs [options]
+
+Options:
+  --runs N          measured interleaved rounds (default: 9)
+  --warmups N       unrecorded interleaved rounds (default: 2)
+  --report PATH     copy the Markdown report to PATH
+  --help            show this help
+
+Environment:
+  SIMPLE_COMPILER             candidate pure-Simple compiler
+  SIMPLE_COMPILER_PROVENANCE  verified Stage 3/4 provenance receipt
+  SIMPLE_USER_STORAGE_ROOT    centralized reusable user storage root
+  SIMPLE_WORKTREE_STORAGE_ROOT centralized worktree evidence/temp root
+
+Stages are process_floor, parse_check, object_or_smf, and native_executable.
+Missing or inadmissible tools produce explicit unavailable rows, never zeroes.
+EOF
+}
+
+RUNS=${COMPILE_MATRIX_RUNS:-9}
+WARMUPS=${COMPILE_MATRIX_WARMUPS:-2}
+REPORT_COPY=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --runs) RUNS=${2:?missing runs}; shift 2 ;;
+        --warmups) WARMUPS=${2:?missing warmups}; shift 2 ;;
+        --report) REPORT_COPY=${2:?missing report path}; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "error=unknown_argument value=$1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+case "$RUNS:$WARMUPS" in *[!0-9:]*|:*|*: ) echo "error=invalid_sample_count" >&2; exit 2;; esac
+[ "$RUNS" -ge 3 ] || { echo "error=runs_must_be_at_least_3" >&2; exit 2; }
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT"
+. "$ROOT/scripts/lib/storage-roots.shs"
+storage_roots_init || { echo "error=centralized_storage_unavailable" >&2; exit 2; }
+SCRATCH=$(storage_roots_mktemp cross-language-compile) || exit 2
+cleanup() { storage_roots_cleanup_scratch "$SCRATCH" >/dev/null 2>&1 || :; }
+trap cleanup EXIT HUP INT TERM
+
+RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
+EVIDENCE="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/perf/cross-language-compile/$RUN_ID"
+mkdir -p "$EVIDENCE" "$SCRATCH/out"
+RAW="$EVIDENCE/raw-samples.sdn"
+TOOLS="$EVIDENCE/toolchains.tsv"
+SUMMARY="$EVIDENCE/summary.tsv"
+COMMANDS="$EVIDENCE/commands.tsv"
+REPORT="$EVIDENCE/report.md"
+: >"$RAW"; : >"$TOOLS"; : >"$SUMMARY"; : >"$COMMANDS"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+tool_path() { command -v "$1" 2>/dev/null || :; }
+one_line() { "$@" 2>&1 | sed -n '1p' | tr '\t' ' '; }
+
+cat >"$SCRATCH/workload.spl" <<'EOF'
+fn main():
+    pass
+EOF
+cat >"$SCRATCH/workload.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+cat >"$SCRATCH/workload.rs" <<'EOF'
+fn main() {}
+EOF
+cat >"$SCRATCH/workload.go" <<'EOF'
+package main
+func main() {}
+EOF
+cat >"$SCRATCH/workload.py" <<'EOF'
+pass
+EOF
+
+SIMPLE_CANDIDATE=${SIMPLE_COMPILER:-$ROOT/bin/simple}
+CC_BIN=${CC:-$(tool_path cc)}
+RUSTC_BIN=${RUSTC:-$(tool_path rustc)}
+GO_BIN=${GO:-$(tool_path go)}
+PYTHON_BIN=${PYTHON:-$(tool_path python3)}
+
+simple_reason=
+if [ ! -x "$SIMPLE_CANDIDATE" ]; then
+    simple_reason=compiler-not-executable
+elif [ -z "${SIMPLE_COMPILER_PROVENANCE:-}" ] || [ ! -f "$SIMPLE_COMPILER_PROVENANCE" ]; then
+    simple_reason=verified-stage3-or-stage4-provenance-required
+elif one_line "$SIMPLE_CANDIDATE" --version | grep -Eq 'bootstrap seed only|Rust-built'; then
+    simple_reason=rust-bootstrap-seed-rejected
+else
+    # Reuse the repository's exact Stage 3/4 validators in a disposable shell.
+    if ! ROOT_DIR=$ROOT SIMPLE_COMPILER_PROVENANCE=$SIMPLE_COMPILER_PROVENANCE \
+        SIMPLE_CANDIDATE=$SIMPLE_CANDIDATE sh -c '
+          set -eu
+          . "$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+          . "$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+          p=$(bootstrap_stage3_canonical_file "$SIMPLE_COMPILER_PROVENANCE")
+          s=$(bootstrap_stage3_manifest_value schema "$p")
+          case "$s" in
+            simple-bootstrap-stage3-provenance-v3) bootstrap_stage3_verify_manifest "$p" "$ROOT_DIR" "$SIMPLE_CANDIDATE" ;;
+            simple-bootstrap-stage4-provenance-v1) stage4_verify_candidate_provenance "$p" "$SIMPLE_CANDIDATE" "$ROOT_DIR" ;;
+            *) exit 1 ;;
+          esac' >/dev/null 2>&1; then
+        simple_reason=provenance-verification-failed
+    fi
+fi
+
+record_tool() {
+    language=$1; binary=$2; version=$3; status=$4; reason=$5
+    if [ "$status" = available ]; then real=$(CDPATH= cd -- "$(dirname -- "$binary")" && pwd -P)/$(basename -- "$binary"); digest=$(sha256_file "$real")
+    else real=unavailable; digest=unavailable; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$language" "$status" "$real" "$digest" "$version" "$reason" >>"$TOOLS"
+}
+if [ -z "$simple_reason" ]; then record_tool simple "$SIMPLE_CANDIDATE" "$(one_line "$SIMPLE_CANDIDATE" --version)" available admitted-provenance
+else record_tool simple unavailable unavailable unavailable "$simple_reason"; fi
+[ -n "$CC_BIN" ] && record_tool c "$CC_BIN" "$(one_line "$CC_BIN" --version)" available detected || record_tool c unavailable unavailable unavailable toolchain-not-found
+[ -n "$RUSTC_BIN" ] && record_tool rust "$RUSTC_BIN" "$(one_line "$RUSTC_BIN" --version)" available detected || record_tool rust unavailable unavailable unavailable toolchain-not-found
+[ -n "$GO_BIN" ] && record_tool go "$GO_BIN" "$(one_line "$GO_BIN" version)" available detected || record_tool go unavailable unavailable unavailable toolchain-not-found
+[ -n "$PYTHON_BIN" ] && record_tool python "$PYTHON_BIN" "$(one_line "$PYTHON_BIN" --version)" available detected || record_tool python unavailable unavailable unavailable toolchain-not-found
+
+available() { awk -F '\t' -v l="$1" '$1==l {exit !($2=="available")}' "$TOOLS"; }
+stage_supported() {
+    [ "$1:$2" != python:object_or_smf ] && [ "$1:$2" != python:native_executable ]
+}
+
+write_command() {
+    language=$1; stage=$2; sample=$3
+    script="$SCRATCH/command-$language-$stage-$sample.sh"
+    artifact="$SCRATCH/out/$language-$stage-$sample"
+    case "$language:$stage" in
+        simple:process_floor) command="exec '$SIMPLE_CANDIDATE' --version" ;;
+        simple:parse_check) command="exec env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB='$ROOT/src' '$SIMPLE_CANDIDATE' check '$SCRATCH/workload.spl'" ;;
+        simple:object_or_smf) command="exec env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB='$ROOT/src' '$SIMPLE_CANDIDATE' compile '$SCRATCH/workload.spl' -o '$artifact.smf'" ;;
+        simple:native_executable) command="exec env SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB='$ROOT/src' '$SIMPLE_CANDIDATE' native-build '$SCRATCH/workload.spl' --backend cranelift --output '$artifact'" ;;
+        c:process_floor) command="exec '$CC_BIN' --version" ;;
+        c:parse_check) command="exec '$CC_BIN' -fsyntax-only '$SCRATCH/workload.c'" ;;
+        c:object_or_smf) command="exec '$CC_BIN' -O0 -c '$SCRATCH/workload.c' -o '$artifact.o'" ;;
+        c:native_executable) command="exec '$CC_BIN' -O0 '$SCRATCH/workload.c' -o '$artifact'" ;;
+        rust:process_floor) command="exec '$RUSTC_BIN' --version" ;;
+        rust:parse_check) command="exec '$RUSTC_BIN' --emit metadata '$SCRATCH/workload.rs' -o '$artifact.rmeta'" ;;
+        rust:object_or_smf) command="exec '$RUSTC_BIN' -C opt-level=0 --emit obj '$SCRATCH/workload.rs' -o '$artifact.o'" ;;
+        rust:native_executable) command="exec '$RUSTC_BIN' -C opt-level=0 '$SCRATCH/workload.rs' -o '$artifact'" ;;
+        go:process_floor) command="exec '$GO_BIN' version" ;;
+        go:parse_check) command="exec '$GO_BIN' tool compile -p main -o '$artifact.check.o' '$SCRATCH/workload.go'" ;;
+        go:object_or_smf) command="exec '$GO_BIN' tool compile -p main -o '$artifact.o' '$SCRATCH/workload.go'" ;;
+        go:native_executable) command="cd '$SCRATCH'; exec '$GO_BIN' build -o '$artifact' workload.go" ;;
+        python:process_floor) command="exec '$PYTHON_BIN' -c 'pass'" ;;
+        python:parse_check) command="exec '$PYTHON_BIN' -c \"import ast,pathlib; ast.parse(pathlib.Path('$SCRATCH/workload.py').read_text())\"" ;;
+        *) return 1 ;;
+    esac
+    printf '#!/bin/sh\nset -eu\n%s\n' "$command" >"$script"
+    chmod +x "$script"
+    if ! awk -F '\t' -v l="$language" -v s="$stage" '$1==l && $2==s {found=1} END{exit !found}' "$COMMANDS"; then
+        printf '%s\t%s\t%s\n' "$language" "$stage" "$command" >>"$COMMANDS"
+    fi
+    printf '%s\n' "$script"
+}
+
+validate_artifact() {
+    language=$1; stage=$2; sample=$3
+    artifact="$SCRATCH/out/$language-$stage-$sample"
+    case "$language:$stage" in
+        simple:object_or_smf) [ -s "$artifact.smf" ] && "$SIMPLE_CANDIDATE" "$artifact.smf" >/dev/null 2>&1 ;;
+        simple:native_executable|c:native_executable|rust:native_executable|go:native_executable)
+            [ -x "$artifact" ] && "$artifact" >/dev/null 2>&1 ;;
+        c:object_or_smf|rust:object_or_smf|go:object_or_smf) [ -s "$artifact.o" ] ;;
+        # rustc may emit a valid zero-byte metadata file for a binary crate.
+        rust:parse_check) [ -e "$artifact.rmeta" ] ;;
+        go:parse_check) [ -s "$artifact.check.o" ] ;;
+        *) return 0 ;;
+    esac
+}
+
+TIME_MODE=gnu
+if /usr/bin/time -l /usr/bin/true >/dev/null 2>"$SCRATCH/time-probe" && grep -q 'maximum resident set size' "$SCRATCH/time-probe"; then TIME_MODE=bsd; fi
+measure() {
+    language=$1; stage=$2; sample=$3; recorded=$4
+    cmd=$(write_command "$language" "$stage" "$sample") || return 1
+    timing="$SCRATCH/timing-$language-$stage-$sample"
+    stdout="$SCRATCH/stdout-$language-$stage-$sample"
+    stderr="$SCRATCH/stderr-$language-$stage-$sample"
+    status=0
+    if [ "$TIME_MODE" = bsd ]; then
+        /usr/bin/time -p -l "$cmd" >"$stdout" 2>"$timing" || status=$?
+        seconds=$(awk '$1=="real" {print $2; exit}' "$timing")
+        rss_bytes=$(awk '/maximum resident set size/ {print $1; exit}' "$timing")
+        rss_kib=$((rss_bytes / 1024))
+    else
+        /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M' -o "$timing" "$cmd" >"$stdout" 2>"$stderr" || status=$?
+        seconds=$(sed -n 's/^elapsed=//p' "$timing")
+        rss_kib=$(sed -n 's/^max_rss_kib=//p' "$timing")
+    fi
+    [ "$status" -eq 0 ] || return "$status"
+    validate_artifact "$language" "$stage" "$sample" || return 86
+    elapsed_us=$(awk -v s="$seconds" 'BEGIN {printf "%.0f", s*1000000}')
+    if [ "$recorded" = yes ]; then
+        printf 'sample language=%s stage=%s round=%s elapsed_us=%s max_rss_kib=%s\n' \
+            "$language" "$stage" "$sample" "$elapsed_us" "$rss_kib" >>"$RAW"
+    fi
+}
+
+LANGUAGES='simple c rust go python'
+STAGES='process_floor parse_check object_or_smf native_executable'
+FAILURES=
+for stage in $STAGES; do
+    warm=1
+    while [ "$warm" -le "$WARMUPS" ]; do
+        for language in $LANGUAGES; do
+            available "$language" && stage_supported "$language" "$stage" && \
+                measure "$language" "$stage" "warmup-$warm" no >/dev/null 2>&1 || :
+        done
+        warm=$((warm + 1))
+    done
+    round=1
+    while [ "$round" -le "$RUNS" ]; do
+        for language in $LANGUAGES; do
+            available "$language" || continue
+            stage_supported "$language" "$stage" || continue
+            if ! measure "$language" "$stage" "$round" yes; then
+                FAILURES="$FAILURES $language:$stage"
+            fi
+        done
+        round=$((round + 1))
+    done
+done
+
+percentile() { sort -n "$1" | sed -n "$2"p; }
+printf 'language\tstage\tstatus\tsamples\tp50_us\tp95_us\tmax_rss_kib\treason\n' >>"$SUMMARY"
+for language in $LANGUAGES; do
+    for stage in $STAGES; do
+        if ! available "$language"; then
+            reason=$(awk -F '\t' -v l="$language" '$1==l {print $6}' "$TOOLS")
+            printf '%s\t%s\tunavailable\t0\tunavailable\tunavailable\tunavailable\t%s\n' "$language" "$stage" "$reason" >>"$SUMMARY"
+        elif ! stage_supported "$language" "$stage"; then
+            printf '%s\t%s\tunavailable\t0\tunavailable\tunavailable\tunavailable\tlanguage-has-no-native-stage\n' "$language" "$stage" >>"$SUMMARY"
+        else
+            samples="$SCRATCH/$language-$stage.samples"
+            awk -v l="$language" -v s="$stage" '$2=="language="l && $3=="stage="s {sub("elapsed_us=","",$5); print $5}' "$RAW" >"$samples"
+            count=$(wc -l <"$samples" | tr -d ' ')
+            if [ "$count" -ne "$RUNS" ]; then
+                printf '%s\t%s\tfailed\t%s\tunavailable\tunavailable\tunavailable\tincomplete-sample-set\n' "$language" "$stage" "$count" >>"$SUMMARY"
+            else
+                p50=$(percentile "$samples" $(((RUNS + 1) / 2)))
+                p95=$(percentile "$samples" $(((RUNS * 95 + 99) / 100)))
+                rss=$(awk -v l="$language" -v s="$stage" '$2=="language="l && $3=="stage="s {sub("max_rss_kib=","",$6); if($6>m)m=$6} END{print m+0}' "$RAW")
+                printf '%s\t%s\tcomplete\t%s\t%s\t%s\t%s\tmeasured\n' "$language" "$stage" "$count" "$p50" "$p95" "$rss" >>"$SUMMARY"
+            fi
+        fi
+    done
+done
+
+{
+    echo '# Cross-Language Startup and Compile Matrix'
+    echo
+    echo "- Run: \`$RUN_ID\`"
+    echo "- Host: \`$(uname -s) $(uname -m)\`"
+    echo "- Samples: $RUNS measured after $WARMUPS warmups; languages interleaved within every round."
+    echo '- Cache policy: warm tool/OS caches; unique output paths; no cache deletion between samples.'
+    echo '- Units: elapsed p50/p95 in microseconds; maximum RSS in KiB.'
+    echo "- Raw samples: \`$RAW\`"
+    echo "- Tool identities: \`$TOOLS\`"
+    echo "- Exact commands: \`$COMMANDS\`"
+    echo
+    echo '| Language | Stage | Status | N | p50 us | p95 us | Max RSS KiB | Reason |'
+    echo '|---|---|---:|---:|---:|---:|---:|---|'
+    tab=$(printf '\t')
+    tail -n +2 "$SUMMARY" | while IFS="$tab" read -r language stage status samples p50 p95 rss reason; do
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' "$language" "$stage" "$status" "$samples" "$p50" "$p95" "$rss" "$reason"
+    done
+    echo
+    echo 'A `complete` row requires every measured sample to exit zero. Unavailable and failed rows are never ratios or zero-valued performance evidence.'
+} >"$REPORT"
+
+if [ -n "$REPORT_COPY" ]; then mkdir -p "$(dirname -- "$REPORT_COPY")"; cp "$REPORT" "$REPORT_COPY"; fi
+echo "report=$REPORT"
+echo "raw_samples=$RAW"
+echo "toolchains=$TOOLS"
+echo "commands=$COMMANDS"
+[ -z "$FAILURES" ] || { echo "error=measurement_failures lanes=$FAILURES" >&2; exit 1; }
