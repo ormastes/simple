@@ -14,6 +14,8 @@
 - keeps both selected build modes without restoring rejected policy alternatives
 - rejects legacy coverage ABI and manifest policy inputs
 - uses production bootstrap, parity, hash, and strict startup gates
+  This includes generating the Phase 5 relocation audit on demand before the
+  Phase 7 composition checker runs in a fresh isolated worktree.
 
 ## Selected Authority
 
