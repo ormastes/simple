@@ -440,68 +440,12 @@ expect(code).to_equal(1)  # oracle: 1 — named expected value from the requirem
 
 </details>
 
-### _wiki_edit_write_temp / _wiki_edit_read_temp (real file I/O, bug wiki-confluence-mock-file-io)
-
-#### writes then reads back real content from a temp path
-
-- writes then reads back real content from a temp path
-- Verify: writes then reads back real content from a temp path
-   - Expected: read_ok is true
-   - Expected: read_back equals `content`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("writes then reads back real content from a temp path")
-step("Verify: writes then reads back real content from a temp path")
-val dir = _fresh_temp_dir()
-val tmp_path = "{dir}/itf_wiki_edit_roundtrip.html"
-val content = "<p>Hello from the wiki edit round-trip spec.</p>"
-val _write_ok = _wiki_edit_write_temp(tmp_path, content)
-val (read_ok, read_back) = _wiki_edit_read_temp(tmp_path)
-expect(read_ok).to_equal(true)
-expect(read_back).to_equal(content)
-```
-
-</details>
-
-#### reports not-ok for a path that was never written
-
-- reports not-ok for a path that was never written
-- Verify: reports not-ok for a path that was never written
-   - Expected: read_ok is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-APP
-step("reports not-ok for a path that was never written")
-step("Verify: reports not-ok for a path that was never written")
-val dir = _fresh_temp_dir()
-val missing_path = "{dir}/never-written.html"
-val (read_ok, _read_back) = _wiki_edit_read_temp(missing_path)
-expect(read_ok).to_equal(false)
-```
-
-</details>
-
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 17 |
-| Active scenarios | 17 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

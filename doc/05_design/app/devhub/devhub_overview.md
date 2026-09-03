@@ -23,6 +23,12 @@ dashboard hosted by `gui_server.spl` and rendered by the repo-managed Electron
 shell (or the system browser with `--browser`). Pure document/status helpers
 live in `gui.spl`; credentialed backend execution remains owned by the CLI
 command capsules rather than being duplicated into the GUI adapter.
+Electron resolution is shared with Caret through
+`src/app/ui.electron/app_launcher.spl`. It requires the managed package
+manifest and executable together, passes an explicit resolved application
+directory, and performs a bounded executable-ancestor search when the app is
+launched outside the checkout root. This prevents Electron's default welcome
+screen from being accepted as a successful DevHub launch.
 The document consumes `fluid_light_theme_render_snapshot().composed_css`, so
 Fluid OS remains the single theme owner across hosted DevHub and SimpleOS boot.
 No DevHub-local palette duplicates the package tokens.
@@ -280,3 +286,20 @@ expose:
   `git`, `wiki`.
 - `facade_storage.md` — command tables + gaps for `web_storage`.
 - `facade_email.md` — command tables + gaps for `email`.
+
+## 9. Secure editor exchange files
+
+Wiki edit flows for both Confluence and GitHub use the shared
+`app.io.editor_temp_file` lifecycle. Exchange files are created atomically
+without replacement, carry no user-controlled path segments, are read back
+through a bounded no-follow regular-file check (8 MiB maximum), and are removed
+after editor failure, read failure, no-change, or successful readback. This
+prevents predictable-path overwrite/symlink attacks and abandoned page content
+in `/tmp`.
+
+## 10. Bounded external tool adapters
+
+GitHub (`gh`) and mail-cli subprocess calls have a 30-second deadline and a
+4 MiB combined-output ceiling. GitHub rate-limit retries remain bounded by the
+shared retry policy. Availability probes use the same limits, so error
+classification cannot introduce a second unbounded hang.
