@@ -15,7 +15,7 @@ CACHED_ARTIFACT=""
 FAILURES=0
 
 usage() {
-    printf '%s\n' 'usage: sh scripts/check/check-llm-caret-cli-cached.shs --case <prerequisites|help|offline-claude|provider-error|unknown-option|failure-usage|all>'
+    printf '%s\n' 'usage: sh scripts/check/check-llm-caret-cli-cached.shs --case <wrapper-contract|prerequisites|help|offline-claude|provider-error|unknown-option|failure-usage|all>'
 }
 
 fail_prerequisite() {
@@ -183,13 +183,59 @@ run_prerequisites() {
     record_pass prerequisites "${case_dir}"
 }
 
+run_wrapper_contract() {
+    case_dir="${ARTIFACT_ROOT}/wrapper-contract"
+    mkdir -p "${case_dir}" || fail_prerequisite wrapper_contract_artifact_unavailable
+    printf '%s\n' \
+        'SIMPLE_CARET_NATIVE=/bin/echo bin/caret caret-wrapper-marker --plain' \
+        >"${case_dir}/command.txt"
+    SIMPLE_CARET_NATIVE=/bin/echo SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0 \
+        "${CARET_WRAPPER}" caret-wrapper-marker --plain \
+        >"${case_dir}/stdout.txt" 2>"${case_dir}/stderr.txt"
+    status=$?
+    printf '%s\n' "${status}" >"${case_dir}/exit.txt"
+    if [ "${status}" -ne 0 ]; then
+        record_failure wrapper-contract "override_exit_${status}" "${case_dir}"
+        return
+    fi
+    if ! grep -F 'caret-wrapper-marker --plain' "${case_dir}/stdout.txt" >/dev/null 2>&1; then
+        record_failure wrapper-contract override_arguments_not_forwarded "${case_dir}"
+        return
+    fi
+
+    missing="${case_dir}/definitely-missing-caret"
+    SIMPLE_CARET_NATIVE="${missing}" SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0 \
+        "${CARET_WRAPPER}" --help \
+        >"${case_dir}/missing.stdout.txt" 2>"${case_dir}/missing.stderr.txt"
+    missing_status=$?
+    printf '%s\n' "${missing_status}" >"${case_dir}/missing.exit.txt"
+    if [ "${missing_status}" -ne 127 ]; then
+        record_failure wrapper-contract "missing_override_exit_${missing_status}" "${case_dir}"
+    elif ! grep -F 'SIMPLE_CARET_NATIVE is not executable' \
+        "${case_dir}/missing.stderr.txt" >/dev/null 2>&1; then
+        record_failure wrapper-contract missing_override_diagnostic_absent "${case_dir}"
+    else
+        record_pass wrapper-contract "${case_dir}"
+    fi
+}
+
 case "${1:-}" in
     --case) CASE_NAME=${2:-}; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) usage; exit 2 ;;
 esac
 [ "$#" -eq 0 ] || { usage; exit 2; }
-case "${CASE_NAME}" in prerequisites|help|offline-claude|provider-error|unknown-option|failure-usage|all) ;; *) usage; exit 2 ;; esac
+case "${CASE_NAME}" in wrapper-contract|prerequisites|help|offline-claude|provider-error|unknown-option|failure-usage|all) ;; *) usage; exit 2 ;; esac
+
+scrub_provider_credentials
+if [ "${CASE_NAME}" = wrapper-contract ]; then
+    mkdir -p "${ARTIFACT_ROOT}" || fail_prerequisite artifact_directory_unavailable
+    [ -x "${CARET_WRAPPER}" ] || fail_prerequisite bin_caret_not_executable
+    run_wrapper_contract
+    if [ "${FAILURES}" -ne 0 ]; then printf '%s\n' "evidence_status=FAIL failed_cases=${FAILURES}"; exit 1; fi
+    printf '%s\n' 'evidence_status=PASS'
+    exit 0
+fi
 
 prepare_prerequisites
 if [ "${CASE_NAME}" = prerequisites ] || [ "${CASE_NAME}" = all ]; then run_prerequisites; fi
