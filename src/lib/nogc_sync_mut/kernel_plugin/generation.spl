@@ -105,20 +105,27 @@ class KpfGenerationTable:
             composition_digest: slot.composition_digest, registry_revision: slot.registry_revision,
             pin_count: slot.pin_count, active: slot.active, retired: slot.retired)
 
-    me pin_active() -> KpfPinResult:
-        if not self._valid_generation(self.active) or not self.generations[self.active.index].active:
+    me pin(handle: KpfGenerationHandle) -> KpfPinResult:
+        if not self._valid_generation(handle):
+            return KpfPinResult(status: KpfSyncStatus.StaleHandle, handle: KpfPinHandle(index: 0, epoch: 0))
+        if not self.generations[handle.index].active:
             return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
         var scanned = 0u32
         while scanned < self.pin_capacity:
             val index = (self.pin_cursor + scanned) % self.pin_capacity
             if not self.pins[index].occupied:
-                self.pins[index].generation = self.active
+                self.pins[index].generation = handle
                 self.pins[index].occupied = true
-                self.generations[self.active.index].pin_count = self.generations[self.active.index].pin_count + 1
+                self.generations[handle.index].pin_count = self.generations[handle.index].pin_count + 1
                 self.pin_cursor = (index + 1) % self.pin_capacity
                 return KpfPinResult(status: KpfSyncStatus.Ok, handle: KpfPinHandle(index: index, epoch: self.pins[index].epoch))
             scanned = scanned + 1
         KpfPinResult(status: KpfSyncStatus.CapacityExceeded, handle: KpfPinHandle(index: 0, epoch: 0))
+
+    me pin_active() -> KpfPinResult:
+        if not self._valid_generation(self.active):
+            return KpfPinResult(status: KpfSyncStatus.GenerationNotActive, handle: KpfPinHandle(index: 0, epoch: 0))
+        self.pin(self.active)
 
     me release_pin(handle: KpfPinHandle) -> KpfSyncStatus:
         if handle.index >= self.pin_capacity: return KpfSyncStatus.StaleHandle
