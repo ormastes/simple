@@ -1,0 +1,89 @@
+use std.nogc_async_mut.kernel_plugin.lifecycle_supervisor.*
+
+pub struct KpfPlacementLifecycleEvidenceV1:
+    placement: KpfLifecyclePlacementV1
+    accepted_transitions: i64
+    final_phase: KpfLifecyclePhaseV1
+    final_sequence: i64
+    host_failed: bool
+
+pub struct KpfCrashLoopEvidenceV1:
+    first: KpfLifecycleReceiptV1
+    second: KpfLifecycleReceiptV1
+    exhausted: KpfLifecycleReceiptV1
+    stale: KpfLifecycleReceiptV1
+    replacement: KpfLifecycleReceiptV1
+    sibling_phase: KpfLifecyclePhaseV1
+
+fn placement_lifecycle(placement: KpfLifecyclePlacementV1) -> KpfPlacementLifecycleEvidenceV1:
+    val supervisor = KpfLifecycleSupervisorV1.create(
+        KpfRestartPolicyV1(maximum_restarts: 2, window_ns: 100), placement)
+    val prepared = supervisor.prepare(7)
+    val started = supervisor.start(7)
+    val published = supervisor.publish(7)
+    val drained = supervisor.drain(7)
+    val retired = supervisor.retire(7)
+    val unloaded = supervisor.unload(7)
+    var accepted = 0
+    if prepared.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    if started.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    if published.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    if drained.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    if retired.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    if unloaded.outcome == KpfLifecycleOutcomeV1.Accepted: accepted = accepted + 1
+    KpfPlacementLifecycleEvidenceV1(placement: placement,
+        accepted_transitions: accepted, final_phase: supervisor.phase,
+        final_sequence: unloaded.sequence, host_failed: unloaded.host_failed)
+
+pub fn kpf_static_lifecycle_evidence_v1() -> KpfPlacementLifecycleEvidenceV1:
+    placement_lifecycle(KpfLifecyclePlacementV1.Static)
+
+pub fn kpf_native_lifecycle_evidence_v1() -> KpfPlacementLifecycleEvidenceV1:
+    placement_lifecycle(KpfLifecyclePlacementV1.Native)
+
+pub fn kpf_worker_lifecycle_evidence_v1() -> KpfPlacementLifecycleEvidenceV1:
+    placement_lifecycle(KpfLifecyclePlacementV1.Worker)
+
+pub fn kpf_wasm_lifecycle_evidence_v1() -> KpfPlacementLifecycleEvidenceV1:
+    placement_lifecycle(KpfLifecyclePlacementV1.Wasm)
+
+pub fn kpf_crash_loop_evidence_v1() -> KpfCrashLoopEvidenceV1:
+    val failed = KpfLifecycleSupervisorV1.create(
+        KpfRestartPolicyV1(maximum_restarts: 2, window_ns: 100),
+        KpfLifecyclePlacementV1.Worker)
+    val sibling = KpfLifecycleSupervisorV1.create(
+        KpfRestartPolicyV1(maximum_restarts: 1, window_ns: 100),
+        KpfLifecyclePlacementV1.Native)
+    failed.prepare(11)
+    failed.start(11)
+    failed.publish(11)
+    sibling.prepare(12)
+    sibling.start(12)
+    sibling.publish(12)
+    val first = failed.fault(11, 10)
+    failed.restart(11)
+    failed.start(11)
+    failed.publish(11)
+    val second = failed.fault(11, 20)
+    failed.restart(11)
+    failed.start(11)
+    failed.publish(11)
+    val exhausted = failed.fault(11, 30)
+    val stale = failed.fault(10, 31)
+    val replacement = failed.prepare(13)
+    KpfCrashLoopEvidenceV1(first: first, second: second,
+        exhausted: exhausted, stale: stale, replacement: replacement,
+        sibling_phase: sibling.phase)
+
+pub fn kpf_restart_budget_bypass_mutant_exposed_v1() -> bool:
+    val evidence = kpf_crash_loop_evidence_v1()
+    evidence.exhausted.outcome == KpfLifecycleOutcomeV1.RestartBudgetExhausted and
+        evidence.exhausted.quarantined and evidence.exhausted.disabled and
+        not evidence.exhausted.host_failed
+
+pub fn kpf_stale_generation_fault_mutant_exposed_v1() -> bool:
+    val evidence = kpf_crash_loop_evidence_v1()
+    evidence.stale.outcome == KpfLifecycleOutcomeV1.StaleGeneration and
+        evidence.replacement.generation == 13 and
+        evidence.replacement.outcome == KpfLifecycleOutcomeV1.Accepted and
+        not evidence.replacement.disabled and not evidence.replacement.quarantined
