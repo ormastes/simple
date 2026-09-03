@@ -50,17 +50,14 @@ const richCustomEditor_1 = require("./richCustomEditor");
 const simpleOutlineProvider_1 = require("./outline/simpleOutlineProvider");
 const extensionHostServices_1 = require("./services/extensionHostServices");
 const simpleCliService_1 = require("./services/simpleCliService");
+const simpleLspServerResolver_1 = require("./services/simpleLspServerResolver");
 const simpleSymbolProviders_1 = require("./symbols/simpleSymbolProviders");
 const testCodeLensProvider_1 = require("./testing/testCodeLensProvider");
 const testController_1 = require("./testing/testController");
 const editorMarkers_1 = require("./testing/editorMarkers");
 const testWorkspacePanel_1 = require("./testing/testWorkspacePanel");
 const simpleAnalysisIndex_1 = require("./analysis/simpleAnalysisIndex");
-const kpf_1 = require("./kpf");
-const SIMPLE_SELECTOR = [
-    { scheme: 'file', language: 'simple' },
-    { scheme: 'untitled', language: 'simple' },
-];
+const SIMPLE_SELECTOR = (0, simpleLspServerResolver_1.createSimpleLspDocumentSelector)();
 let activeLspSurface;
 async function activate(context) {
     const services = new extensionHostServices_1.ExtensionHostServices();
@@ -92,22 +89,7 @@ async function activate(context) {
             foldingProvider,
         ],
     }));
-    const kpfCutover = new kpf_1.KpfProductionCutover({
-        languageId: 'simple',
-        isWorkspaceTrusted: () => vscode.workspace.isTrusted,
-        resolvePlacement: () => lspSurface.configuration.mode === 'wasm' ? 'wasm' : 'native-process',
-        bootstrap: (resolveFrom) => lspSurface.bootstrapClient(resolveFrom),
-        restart: () => lspSurface.restartClient(),
-        onAuthorityChanged: (authority, reason) => {
-            if (authority === 'toolingd-lsp') {
-                const source = lspSurface.configuration.mode === 'wasm' ? 'wasm' : 'native';
-                services.markReady('lsp', reason, source);
-            }
-            else {
-                services.markDegraded('lsp', reason, 'fallback');
-            }
-        },
-    });
+    services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping configured client', 'fallback');
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document) => {
         currentOutlineDocument = document;
@@ -127,7 +109,7 @@ async function activate(context) {
             math_1.MathSyncPanel.show();
         }
     };
-    const cli = new simpleCliService_1.SimpleCliService(services, context);
+    const cli = new simpleCliService_1.SimpleCliService(services);
     const codeLensProvider = new testCodeLensProvider_1.TestCodeLensProvider();
     const testController = new testController_1.SimpleTestController(cli, services);
     const runCliTestCommand = async (args, resolveFrom) => {
@@ -156,15 +138,6 @@ async function activate(context) {
         if (currentOutlineDocument && event.document.uri.toString() === currentOutlineDocument.uri.toString()) {
             updateOutline(event.document);
         }
-    }), vscode.workspace.onDidOpenTextDocument((document) => {
-        const pending = kpfCutover.observeLanguage(document.languageId, document.uri.fsPath);
-        void pending?.then((result) => {
-            if (!result.ok) {
-                services.markDegraded('lsp', result.message, 'fallback', result.detail);
-            }
-        });
-    }), vscode.workspace.onDidGrantWorkspaceTrust(() => {
-        void kpfCutover.workspaceTrustGranted();
     }));
     updateOutline(vscode.window.activeTextEditor?.document);
     await services.safeRegister('lsp', 'LSP compatibility commands', () => {
@@ -173,7 +146,7 @@ async function activate(context) {
                 lspSurface.showOutputChannel();
             }),
             vscode.commands.registerCommand('simple.lsp.restart', async () => {
-                const result = await kpfCutover.restart();
+                const result = await lspSurface.restartClient();
                 if (!result.ok) {
                     void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
                 }
@@ -372,24 +345,18 @@ async function activate(context) {
         }
         void vscode.window.showInformationMessage('Simple LSP configuration changed. Restart the client to apply changes.', 'Restart LSP').then(async (selection) => {
             if (selection === 'Restart LSP') {
-                const result = await kpfCutover.restart();
+                const result = await lspSurface.restartClient();
                 if (!result.ok) {
                     void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
                 }
             }
         });
     }));
-    for (const document of vscode.workspace.textDocuments) {
-        const pending = kpfCutover.observeLanguage(document.languageId, document.uri.fsPath);
-        if (pending) {
-            void pending.then((result) => {
-                if (!result.ok) {
-                    services.markDegraded('lsp', result.message, 'fallback', result.detail);
-                }
-            });
-            break;
+    void lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath).then((result) => {
+        if (!result.ok) {
+            services.markDegraded('lsp', result.message, 'fallback', result.detail);
         }
-    }
+    });
 }
 async function deactivate() {
     await activeLspSurface?.dispose();

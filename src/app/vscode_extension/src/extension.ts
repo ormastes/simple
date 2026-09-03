@@ -14,6 +14,7 @@ import { RichCustomEditorProvider } from './richCustomEditor';
 import { SimpleOutlineProvider } from './outline/simpleOutlineProvider';
 import { ExtensionHostServices } from './services/extensionHostServices';
 import { SimpleCliService } from './services/simpleCliService';
+import { createSimpleLspDocumentSelector } from './services/simpleLspServerResolver';
 import {
     SimpleDefinitionProvider,
     SimpleDocumentSymbolProvider,
@@ -28,10 +29,7 @@ import { TestWorkspacePanel } from './testing/testWorkspacePanel';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
 import { KpfProductionCutover } from './kpf';
 
-const SIMPLE_SELECTOR: vscode.DocumentSelector = [
-    { scheme: 'file', language: 'simple' },
-    { scheme: 'untitled', language: 'simple' },
-];
+const SIMPLE_SELECTOR: vscode.DocumentSelector = createSimpleLspDocumentSelector();
 
 let activeLspSurface: ReturnType<typeof createSimpleLspCompatibilitySurface> | undefined;
 

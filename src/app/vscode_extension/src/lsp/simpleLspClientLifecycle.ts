@@ -13,17 +13,19 @@ import {
 import { ExtensionHostServices } from '../services/extensionHostServices';
 import { SimpleLspBootstrapHook, SimpleLspBootstrapRequest } from './simpleLspCompatibility';
 import { createWasmServerOptions, isWasmLspAvailable } from '../wasm/wasmLspBridge';
+import {
+    authoritativeLspReceipt,
+    degradedLspReceipt,
+    publishLspCapabilityReceipt,
+    SimpleLspFallbackControl,
+} from './simpleLspCapabilityReceipt';
 
 const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
-
-export interface LspFallbackControls {
-    setEnabled(enabled: boolean): void;
-}
 
 export interface CreateSimpleLspClientBootstrapOptions {
     services: ExtensionHostServices;
     onRunningStateChanged?: (running: boolean) => void;
-    fallbackControls?: LspFallbackControls[];
+    fallbackControls?: SimpleLspFallbackControl[];
 }
 
 export function createSimpleLspClientBootstrap(
@@ -56,10 +58,17 @@ export function createSimpleLspClientBootstrap(
             }
         };
 
+        const publishDegraded = (message: string, detail?: string): void => {
+            publishLspCapabilityReceipt(
+                options.services,
+                options.fallbackControls ?? [],
+                degradedLspReceipt(message, detail),
+            );
+        };
+
         const syncState = (state: State): void => {
             if (state === State.Running) {
-                options.services.markReady('lsp', 'Simple LSP server running', activeSource);
-                setFallbackEnabled(false);
+                publishLspCapabilityReceipt(options.services, options.fallbackControls ?? [], authoritativeLspReceipt(activeSource));
                 options.onRunningStateChanged?.(true);
                 return;
             }
@@ -74,8 +83,7 @@ export function createSimpleLspClientBootstrap(
                 return;
             }
 
-            options.services.markDegraded('lsp', 'Simple LSP unavailable; fallback providers active', 'fallback');
-            setFallbackEnabled(true);
+            publishDegraded('Simple LSP unavailable');
             options.onRunningStateChanged?.(false);
         };
 
@@ -83,14 +91,8 @@ export function createSimpleLspClientBootstrap(
             start: async () => {
                 const resolved = await resolveServerOptions(request, outputChannel);
                 if (!resolved.ok) {
-                    setFallbackEnabled(true);
                     options.onRunningStateChanged?.(false);
-                    options.services.markDegraded(
-                        'lsp',
-                        resolved.message,
-                        'fallback',
-                        resolved.detail,
-                    );
+                    publishDegraded(resolved.message, resolved.detail);
                     return;
                 }
                 activeSource = resolved.source;
@@ -116,36 +118,23 @@ export function createSimpleLspClientBootstrap(
                     const exitedQuicklyWithError = probe.status !== null && probe.status !== 0;
                     const timedOut = probe.error && 'code' in probe.error && probe.error.code === 'ETIMEDOUT';
                     if (exitedQuicklyWithError && !timedOut) {
-                        setFallbackEnabled(true);
                         options.onRunningStateChanged?.(false);
-                        options.services.markDegraded(
-                            'lsp',
-                            'Simple LSP command exits immediately; fallback providers active',
-                            'fallback',
-                            probeOutput || `exit ${probe.status}`,
-                        );
+                        publishDegraded('Simple LSP command exits immediately', probeOutput || `exit ${probe.status}`);
                         return;
                     }
                     const initializeProbe = await probeInitializeHandshake(request.server.command, request.server.args, request.server.environment);
                     if (!initializeProbe.ok) {
-                        setFallbackEnabled(true);
                         options.onRunningStateChanged?.(false);
-                        options.services.markDegraded(
-                            'lsp',
-                            'Simple LSP initialize probe failed; fallback providers active',
-                            'fallback',
-                            initializeProbe.detail,
-                        );
+                        publishDegraded('Simple LSP initialize probe failed', initializeProbe.detail);
                         return;
                     }
                 }
                 try {
                     await client.start();
                 } catch (error) {
-                    setFallbackEnabled(true);
                     options.onRunningStateChanged?.(false);
                     const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-                    options.services.markDegraded('lsp', 'Failed to start Simple LSP server; fallback providers active', 'fallback', detail);
+                    publishDegraded('Failed to start Simple LSP server', detail);
                     throw error;
                 }
             },
