@@ -1,0 +1,37 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_delete, file_exists, file_write, env_get}
+use app.io.dir_ops.{dir_create}
+use app.io._CliCompile.build_intermediate_policy.{
+    native_build_intermediate_is_stale, native_build_intermediate_name,
+    native_build_finish_intermediate
+}
+
+fn intermediate_test_path(name: text) -> text:
+    val root = env_get("SIMPLE_WORKTREE_STORAGE_ROOT") ?? ".simple"
+    val dir = root + "/tmp/compiler"
+    _ = dir_create(dir, true)
+    dir + "/test-" + name
+
+describe "native-build intermediate lifecycle":
+    it "recognizes only old managed staging files at build start":
+        val managed = native_build_intermediate_name("hello", 42, 7)
+        expect(native_build_intermediate_is_stale(managed, "hello", 100, 86501)).to_equal(true)
+        expect(native_build_intermediate_is_stale(managed, "hello", 100, 86400)).to_equal(false)
+        expect(native_build_intermediate_is_stale("hello.o", "hello", 100, 999999)).to_equal(false)
+        expect(native_build_intermediate_is_stale(
+            native_build_intermediate_name("other", 42, 7), "hello", 100, 999999)).to_equal(false)
+
+    it "removes a debug-useless failed-build intermediate by default":
+        val path = intermediate_test_path("default-cleanup.tmp")
+        _ = file_delete(path)
+        expect(file_write(path, "temporary")).to_equal(true)
+        expect(native_build_finish_intermediate(path, false, false)).to_equal(true)
+        expect(file_exists(path)).to_equal(false)
+
+    it "retains an intermediate only when explicitly requested":
+        val path = intermediate_test_path("retained.tmp")
+        _ = file_delete(path)
+        expect(file_write(path, "diagnostic")).to_equal(true)
+        expect(native_build_finish_intermediate(path, true, false)).to_equal(true)
+        expect(file_exists(path)).to_equal(true)
+        _ = file_delete(path)

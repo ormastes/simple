@@ -16,6 +16,10 @@ use std.nogc_sync_mut.shell.file (rename)
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
+use app.io._CliCompile.build_intermediate_policy.{
+    native_build_cleanup_stale_intermediates, native_build_finish_intermediate,
+    native_build_intermediate_name, native_build_output_name
+}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
@@ -288,7 +292,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
         if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
             i = i + 1
             continue
-        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
+        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast" or arg == "--keep-intermediates" or arg == "--print-intermediates":
             i = i + 1
             continue
         if arg == "--log":
@@ -641,6 +645,8 @@ fn cli_native_build(args: [text]) -> i64:
             cli_print_shared_opt_level_help()
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
+            print "  --keep-intermediates Retain diagnostic temporary files after failure"
+            print "  --print-intermediates Retain and print diagnostic temporary paths"
             print "  --emit-object        Emit relocatable object output instead of linking executable"
             print "  --emit-archive       Emit a static archive instead of linking executable"
             print "  --emit-shared        Emit a native shared library with no entry shim"
@@ -750,6 +756,9 @@ fn cli_native_build(args: [text]) -> i64:
         var no_borrow_check = false
         var no_mangle = false
         var low_memory = false
+        var print_intermediates = (env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") ?? "") == "1"
+        var keep_intermediates = (env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? "") == "1" or
+            print_intermediates
         var j = 0
         # Skip "native-build" command name
         if args.len() > 0 and args[0] == "native-build":
@@ -802,6 +811,11 @@ fn cli_native_build(args: [text]) -> i64:
                 verbose = true
             elif a == "--strip":
                 strip = true
+            elif a == "--keep-intermediates":
+                keep_intermediates = true
+            elif a == "--print-intermediates":
+                keep_intermediates = true
+                print_intermediates = true
             elif a == "--emit-smf":
                 emit_smf = true
             elif a == "--emit-object":
@@ -1019,7 +1033,15 @@ fn cli_native_build(args: [text]) -> i64:
         # satisfy the success check when a driver/linker reports Success without
         # writing its artifact; conversely, a failed build must leave the last
         # known-good requested output untouched.
-        val staged_output = "{output}.simple-native-build-{getpid()}-{time_now_unix_micros()}.tmp"
+        match native_build_cleanup_stale_intermediates(output):
+            case Err(reason):
+                _cli_eprint("Error: {reason}")
+                return 1
+            case Ok(removed):
+                if verbose and removed.len() > 0:
+                    _cli_eprint("[native-build] Removed {removed.len()} stale intermediates")
+        val staged_output = out_parent + "/" + native_build_intermediate_name(
+            native_build_output_name(output), getpid(), time_now_unix_micros())
         if _cli_file_exists_impl(staged_output) and not _cli_file_remove_impl(staged_output):
             _cli_eprint("Error: could not clear stale native-build staging output {staged_output}")
             return 1
@@ -1043,6 +1065,8 @@ fn cli_native_build(args: [text]) -> i64:
         val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
         val old_core_runtime_path = env_get("SIMPLE_CORE_RUNTIME_PATH") ?? ""
         val old_native_noop_final_output = env_get("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? ""
+        val old_keep_intermediates = env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? ""
+        val old_print_intermediates = env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") ?? ""
         val set_native_target = native_target != ""
         val set_native_cpu = native_cpu != ""
         if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
@@ -1108,6 +1132,8 @@ fn cli_native_build(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", output):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_NOOP_FINAL_OUTPUT={output}")
             return 1
+        env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", if keep_intermediates: "1" else: "")
+        env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", if print_intermediates: "1" else: "")
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
@@ -1185,6 +1211,8 @@ fn cli_native_build(args: [text]) -> i64:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
         env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", old_native_noop_final_output)
+        env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", old_keep_intermediates)
+        env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", old_print_intermediates)
         match result:
             case CompileResult.Success(_):
                 # Root-cause guard for the exit-0-with-no-binary hang
@@ -1213,12 +1241,12 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
                     if native_threads > 0:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
-                    _cli_file_remove_impl(staged_output)
+                    native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                     _cli_eprint("error: native-build reported success but produced no fresh output binary: {staged_output}")
                     _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
                     return 1
                 if not _cli_file_rename_impl(staged_output, output):
-                    _cli_file_remove_impl(staged_output)
+                    native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                     env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
@@ -1334,7 +1362,7 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint(dynload_pack_notice)
                 return 0
             case _:
-                _cli_file_remove_impl(staged_output)
+                native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
