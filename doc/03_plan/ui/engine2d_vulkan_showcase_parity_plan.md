@@ -1,7 +1,7 @@
 # Engine2D ↔ C Vulkan showcase parity: perf matrix, bit-level diff, feature map
 
 - **Date:** 2026-09-03
-- **Status:** plan; phase 0 (census) COMPLETE and recorded below
+- **Status:** P0, P1, P2, P4 COMPLETE with measured evidence (below); P3 partial; P5 open
 - **Branch/worktree:** `perf/vulkan-2d-c-benchmark` in `/private/tmp/simple-vkbench`
 - **Builds on:** `doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md`
   (fix list items 1-5), `doc/01_research/domain/2d_renderer_gpu_offload_patterns.md`
@@ -92,6 +92,57 @@ committed table is bit-identical by construction and self-evidently so.
   and the per-element copy loop at `backend_vulkan.spl:1504` (`rt_array_copy`
   exists in the runtime but has no Simple-level surface). Both are already
   flagged mechanically by the `gpu_2d_perf` lint (G2DP001/G2DP002).
+
+## Results (2026-09-03)
+
+### P1 — shared scene table: DONE
+`bench/vulkan_2d_c/scenes.txt`, verified byte-identical to C's own generator
+(`VK2D_DUMP_RECTS`, 64/64 rows). Both legs now agree exactly:
+`nonclear` 288504 = 288504, `checksum` 10460147 = 10460147 (previously 288504
+vs 306818 and 10460147 vs 11073548).
+
+### P2 — bit-level diff: DONE, and Simple MATCHES C
+`scripts/check/check-vulkan-2d-bit-diff.shs`:
+**PASS — 1,920,000 bytes compared, 0 differing.** Simple's Vulkan output is
+byte-identical to the C Vulkan reference for clear + 64 rect fills. Calibrated
+against a single flipped bit.
+
+### P4 — feature showcase + backend parity: DONE, no rendering bug found
+`bench/vulkan_2d_c/feature_showcase.spl` (32 primitives) +
+`scripts/check/check-engine2d-backend-parity.shs`:
+**PASS — 1,920,000 bytes across 32 primitives, 0 differing** between the cpu
+and vulkan backends. Rendering correctness is not the problem.
+
+### P3 — per-primitive perf matrix: the systemic finding
+
+Every primitive is slower on the vulkan backend than on the cpu backend:
+
+| Primitive | cpu | vulkan | ratio |
+|---|---|---|---|
+| whole showcase | 32 ms | 449-513 ms | ~16x |
+| draw_circle | 11 us | 1,590 us | 144x |
+| draw_circle_thick | 98 us | 9,062 us | 92x |
+| draw_radial_gradient | 774 us | 63,846 us | 82x |
+| draw_ellipse | 23 us | 1,689 us | 73x |
+| draw_bezier | 40 us | 2,200 us | 55x |
+| draw_arc | 77 us | 2,012 us | 26x |
+
+**Those all run the SAME `emu_*` CPU code on both backends.** Identical code,
+two orders of magnitude apart. The cost is therefore not in the primitives but
+in the per-call host/device synchronisation wrapped around them on the vulkan
+lane. That is the target for P5, and it is a bigger lever than any individual
+primitive.
+
+### Correction worth keeping
+
+`draw_rect_blend` first measured at 351 ms for one call — nearly the whole
+showcase, and it would have been the headline. A second identical call costs
+4.1 ms (79x cheaper), so that is ONE-TIME initialisation, not per-call cost.
+Steady state for the forced-readback tier is ~4 ms/call (still ~5x a whole
+64-rect GPU frame). The one-time cost is reproducible but its site is **not
+isolated**: staging-buffer allocation (7 us), per-frame array allocation
+(351 us) and the `_pixels_to_bytes` upload (trace never fired on this path)
+were each measured and disproved. Recorded as open rather than guessed.
 
 ## Non-goals
 
