@@ -17,7 +17,15 @@ if [ "${M5_HERMETIC_SNAPSHOT_DRIVER:-0}" != 1 ]; then
         exit 1
     }
     canonical_source_root=$(CDPATH= cd -- "$driver_dir/../.." && pwd -P)
-    bootstrap_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-m5-hermetic-driver.XXXXXX")
+    if [ -z "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ]; then
+        STORAGE_ROOTS_REPO_ROOT=$canonical_source_root
+        export STORAGE_ROOTS_REPO_ROOT
+        . "$canonical_source_root/scripts/lib/storage-roots.shs"
+        storage_roots_init || exit 2
+    fi
+    bootstrap_parent="$SIMPLE_WORKTREE_STORAGE_ROOT/tmp/macos-m5-hermetic-driver"
+    mkdir -p "$bootstrap_parent"
+    bootstrap_dir=$(mktemp -d "$bootstrap_parent/run.XXXXXXXX")
     bootstrap_driver=$bootstrap_dir/driver.shs
     driver_before=$(sha256_file_bootstrap "$original_driver")
     cp "$original_driver" "$bootstrap_driver"
@@ -43,6 +51,8 @@ scripts/check/check-macos-universal-m5.shs
 scripts/release/macos-universal-m5.shs'
 
 source_root=${M5_HERMETIC_CANONICAL_SOURCE_ROOT:?}
+: "${SIMPLE_USER_STORAGE_ROOT:?M5 hermetic wrapper requires the centralized user storage root}"
+: "${SIMPLE_WORKTREE_STORAGE_ROOT:?M5 hermetic wrapper requires the centralized worktree storage root}"
 evidence_dir=
 for argument in "$@"; do
     case "$argument" in
@@ -64,7 +74,7 @@ if [ "$source_root" != "$M5_HERMETIC_CANONICAL_SOURCE_ROOT" ] && \
 fi
 
 if [ -z "$evidence_dir" ]; then
-    evidence_dir="$source_root/build/review/m5-portable-hermetic-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    evidence_dir="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/release/m5-portable-hermetic-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 elif [ "${evidence_dir#/}" = "$evidence_dir" ]; then
     evidence_dir="$source_root/$evidence_dir"
 fi
@@ -74,8 +84,14 @@ mkdir -p "$evidence_parent"
 evidence_parent=$(CDPATH= cd -- "$evidence_parent" && pwd -P)
 evidence_dir=$evidence_parent/$evidence_name
 case "$evidence_dir" in
-    "$source_root"/build/*) ;;
-    *) echo "M5 hermetic wrapper FAIL: evidence must stay under source-root/build" >&2; exit 1 ;;
+    "$SIMPLE_WORKTREE_STORAGE_ROOT"/evidence/release/*) ;;
+    "$source_root"/build/*)
+        [ "${M5_HERMETIC_TEST_MODE:-0}" = 1 ] || {
+            echo "M5 hermetic wrapper FAIL: legacy build evidence path is test-only" >&2
+            exit 1
+        }
+        ;;
+    *) echo "M5 hermetic wrapper FAIL: evidence must stay under the worktree storage root" >&2; exit 1 ;;
 esac
 [ ! -e "$evidence_dir" ] || {
     echo "M5 hermetic wrapper FAIL: evidence path already exists: $evidence_dir" >&2
