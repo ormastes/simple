@@ -1,0 +1,93 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.child_environment.*
+
+fn roots() -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: "/Users/alice/.simple/storage"),
+        worktree_root: CanonicalPath(value: "/repo/simple/.simple/storage"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.PlatformDefault,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1u64, w1: 2u64, w2: 3u64, w3: 4u64),
+    )
+
+fn policy(tool_id: text, storage_class: StorageClass = StorageClass.Ephemeral) -> ToolStoragePolicy:
+    ToolStoragePolicy(
+        tool_id: tool_id,
+        preserve_external_overrides: false,
+        temporary_class: storage_class,
+    )
+
+fn binding(environment: StableEnvironment, key: text) -> text:
+    for item in environment.bindings:
+        if item.key == key:
+            return item.value
+    ""
+
+fn keys(environment: StableEnvironment) -> text:
+    environment.bindings.map(_.key).join(",")
+
+describe "centralized child storage environment":
+    it "projects Go cache and temp paths from exactly the two roots":
+        val environment = project_child_storage_environment(roots(), policy("go:build:session-7")).unwrap()
+        expect(keys(environment)).to_equal("GOCACHE,GOTMPDIR,SIMPLE_USER_STORAGE_ROOT,SIMPLE_WORKTREE_STORAGE_ROOT,TMPDIR")
+        expect(binding(environment, "GOCACHE")).to_start_with("/Users/alice/.simple/storage/cache/go/build-v1/")
+        expect(binding(environment, "GOTMPDIR")).to_start_with("/repo/simple/.simple/storage/tmp/child/go/")
+        expect(binding(environment, "TMPDIR")).to_equal(binding(environment, "GOTMPDIR"))
+
+    it "projects Cargo Python and Simple allowlists in stable key order":
+        val cargo = project_child_storage_environment(roots(), policy("cargo:check:session-a")).unwrap()
+        val rust = project_child_storage_environment(roots(), policy("rust:check:session-a")).unwrap()
+        val python_alias = project_child_storage_environment(roots(), policy("python:test:session-b")).unwrap()
+        val python = project_child_storage_environment(roots(), policy("python3:test:session-b")).unwrap()
+        val simple = project_child_storage_environment(roots(), policy("simple:native-build:session-c")).unwrap()
+        expect(keys(cargo)).to_equal("CARGO_HOME,CARGO_TARGET_DIR,SIMPLE_USER_STORAGE_ROOT,SIMPLE_WORKTREE_STORAGE_ROOT,TMPDIR")
+        expect(keys(rust)).to_equal(keys(cargo))
+        expect(keys(python_alias)).to_equal(keys(python))
+        expect(keys(python)).to_equal("PYTHONPYCACHEPREFIX,SIMPLE_USER_STORAGE_ROOT,SIMPLE_WORKTREE_STORAGE_ROOT,TMPDIR")
+        expect(keys(simple)).to_equal("SIMPLE_CACHE,SIMPLE_FRONTEND_CACHE_DIR,SIMPLE_HIR_CACHE_DIR,SIMPLE_NATIVE_BUILD_CACHE_DIR,SIMPLE_TEST_TMP,SIMPLE_USER_STORAGE_ROOT,SIMPLE_WORKTREE_STORAGE_ROOT,TMPDIR")
+        expect(binding(cargo, "CARGO_HOME")).to_start_with("/Users/alice/.simple/storage/cache/cargo/home-v1/")
+        expect(binding(cargo, "CARGO_TARGET_DIR")).to_start_with("/repo/simple/.simple/storage/build/cargo/")
+        expect(binding(python, "PYTHONPYCACHEPREFIX")).to_start_with("/Users/alice/.simple/storage/cache/python/pycache-v1/")
+        expect(binding(simple, "SIMPLE_NATIVE_BUILD_CACHE_DIR")).to_start_with("/repo/simple/.simple/storage/build/simple/")
+
+    it "gives unknown tools only roots and scoped TMPDIR":
+        val environment = project_child_storage_environment(roots(), policy("vendor-tool:command:session")).unwrap()
+        expect(keys(environment)).to_equal("SIMPLE_USER_STORAGE_ROOT,SIMPLE_WORKTREE_STORAGE_ROOT,TMPDIR")
+        expect(binding(environment, "TMPDIR")).to_start_with("/repo/simple/.simple/storage/tmp/child/vendor-tool/")
+        expect(binding(environment, "HOME")).to_equal("")
+
+    it "is byte deterministic and separates command session identities":
+        val first = project_child_storage_environment(roots(), policy("go:build:session-1")).unwrap()
+        val repeated = project_child_storage_environment(roots(), policy("go:build:session-1")).unwrap()
+        val second = project_child_storage_environment(roots(), policy("go:build:session-2")).unwrap()
+        expect(binding(first, "GOCACHE")).to_equal(binding(repeated, "GOCACHE"))
+        expect(binding(first, "TMPDIR")).to_equal(binding(repeated, "TMPDIR"))
+        expect(binding(first, "TMPDIR") == binding(second, "TMPDIR")).to_equal(false)
+
+    it "rejects unsafe oversized and non-worktree temporary classes":
+        val oversized = "a" * 193
+        expect(project_child_storage_environment(roots(), policy("")).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(project_child_storage_environment(roots(), policy(".hidden")).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(project_child_storage_environment(roots(), policy("trailing.")).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(project_child_storage_environment(roots(), policy("go..build")).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(project_child_storage_environment(roots(), policy("go/../../escape")).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+        expect(project_child_storage_environment(roots(), policy(oversized)).unwrap_err()).to_equal(StoragePathError.SegmentTooLong)
+        expect(project_child_storage_environment(roots(), policy("go", StorageClass.ReusableCache)).unwrap_err()).to_equal(StoragePathError.InvalidSegment)
+
+    it "maps every permitted command class beneath worktree storage":
+        val build = project_child_storage_environment(roots(), policy("tool:build:s", StorageClass.Build)).unwrap()
+        val tests = project_child_storage_environment(roots(), policy("tool:test:s", StorageClass.TestArtifact)).unwrap()
+        val evidence = project_child_storage_environment(roots(), policy("tool:evidence:s", StorageClass.Evidence)).unwrap()
+        val worktrees = project_child_storage_environment(roots(), policy("tool:worktree:s", StorageClass.ManagedWorktree)).unwrap()
+        expect(binding(build, "TMPDIR")).to_start_with("/repo/simple/.simple/storage/build/child/tool/")
+        expect(binding(tests, "TMPDIR")).to_start_with("/repo/simple/.simple/storage/test-artifacts/child/tool/")
+        expect(binding(evidence, "TMPDIR")).to_start_with("/repo/simple/.simple/storage/evidence/child/tool/")
+        expect(binding(worktrees, "TMPDIR")).to_start_with("/repo/simple/.simple/storage/worktrees/child/tool/")
+
+    it "marks every projected binding Simple-managed and never inherits ambient roots":
+        val environment = project_child_storage_environment(roots(), policy("simple:check:session")).unwrap()
+        for item in environment.bindings:
+            expect(item.ownership == StorageOwnership.SimpleManaged).to_equal(true)
+            expect(item.value.contains("/tmp/ambient")).to_equal(false)
+            expect(item.key == "TMP" or item.key == "TEMP").to_equal(false)
