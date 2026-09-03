@@ -2,7 +2,7 @@
 
 **Status:** Active implementation; incomplete
 **Date:** 2026-09-03
-**Audited integration head:** `aa7370895d332a7ee79633f18f0678743d355c47`
+**Audited integration head:** `1eb24a67d1c3`
 **KPF cutoff requested:** commits through `2157abcbe56`, plus the landed semantic-check lane
 **Requested starting point:** `3164fbc39376a2a543f5afa7fa92f1aca6d3d393` (ancestor of the published baseline)
 
@@ -18,17 +18,13 @@ Runtime-blocked work is neither failed nor passed. No wave or requirement is com
 
 ## Independent Completion Audit Addendum
 
-The independent two-plan audit at
-`build/review/two_plan_completion_audit_current.md` found two current
-contradictions that supersede earlier narrative pass claims:
-
-- `scripts/check/check-kernel-closure.shs` fails with 33 forbidden
-  compiler/K0/K1-to-plugin imports. Original migration phases 0 and 5 are not
-  structurally complete at this head.
-- `scripts/check/kernel-plugin-fabric/benchmark-performance-capacity.shs`
-  fails because a faster measured table path underflows unsigned overhead
-  subtraction. The mutation-red benchmark passes, but the normal performance
-  gate is not reproducibly green.
+The authoritative two-plan audit at
+`build/review/two_plan_completion_audit_current.md` reran the formerly failing
+gates at `1eb24a67d1c3`. Compiler closure passes with 1,979 classified files and
+zero forbidden edges. KPF performance normal/mutation gates pass. The native
+ABI matrix passes matching-major, older-minor, wrong-major, digest, cost, and
+mutation cases. Provenance fixtures pass, but launcher SPipe is blocked because
+this checkout admits no real runtime.
 
 The audit also confirms that Stage4, M4, M5, reverse-reference publication,
 Stage2 receipt production, strict no-allocation, and performance mutation
@@ -46,7 +42,7 @@ execution, signing/notarization, or original phase 1–8 runtime qualification.
 | Bounded sync | Fixed generational slots, exact active-generation handle pins, generation publication/retirement, atomic immediate-predecessor rollback, static registry | Implemented; rollback source/spec structurally checked; Simple runtime blocked |
 | Bounded async | Submission/completion rings, generational sessions/requests, backpressure/stale status, static-dispatch parity fixture, incomplete coverage verdict | Implemented; structurally checked; Simple runtime blocked |
 | Strict noalloc | Fixed arena/runtime plus native `malloc`/`calloc`/`realloc` interposition and a real post-activation allocation mutation | Implemented; independently rerun native gate passed with `clean=0`, mutation status `23`; Simple runtime lifecycle spec remains blocked; long-run and full runtime-path proof remain open |
-| Schema/C ABI | Deterministic schema compiler foundation, canonical C ABI V1 prefix, C/Rust/C++ generators, portable identifier checks, append-compatibility and operation-slot validation | Implemented; independently rerun generated Rust/C++ fixture compilation passed and prior C ABI checks passed; generated Simple binding and complete compatibility corpus remain open |
+| Schema/C ABI | Deterministic schema compiler foundation, canonical C ABI V1 prefix, Simple/C/Rust/C++ generators, WIT projection, portable identifiers, append compatibility, and operation-slot validation | Implemented; focused generation and native ABI matrix pass; complete shared malformed/layout corpus remains open |
 | C/C++ SDK | Caller-owned buffer examples and move-only non-throwing C++ RAII session | Implemented; C11/C++17 compile/run tested |
 | Rust SDK | `repr(C)` raw ABI plus safe provider/session/request lifecycle facade | Implemented; `cargo test` and `cargo check --tests` runtime tested |
 | Native loader | Exact path/digest/ABI/interface/capability admission, cached handle, exact generation pins, unload denial, receipt | Implemented; structurally checked; Simple runtime blocked |
@@ -59,7 +55,7 @@ execution, signing/notarization, or original phase 1–8 runtime qualification.
 | Editor facade | Editor-to-KPF compatibility adapter, additive lifecycle/crash tests, worker placement without in-process fallback | Implemented; structurally checked; Simple runtime blocked |
 | Tooling sessions | Generation-pinned `ToolingWorkspace`, native editor client foundation, and `toolingd` document sessions with protocol negotiation, exact revision/digest validation, supersession/explicit cancellation, bounded diagnostic publication, and disconnect cleanup | Implemented; executable scenarios present but Simple runtime blocked; LSP/DAP/test/custom protocols and product cutovers remain open |
 | Extended-enum closure | KPF constructor ID projection, claimed-ID validation, deterministic operation-completeness tables, dense tags, and critical `Dyn` rejection | Implemented; structurally checked; Simple runtime blocked; final schema integration remains open |
-| MDSOC++ | Capsule/facet descriptors, deterministic graph sealing and lifecycle ordering, capability/budget checks, generation receipts, and migration compatibility | Implemented; structurally checked; Simple runtime blocked; large-program pilot and executed upgrade/rollback proof remain open |
+| MDSOC++ | Capsule/facet descriptors, deterministic graph sealing/lifecycle, capability/budget checks, migration compatibility, and concrete IDE/tooling large-program pilot | Implemented; eight executable scenarios and manual exist; current non-seed runner reported 8 passed/0 failed from unchanged-test cache; fresh admitted-runtime execution and broader product proof remain open |
 | VS Code projection | Typed KPF admission/placement/capability/session states, stale-snapshot rejection, explicit degradation, generated contributions, and lazy worker/LSP facade | Implemented; four focused tests and TypeScript compilation passed; production desktop/browser cutover and full suite conformance remain open |
 
 ## Requirement Traceability
@@ -67,17 +63,17 @@ execution, signing/notarization, or original phase 1–8 runtime qualification.
 | Requirement | Current evidence | Verdict |
 |---|---|---|
 | REQ-KPF-001 placement parity | Static fixture, native loader, worker foundation exist | Partial; shared executable parity corpus missing |
-| REQ-KPF-002 K0g closure | Common contracts and closure verifier published | Partial; full authoritative closure run still required |
+| REQ-KPF-002 K0g closure | Common contracts and closure verifier published | Current K0g/compiler closure gates pass; bootstrap qualification remains separate |
 | REQ-KPF-003 SCI/query authority | SMF adapter preserves admission model | Partial; end-to-end authority and no-runtime-compile acceptance missing |
 | REQ-KPF-004 stable ABI | C ABI prefix and cross-language SDK layouts exist | Partial; full generated compatibility/forbidden-type corpus missing |
 | REQ-KPF-005 bounded/noalloc | Fixed structures, strict profile, and native allocator-interposition mutation gate exist | Partial; focused native proof passes, but Simple runtime-path, long-run, and capacity matrix evidence remain missing |
-| REQ-KPF-006 O(1) steady state | Dense slots, exact pins, bounded request handles exist | Partial; measured lookup/scaling counters missing |
+| REQ-KPF-006 O(1) steady state | Dense slots, exact pins, bounded request handles and scaling benchmark exist | Focused performance gate passes; long-run/product evidence remains open |
 | REQ-KPF-007 lifecycle safety | Pins, stale handles, quiescence/failure states and immediate-predecessor rollback exist | Partial; rollback spec is runtime blocked, and race/failed-candidate/unload/placement execution matrix remains missing |
-| REQ-KPF-008 generated compatibility | C/Rust/C++ generators, append checks, and SDK tests exist | Partial; generated Simple projection and complete deterministic four-language compatibility corpus are missing |
-| REQ-KPF-009 lint truth | Coverage/verdict model, three adapter foundations, semantic-by-default Simple check, and executable mixed-language composition exist | Partial; focused Simple semantic fixtures pass 4/4 and the worker-backed Simple/Rust/C++ conformance plus provider-omission/authority-removal mutation gate passes 3/3, but generated-rule, canonical-runtime, normalized-edit, and full rust-analyzer/clangd gates remain missing |
+| REQ-KPF-008 generated compatibility | Simple/C/Rust/C++ generators, WIT, append checks, SDK tests, and native ABI matrix exist | Native matrix passes; complete shared malformed/layout corpus remains open |
+| REQ-KPF-009 lint truth | Coverage/verdict model, three adapter foundations, and semantic-by-default Simple check path exist | Partial; focused Simple semantic fixtures pass 4/4, but generated-rule, mutation, mixed-language, canonical-runtime, and full rust-analyzer/clangd gates remain missing |
 | REQ-KPF-010 editor-neutral tooling | Editor facade, tooling workspace, native client, versioned toolingd sessions, stale-result guards, and VS Code projection exist | Partial; Simple scenarios, protocols, production cutovers, and shared executable client conformance remain missing |
 | REQ-KPF-011 extended-enum closure | KPF identity projection, completeness tables, dense sealing, and critical `Dyn` rejection exist | Partial; focused Simple runtime execution and final schema/sealer integration missing |
-| REQ-KPF-012 MDSOC++ | Deterministic capsule sealer, policy/budget checks, receipts, and migration compatibility exist | Partial; executable Simple evidence, large-program pilot, and upgrade/rollback execution proof missing |
+| REQ-KPF-012 MDSOC++ | Deterministic capsule sealer, policy/budget checks, receipts, migration compatibility, and IDE/tooling pilot exist | Focused 8/8 cached PASS evidence retained; fresh admitted-runtime run and broader product upgrade/rollback proof remain open |
 
 ## Remaining Critical Path
 
@@ -92,4 +88,12 @@ execution, signing/notarization, or original phase 1–8 runtime qualification.
 
 ## Completion Statement
 
-KPF is actively implemented but is not complete. The audited tree now includes deterministic Rust/C++ schema generation, native allocator-interposition proof, atomic rollback, supervised real worker execution, versioned `toolingd` sessions, and a landed semantic-by-default Simple check lane. Native schema/noalloc/worker gates pass, and the focused semantic scenarios pass 4/4 on the verified non-seed `macos-arm64` release runtime; the canonical `aarch64-apple-darwin` runtime identity and other Simple scenarios remain blocked. Generated Simple bindings, product and client cutovers, real language-service execution, the MDSOC++ pilot, hardening, performance evidence, and the full acceptance matrix remain open. Cutover, compatibility-path deletion, release, and a completion claim remain prohibited until every requirement has authoritative executable evidence and independent review reports PASS.
+KPF is broadly implemented but not complete. Current closure, performance,
+mutation, provenance-fixture, and native ABI gates pass. Four-language and WIT
+generation, native/worker/shared-memory/Wasm placements, real Rust/C++ workers,
+tooling edge adapters, IDE client cutovers, and the MDSOC++ pilot are present.
+The pilot retains 8/8 cached focused evidence, but this checkout admits no
+runtime for a fresh launcher/SPipe run. Shared cross-placement, mixed-language,
+live-client, long-run, product RSS, and final REQ-KPF-001..012 evidence remain
+open. Release and completion claims remain prohibited until those rows pass
+independent review.

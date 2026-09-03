@@ -1,6 +1,6 @@
 # Kernel Plugin Fabric Migration Plan
 
-**Status:** Active implementation
+**Status:** Active implementation; independently audited **NOT COMPLETE** at `1eb24a67d1c3`
 **Date:** 2026-09-03
 **Strategy:** Compatibility adapters, shadow execution, reversible cutover.
 
@@ -20,13 +20,13 @@ terms are strict:
 | Wave | Published evidence | Status at baseline |
 |---|---|---|
 | 0 | Research, architecture/design/plans, executable acceptance scaffolding, K0g import-closure verifier | Implemented and structurally checked; acceptance scenarios that require later production modules remain intentionally non-green |
-| 1 | Deterministic schema compiler foundation, K0g contracts, canonical C ABI prefix, generated C/Rust/C++ projections, SDKs, and append-compatibility checks | Implemented; generated Rust/C++ fixture compilation and prior C/C++/Rust SDK checks passed; generated Simple binding and complete four-language compatibility corpus remain open |
+| 1 | Deterministic schema compiler foundation, K0g contracts, canonical C ABI prefix, generated Simple/C/Rust/C++ and WIT projections, SDKs, and append-compatibility checks | Implemented; focused generation/SDK checks pass; complete shared malformed/layout compatibility corpus remains open |
 | 2 | Fixed sync slots/generations/pins, atomic immediate-predecessor rollback, bounded async/noalloc runtime, SMF admission, and supervised real worker process transport | Implemented; native allocator mutation gate and real-worker lifecycle/fault gate passed; focused Simple execution remains blocked; deadline/cancellation races, O(1) measurements, signatures, and shared placement parity remain open |
 | 3 | Backend KPF admission projection and retained native batch session | Implemented; native retained-session success/failure cleanup passed; full compiler/bootstrap parity and worker backend placement remain open |
-| 4 | Proof-carrying lint records/scheduler, legacy Simple projection, semantic-by-default `check`, C++ worker contracts, and Rust Cargo diagnostic adapter | Implemented and structurally checked, including typed Cargo JSON parsing, impossible-coverage underflow rejection, and a 3/3 executable Simple/Rust/C++ composition and mutation gate; generated rules, canonical-runtime qualification, normalized edits, and full rust-analyzer/clangd integration remain open |
+| 4 | Proof-carrying lint records/scheduler, semantic-by-default `check`, normalized JSON/SARIF/LSP output, and bounded Rust/C++ tool workers | Implemented with focused Rust and Simple evidence; mixed-workspace parity, generated rule-catalog completion, and rust-analyzer/clangd IDE integration remain open |
 | 5 | Editor extension facade, generation-pinned `ToolingWorkspace`, native tooling client, versioned `toolingd` document sessions, and VS Code KPF projection | Implemented foundations with exact revision/digest rejection, cancellation and disconnect cleanup scenarios; Simple execution, LSP/DAP/test protocols, production client cutovers, and shared conformance remain open |
-| 6 | Extended-enum KPF closure and deterministic MDSOC++ capsule sealer | Implemented and structurally checked; Simple runtime execution remains blocked, and the large-program pilot plus upgrade/rollback execution proof remain open |
-| 7 | Worker fault states and SDK examples provide partial groundwork | Not complete; signatures, fuzz/long-run/performance CI, shared-memory optimization, WIT/Wasm, and public migration guide remain open |
+| 6 | Extended-enum KPF closure, deterministic MDSOC++ sealer, and IDE/tooling large-program pilot | Implemented; the focused pilot retains 8/8 cached PASS evidence; broader upgrade/rollback and compiler-schema integration remain open |
+| 7 | Native/real-process/shared-memory/Wasm placements, signatures/trust, lifecycle faults, allocation proof, and performance gates | Broadly implemented and focused native/performance gates pass; shared conformance, fuzz/long-run CI, installed Wasm smoke, and public migration guide remain open |
 
 The authoritative detailed evidence and remaining-work ledger is
 `doc/09_report/kernel_plugin_fabric_implementation_status_2026-09-03.md`.
