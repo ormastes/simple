@@ -285,9 +285,27 @@ resume_tool_check="$archive/tool-preflight.$$"
 bootstrap_stage3_source_snapshot "$resume_source_check" "$root"
 bootstrap_stage3_git_state "$root" "$resume_git_check"
 bootstrap_stage3_tool_authority_snapshot "$resume_tool_check" "$path" "$root"
-cmp -s "$source_before" "$resume_source_check"
-cmp -s "$git_before" "$resume_git_check"
-cmp -s "$tool_before" "$resume_tool_check"
+# Each cmp IS the refusal: a bare 'cmp -s' under 'set -eu' aborts the script
+# when the snapshots differ.  That enforcement is correct and is unchanged
+# below -- what was missing is the reason.  Measured 2026-09-03: a resume whose
+# only drift was a moved git HEAD ran its full ~13-minute preflight and exited 1
+# having printed NOTHING, which is exactly the silent-exit failure this file's
+# own header names as having made a real Stage-2 refusal undiagnosable.  Saying
+# which of source/git/tool differs turns a blind 13-minute run into a one-line
+# answer.  Same exit status and same abort point as before; only stderr gains a
+# line.  CROSS-PLATFORM IMPACT: none, nothing here is OS-dependent.
+cmp -s "$source_before" "$resume_source_check" || {
+  echo "error: Stage-2 source snapshot changed since admission: $source_before differs from $resume_source_check" >&2
+  exit 1
+}
+cmp -s "$git_before" "$resume_git_check" || {
+  echo "error: Stage-2 git state changed since admission: $git_before differs from $resume_git_check (re-mint Stage 2 over the current tree)" >&2
+  exit 1
+}
+cmp -s "$tool_before" "$resume_tool_check" || {
+  echo "error: Stage-2 tool authority changed since admission: $tool_before differs from $resume_tool_check" >&2
+  exit 1
+}
 rm -f "$resume_source_check" "$resume_git_check" "$resume_tool_check"
 
 if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" >/dev/null 2>&1; then
