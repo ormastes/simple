@@ -1,0 +1,65 @@
+#!/bin/sh
+# Centralized storage projection for compiler, native-build, bootstrap, and
+# provenance producers. Admission and provenance policy remain owned by their
+# existing callers; this module only assigns storage authority.
+
+simple_bootstrap_storage_init() {
+  sbs_repo_root=$1
+  STORAGE_ROOTS_REPO_ROOT=$sbs_repo_root
+  export STORAGE_ROOTS_REPO_ROOT
+  . "${sbs_repo_root}/scripts/lib/storage-roots.shs"
+  storage_roots_init || {
+    echo "error: bootstrap centralized storage roots unavailable" >&2
+    return 2
+  }
+
+  SIMPLE_BOOTSTRAP_CACHE_ROOT="${SIMPLE_USER_STORAGE_ROOT}/cache/compiler/bootstrap/v1"
+  SIMPLE_NATIVE_BUILD_CACHE_DIR=${SIMPLE_NATIVE_BUILD_CACHE_DIR:-"${SIMPLE_USER_STORAGE_ROOT}/cache/compiler/native-build/v1"}
+  SIMPLE_BOOTSTRAP_BUILD_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT}/build/bootstrap"
+  SIMPLE_BOOTSTRAP_TMP_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/bootstrap"
+  SIMPLE_BOOTSTRAP_TEST_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT}/test/bootstrap"
+  SIMPLE_BOOTSTRAP_EVIDENCE_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT}/evidence/bootstrap"
+  SIMPLE_BOOTSTRAP_HOME_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT}/tmp/bootstrap/home"
+  mkdir -p "${SIMPLE_BOOTSTRAP_CACHE_ROOT}" "${SIMPLE_NATIVE_BUILD_CACHE_DIR}" \
+    "${SIMPLE_BOOTSTRAP_BUILD_ROOT}" "${SIMPLE_BOOTSTRAP_TMP_ROOT}" \
+    "${SIMPLE_BOOTSTRAP_TEST_ROOT}" "${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}" \
+    "${SIMPLE_BOOTSTRAP_HOME_ROOT}" || return 2
+
+  SIMPLE_CACHE=${SIMPLE_CACHE:-"${SIMPLE_BOOTSTRAP_CACHE_ROOT}/cas"}
+  SIMPLE_CACHE_PROJECT=${SIMPLE_CACHE_PROJECT:-simple}
+  HOME="${SIMPLE_BOOTSTRAP_HOME_ROOT}"
+  TMPDIR="${SIMPLE_BOOTSTRAP_TMP_ROOT}"
+  XDG_CACHE_HOME="${SIMPLE_USER_STORAGE_ROOT}/cache/xdg"
+  CARGO_HOME="${SIMPLE_USER_STORAGE_ROOT}/cache/cargo/home"
+  CARGO_TARGET_DIR="${SIMPLE_USER_STORAGE_ROOT}/cache/cargo/target"
+  export SIMPLE_BOOTSTRAP_CACHE_ROOT SIMPLE_NATIVE_BUILD_CACHE_DIR
+  export SIMPLE_BOOTSTRAP_BUILD_ROOT SIMPLE_BOOTSTRAP_TMP_ROOT
+  export SIMPLE_BOOTSTRAP_TEST_ROOT SIMPLE_BOOTSTRAP_EVIDENCE_ROOT
+  export SIMPLE_BOOTSTRAP_HOME_ROOT SIMPLE_CACHE SIMPLE_CACHE_PROJECT
+  export HOME TMPDIR XDG_CACHE_HOME CARGO_HOME CARGO_TARGET_DIR
+}
+
+simple_bootstrap_storage_select_output() {
+  sbs_requested=$1
+  sbs_receipt=$2
+  sbs_source=centralized-default
+  sbs_output=${SIMPLE_BOOTSTRAP_BUILD_ROOT:?storage not initialized}
+  if [ -n "$sbs_requested" ] && [ "$sbs_requested" != build/bootstrap ] && \
+     [ "$sbs_requested" != "$SIMPLE_BOOTSTRAP_BUILD_ROOT" ]; then
+    sbs_output=$sbs_requested
+    sbs_source=legacy-explicit-override
+  fi
+  mkdir -p "$(dirname -- "$sbs_receipt")" || return 2
+  sbs_tmp="${sbs_receipt}.tmp.$$"
+  {
+    printf 'schema=simple-bootstrap-storage-v1\n'
+    printf 'user_root=%s\n' "$SIMPLE_USER_STORAGE_ROOT"
+    printf 'worktree_root=%s\n' "$SIMPLE_WORKTREE_STORAGE_ROOT"
+    printf 'cache_root=%s\n' "$SIMPLE_BOOTSTRAP_CACHE_ROOT"
+    printf 'output_root=%s\n' "$sbs_output"
+    printf 'output_source=%s\n' "$sbs_source"
+    printf 'legacy_override=%s\n' "$([ "$sbs_source" = legacy-explicit-override ] && printf true || printf false)"
+  } >"$sbs_tmp" || return 2
+  mv -f "$sbs_tmp" "$sbs_receipt" || return 2
+  printf '%s\n' "$sbs_output"
+}

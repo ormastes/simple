@@ -4,6 +4,9 @@
 # before the strategy/session wrappers: progress-watch observes another process
 # and must not acquire bootstrap ownership or create its own process group.
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+. "${bootstrap_entry_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 case "${1:-}" in
   progress-watch)
     shift
@@ -18,7 +21,7 @@ esac
 if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
   bootstrap_strategy_entry=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
   bootstrap_strategy_arg=${SIMPLE_BOOTSTRAP_STRATEGY:-normal}
-  bootstrap_strategy_output=build/bootstrap
+  bootstrap_strategy_output=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
   bootstrap_strategy_bypass=0
   bootstrap_strategy_expect_value=0
   for bootstrap_strategy_option in "$@"; do
@@ -77,7 +80,6 @@ else
     /bin/sh "$0" "$@"
 fi
 set -eu
-bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
 . "${bootstrap_entry_dir}/lib/host-shared-cache.shs"
 simple_host_cache_configure
 . "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
@@ -243,7 +245,7 @@ EOF
 }
 
 backend=""
-output_dir="build/bootstrap"
+output_dir="${SIMPLE_BOOTSTRAP_BUILD_ROOT}"
 deploy=0
 build_mcp=1
 target=""
@@ -726,6 +728,8 @@ portable_lock_canonical_output "${output_dir}" || {
   exit 1
 }
 output_dir=${PORTABLE_LOCK_CANONICAL_OUTPUT}
+bootstrap_storage_receipt="${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/storage-authority.sdn"
+output_dir=$(simple_bootstrap_storage_select_output "${output_dir}" "${bootstrap_storage_receipt}") || exit 70
 
 # Disk-space precondition. A full bootstrap needs ~10-15 GB (Rust authority
 # cargo target tree + generation publish + stage2/3 native artifacts); below
@@ -1562,7 +1566,7 @@ bootstrap_stage_sanity() (
     TMP=${sanity_win_temp}
     export TEMP TMP
   fi
-  evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
+  evidence_tmp="${evidence_path:-${SIMPLE_BOOTSTRAP_EVIDENCE_ROOT}/bootstrap-sanity}.tmp.$$"
   frontend_log="${evidence_tmp}.frontend"
   rm -f "${evidence_tmp}" "${frontend_log}"
   candidate_sha_before=$(bootstrap_stage3_hash_file "${candidate}") || return 1
