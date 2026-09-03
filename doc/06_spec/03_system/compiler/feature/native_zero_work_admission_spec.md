@@ -11,6 +11,8 @@
 - Reject stale invocation/requested-input identity and missing/corrupt current generations.
 - Recursively reject a deleted or corrupt non-current ancestor.
 - Preserve collision evidence and recover an unselected immutable generation name.
+- Miss when canonical no-mangle, package-index, safety/type, or linker controls change.
+- Reject an unknown or omitted centralized environment-schema field.
 - Kill the native publisher at generation and pointer write/rename/fsync boundaries;
   recovery must retain the old complete state or the new complete state.
 

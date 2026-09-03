@@ -11,6 +11,8 @@ All notable changes to Simple Language will be documented in this file.
   verify every ancestor before admitting a warm build; preserve and recover
   unselected generation-name collisions; and expose real parser/HIR/MIR/codegen/link
   scheduler counters with native crash-boundary and end-to-end SPipe coverage.
+  The environment identity now has one canonical semantic/non-semantic field
+  schema; unclassified or omitted fields fail its project-aware acceptance gate.
 - **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
   commit-ready textual evidence tree, validate them from the exact pushed Git
   revision, reject dirty bootstrap attribution, and allow receipt-backed TODO

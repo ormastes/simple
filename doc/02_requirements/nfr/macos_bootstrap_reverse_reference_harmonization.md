@@ -15,7 +15,10 @@ Decision source: user-final-performance-authority-2026-09-02
   build request and requested-input identity, and recursively authenticate the
   complete immutable receipt ancestry. Missing, corrupt, cyclic, or excessive
   ancestry, stale invocations, and unrecoverable generation collisions fail
-  closed.
+  closed. One centralized schema shall classify every environment field read by
+  native-build owners, hash every semantic field, and reject unknown or omitted
+  schema fields; representative no-mangle, package-index, safety/type-profile,
+  backend/linker, provider, and bootstrap controls shall be mutation-tested.
 - **MBH-NFR-003 — Bounded residency.** Evidence shall record wall time, CPU,
   peak/retained RSS, cache counts, and critical path. Each architecture shall
   supply an admitted baseline receipt bound to that architecture, its baseline
