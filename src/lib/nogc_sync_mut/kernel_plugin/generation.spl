@@ -47,6 +47,7 @@ class KpfGenerationTable:
     generation_capacity: u32
     pin_capacity: u32
     var active: KpfGenerationHandle
+    var rollback_candidate: KpfGenerationHandle
     var generation_cursor: u32
     var pin_cursor: u32
 
@@ -65,7 +66,9 @@ class KpfGenerationTable:
             index = index + 1
         KpfGenerationTable(generations: generations, pins: pins,
             generation_capacity: generation_capacity, pin_capacity: pin_capacity,
-            active: KpfGenerationHandle(index: 0, epoch: 0), generation_cursor: 0, pin_cursor: 0)
+            active: KpfGenerationHandle(index: 0, epoch: 0),
+            rollback_candidate: KpfGenerationHandle(index: 0, epoch: 0),
+            generation_cursor: 0, pin_cursor: 0)
 
     fn _valid_generation(handle: KpfGenerationHandle) -> bool:
         handle.index < self.generation_capacity and self.generations[handle.index].occupied and self.generations[handle.index].epoch == handle.epoch
@@ -90,10 +93,34 @@ class KpfGenerationTable:
                     self.generations[previous.index].active = false
                     self.generations[previous.index].retired = true
                 self.active = current
+                self.rollback_candidate = previous
                 self.generation_cursor = (index + 1) % self.generation_capacity
                 return KpfGenerationPublication(status: KpfSyncStatus.Ok, current: current, previous: previous)
             scanned = scanned + 1
         KpfGenerationPublication(status: KpfSyncStatus.CapacityExceeded, current: KpfGenerationHandle(index: 0, epoch: 0), previous: self.active)
+
+    me rollback(handle: KpfGenerationHandle) -> KpfGenerationPublication:
+        val current = self.active
+        if not self._valid_generation(handle):
+            return KpfGenerationPublication(status: KpfSyncStatus.StaleHandle,
+                current: current, previous: handle)
+        if not self._valid_generation(current) or not self.generations[current.index].active:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotActive,
+                current: current, previous: handle)
+        if handle.index != self.rollback_candidate.index or handle.epoch != self.rollback_candidate.epoch:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotActive,
+                current: current, previous: handle)
+        if not self.generations[handle.index].retired:
+            return KpfGenerationPublication(status: KpfSyncStatus.GenerationNotRetired,
+                current: current, previous: handle)
+
+        self.generations[current.index].active = false
+        self.generations[current.index].retired = true
+        self.generations[handle.index].retired = false
+        self.generations[handle.index].active = true
+        self.active = handle
+        self.rollback_candidate = current
+        KpfGenerationPublication(status: KpfSyncStatus.Ok, current: handle, previous: current)
 
     fn view(handle: KpfGenerationHandle) -> KpfGenerationView:
         if not self._valid_generation(handle):

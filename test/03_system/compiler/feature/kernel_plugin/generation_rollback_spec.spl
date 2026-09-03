@@ -1,0 +1,77 @@
+# Purpose: executable evidence for atomic KPF generation rollback.
+# @req REQ-KPF-SYNC-BOUNDED
+# @cover src/lib/nogc_sync_mut/kernel_plugin/generation.spl
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.{KpfGenerationTable, KpfSyncStatus}
+
+fn provider_id(value: u64) -> KpfId128:
+    KpfId128(hi: value, lo: value + 1)
+
+fn composition_digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+describe "KPF atomic generation rollback":
+    it "restores only the immediate predecessor and preserves pins and epochs":
+        step("publish and pin the first generation before replacement")
+        val table = KpfGenerationTable.create(3, 3)
+        val first = table.publish(provider_id(1), composition_digest(10), 1)
+        val first_pin = table.pin(first.current)
+        assert_true(first.status.accepted())
+        assert_true(first_pin.status.accepted())
+
+        step("publish and pin the replacement generation")
+        val second = table.publish(provider_id(2), composition_digest(20), 2)
+        val second_pin = table.pin(second.current)
+        assert_true(second.status.accepted())
+        assert_true(second_pin.status.accepted())
+
+        step("atomically restore the exact retired predecessor")
+        val rolled_back = table.rollback(first.current)
+        assert_true(rolled_back.status.accepted())
+        assert_equal(rolled_back.current.index, first.current.index)
+        assert_equal(rolled_back.current.epoch, first.current.epoch)
+        assert_equal(rolled_back.previous.index, second.current.index)
+        assert_equal(rolled_back.previous.epoch, second.current.epoch)
+        val restored = table.view(first.current)
+        val retired = table.view(second.current)
+        assert_true(restored.active)
+        assert_false(restored.retired)
+        assert_equal(restored.pin_count, 1u32)
+        assert_false(retired.active)
+        assert_true(retired.retired)
+        assert_equal(retired.pin_count, 1u32)
+
+        step("release both unchanged pin handles after rollback")
+        assert_true(table.release_pin(first_pin.handle).accepted())
+        assert_true(table.release_pin(second_pin.handle).accepted())
+        assert_equal(table.view(first.current).pin_count, 0u32)
+        assert_equal(table.view(second.current).pin_count, 0u32)
+
+    it "fails closed for non-previous, collected, and stale predecessor handles":
+        step("reject an older retired generation that is not the immediate predecessor")
+        val table = KpfGenerationTable.create(3, 1)
+        val first = table.publish(provider_id(1), composition_digest(10), 1)
+        val second = table.publish(provider_id(2), composition_digest(20), 2)
+        val third = table.publish(provider_id(3), composition_digest(30), 3)
+        val non_previous = table.rollback(first.current)
+        assert_equal(non_previous.status.code(), KpfSyncStatus.GenerationNotActive.code())
+        assert_true(table.view(third.current).active)
+        assert_true(table.view(second.current).retired)
+
+        step("collect the immediate predecessor and reject its old handle")
+        assert_true(table.collect(second.current).accepted())
+        val collected = table.rollback(second.current)
+        assert_equal(collected.status.code(), KpfSyncStatus.StaleHandle.code())
+        assert_true(table.view(third.current).active)
+
+        step("reuse the collected slot and keep rejecting the stale predecessor epoch")
+        val replacement = table.publish(provider_id(4), composition_digest(40), 4)
+        assert_true(replacement.status.accepted())
+        assert_equal(replacement.current.index, second.current.index)
+        assert_false(replacement.current.epoch == second.current.epoch)
+        val stale = table.rollback(second.current)
+        assert_equal(stale.status.code(), KpfSyncStatus.StaleHandle.code())
+        assert_true(table.view(replacement.current).active)
