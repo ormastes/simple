@@ -1,7 +1,7 @@
 # Kernel Plugin Fabric Architecture
 
-**Status:** Proposed  
-**Date:** 2026-09-03  
+**Status:** Proposed
+**Date:** 2026-09-03
 **Baseline:** `43a4a491c3b5ab8bd350a09a2541a726213053a2`
 
 ## Decision

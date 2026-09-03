@@ -1,7 +1,7 @@
 # Kernel Plugin Fabric Agent Tasks
 
-**Status:** Proposed  
-**Merge owner:** KPF integration owner (highest-capability model)  
+**Status:** Proposed
+**Merge owner:** KPF integration owner (highest-capability model)
 **Final reviewer:** Independent architecture/verification owner, not an implementation-lane author
 
 ## Coordination Contract

@@ -1,7 +1,7 @@
 # Kernel Plugin Fabric Migration Plan
 
-**Status:** Proposed  
-**Date:** 2026-09-03  
+**Status:** Proposed
+**Date:** 2026-09-03
 **Strategy:** Compatibility adapters, shadow execution, reversible cutover.
 
 ## Non-Negotiable Gates

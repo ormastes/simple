@@ -1,6 +1,6 @@
 # Kernel Plugin Fabric Detailed Design
 
-**Status:** Proposed  
+**Status:** Proposed
 **Date:** 2026-09-03
 
 ## Canonical Records
