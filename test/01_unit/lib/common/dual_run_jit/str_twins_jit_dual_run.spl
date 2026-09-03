@@ -1,0 +1,223 @@
+# JIT-lane dual-run harness for the rt_string_* pure-computation twins.
+#
+# WHY THIS IS NOT A `_spec.spl`, and is therefore NOT wired into
+# scripts/check/check-dual-run-shadow.shs:
+#
+# The dual-run gate runs its pair specs with `simple test`, i.e. the TREE-WALK
+# interpreter. Every rt_string_* oracle exercised below is ABSENT from the
+# interpreter's extern dispatch (src/compiler_rust/compiler/src/
+# interpreter_extern/mod.rs), and calling one under `simple test` is a hard
+# `semantic: unknown extern function: rt_string_capitalize` — measured, not
+# assumed. They ARE present in src/compiler_rust/common/src/runtime_symbols.rs
+# and resolve correctly under the Cranelift JIT (`simple run`), which is the
+# engine this file is written for.
+#
+# So this harness is real executed dual-run evidence on the JIT lane, and is
+# deliberately kept OUT of the `_spec.spl` namespace so it can never be
+# mistaken for a gate-covered pair. Promoting these to `@dual_pair` annotations
+# is a one-line change per symbol the day the oracles are registered in the
+# interpreter's extern dispatch.
+#
+#   bin/simple run test/01_unit/lib/common/dual_run_jit/str_twins_jit_dual_run.spl
+#
+# Exit is non-zero when any case diverges. The C/Rust side is the REFERENCE:
+# where it is surprising (pad/center/zfill never TRUNCATE when the requested
+# width is smaller than the input; center puts the odd extra pad character on
+# the RIGHT; zfill keeps a leading sign in front of the zeros; repeat(0) is the
+# empty text) the twin mirrors the quirk and str_pure_twins.spl says so.
+
+use std.common.spec.dual_run.{dual_check_text, dual_check_i64, dual_check_bytes, dual_summarize}
+use std.common.str_pure_twins.{twin_char_count, twin_chomp, twin_remove_prefix,
+    twin_remove_suffix, twin_trim_start_matches, twin_trim_end_matches,
+    twin_pad_left, twin_pad_right, twin_center, twin_zfill, twin_repeat,
+    twin_squeeze, twin_substr, twin_substr_from, twin_replace_first,
+    twin_find_all, twin_sorted, twin_partition, twin_rpartition}
+
+extern fn rt_string_char_count(s: text) -> i64
+extern fn rt_string_chomp(s: text) -> text
+extern fn rt_string_remove_prefix(s: text, p: text) -> text
+extern fn rt_string_remove_suffix(s: text, p: text) -> text
+extern fn rt_string_trim_start_matches(s: text, p: text) -> text
+extern fn rt_string_trim_end_matches(s: text, p: text) -> text
+extern fn rt_string_pad_left(s: text, w: i64, p: text) -> text
+extern fn rt_string_pad_right(s: text, w: i64, p: text) -> text
+extern fn rt_string_center(s: text, w: i64, p: text) -> text
+extern fn rt_string_zfill(s: text, w: i64) -> text
+extern fn rt_string_repeat(s: text, n: i64) -> text
+extern fn rt_string_squeeze(s: text, set: text) -> text
+extern fn rt_string_substr(s: text, start: i64, len: i64) -> text
+extern fn rt_string_substr_from(s: text, start: i64) -> text
+extern fn rt_string_replace_first(s: text, p: text, r: text) -> text
+extern fn rt_string_find_all(s: text, n: text) -> [i64]
+extern fn rt_string_sorted(s: text) -> text
+extern fn rt_string_partition(s: text, sep: text) -> [text]
+extern fn rt_string_rpartition(s: text, sep: text) -> [text]
+
+fn main():
+    # Shared edge-case corpus: empty, single char, all-whitespace, multi-byte
+    # (2/3/4-byte codepoints), and text whose BYTE length differs from its
+    # CHARACTER length — the axis every width-based entry point turns on.
+    val corpus = ["", "a", " ", "   ", "\t\n", "ab", "abc", "é", "aéb", "日",
+                  "a日b", "日本語", "🙂", "a🙂b", "aé日🙂z", "-7", "+7", "007"]
+    var v = [dual_check_i64("char_count", twin_char_count(corpus[0]), rt_string_char_count(corpus[0]))]
+
+    var i = 1
+    while i < corpus.len():
+        v = v.push(dual_check_i64("char_count", twin_char_count(corpus[i]), rt_string_char_count(corpus[i])))
+        i = i + 1
+
+    # chomp: exactly ONE trailing terminator, CRLF preferred over LF over CR.
+    val chomp_cases = ["", "a", "\n", "\r", "\r\n", "a\n", "a\r", "a\r\n",
+                       "a\n\n", "a\r\n\r\n", "a\nb", "日\r\n", "\n\r"]
+    i = 0
+    while i < chomp_cases.len():
+        v = v.push(dual_check_text("chomp", twin_chomp(chomp_cases[i]), rt_string_chomp(chomp_cases[i])))
+        i = i + 1
+
+    # prefix/suffix removal: present, absent, empty pattern, pattern longer
+    # than the receiver, whole-receiver pattern, repeated pattern (ONCE only).
+    val fixes = [["abcabc", "abc"], ["abcabc", "x"], ["abc", ""], ["a", "abc"],
+                 ["abc", "abc"], ["", ""], ["", "a"], ["日本語", "日"], ["日本語", "語"]]
+    i = 0
+    while i < fixes.len():
+        val s = fixes[i][0]
+        val p = fixes[i][1]
+        v = v.push(dual_check_text("remove_prefix", twin_remove_prefix(s, p), rt_string_remove_prefix(s, p)))
+        v = v.push(dual_check_text("remove_suffix", twin_remove_suffix(s, p), rt_string_remove_suffix(s, p)))
+        v = v.push(dual_check_text("trim_start_matches", twin_trim_start_matches(s, p), rt_string_trim_start_matches(s, p)))
+        v = v.push(dual_check_text("trim_end_matches", twin_trim_end_matches(s, p), rt_string_trim_end_matches(s, p)))
+        i = i + 1
+
+    # Width family. Widths deliberately include 0, a NEGATIVE width, a width
+    # SMALLER than the input (the classic off-by-one — the reference does NOT
+    # truncate), the exact width, and widths one above and well above.
+    val widths = [0 - 3, 0, 1, 2, 3, 5, 8]
+    val wcases = ["", "a", "ab", "日", "a日b", "-7", "+7"]
+    val pads = ["", " ", "*", "日"]
+    i = 0
+    while i < wcases.len():
+        val s = wcases[i]
+        var j = 0
+        while j < widths.len():
+            val w = widths[j]
+            var k = 0
+            while k < pads.len():
+                val p = pads[k]
+                v = v.push(dual_check_text("pad_left", twin_pad_left(s, w, p), rt_string_pad_left(s, w, p)))
+                v = v.push(dual_check_text("pad_right", twin_pad_right(s, w, p), rt_string_pad_right(s, w, p)))
+                v = v.push(dual_check_text("center", twin_center(s, w, p), rt_string_center(s, w, p)))
+                k = k + 1
+            v = v.push(dual_check_text("zfill", twin_zfill(s, w), rt_string_zfill(s, w)))
+            j = j + 1
+        i = i + 1
+
+    # repeat: 0, negative, 1, many; empty receiver; multi-byte receiver.
+    val rcounts = [0 - 2, 0, 1, 2, 5]
+    val rcases = ["", "a", "ab", "日", "🙂"]
+    i = 0
+    while i < rcases.len():
+        var j = 0
+        while j < rcounts.len():
+            v = v.push(dual_check_text("repeat", twin_repeat(rcases[i], rcounts[j]), rt_string_repeat(rcases[i], rcounts[j])))
+            j = j + 1
+        i = i + 1
+
+    # squeeze with an EXPLICIT set (the no-argument "squeeze everything" form
+    # is reached through tagged nil and is not expressible here).
+    val sq = [["", "a"], ["aabbcc", "a"], ["aabbcc", "abc"], ["aabbcc", ""],
+              ["aaa", "a"], ["日日本", "日"], ["日日本", "本"], ["ab", "ab"]]
+    i = 0
+    while i < sq.len():
+        v = v.push(dual_check_text("squeeze", twin_squeeze(sq[i][0], sq[i][1]), rt_string_squeeze(sq[i][0], sq[i][1])))
+        i = i + 1
+
+    # substr: CHARACTER-indexed. Out-of-range start, negative start, negative
+    # length, zero length, length past the end, multi-byte receiver.
+    val starts = [0 - 2, 0, 1, 3, 10]
+    val lens = [0 - 1, 0, 1, 2, 99]
+    val scases = ["", "abc", "a日b", "日本語", "a🙂b"]
+    i = 0
+    while i < scases.len():
+        var j = 0
+        while j < starts.len():
+            var k = 0
+            while k < lens.len():
+                v = v.push(dual_check_text("substr",
+                    twin_substr(scases[i], starts[j], lens[k]),
+                    rt_string_substr(scases[i], starts[j], lens[k])))
+                k = k + 1
+            v = v.push(dual_check_text("substr_from",
+                twin_substr_from(scases[i], starts[j]),
+                rt_string_substr_from(scases[i], starts[j])))
+            j = j + 1
+        i = i + 1
+
+    # replace_first: hit, miss, EMPTY pattern (which the reference matches at
+    # position 0), empty replacement, pattern longer than the receiver, and a
+    # pattern occurring twice (only the first goes).
+    val rf = [["abcabc", "abc", "X"], ["abcabc", "z", "X"], ["ab", "", "X"],
+              ["abc", "b", ""], ["a", "abc", "X"], ["", "", "X"], ["", "a", "X"],
+              ["日本日本", "日", "X"], ["aéb", "é", "日"]]
+    i = 0
+    while i < rf.len():
+        v = v.push(dual_check_text("replace_first",
+            twin_replace_first(rf[i][0], rf[i][1], rf[i][2]),
+            rt_string_replace_first(rf[i][0], rf[i][1], rf[i][2])))
+        i = i + 1
+
+    # find_all: BYTE offsets, non-overlapping. Empty needle (empty array),
+    # overlapping candidate ("aaa" / "aa" -> one match, not two), no match,
+    # needle == receiver, and a multi-byte receiver where byte and character
+    # offsets differ.
+    val fa = [["", "a"], ["abcabc", "bc"], ["aaa", "aa"], ["aaaa", "aa"],
+              ["abc", ""], ["abc", "z"], ["abc", "abc"], ["a日b日", "日"],
+              ["日本語", "本"], ["🙂a🙂", "🙂"]]
+    i = 0
+    while i < fa.len():
+        v = v.push(dual_check_bytes("find_all",
+            twin_find_all(fa[i][0], fa[i][1]),
+            rt_string_find_all(fa[i][0], fa[i][1])))
+        i = i + 1
+
+    # sorted: empty, single char, already sorted, reverse, duplicates, mixed
+    # case (uppercase sorts BEFORE lowercase in codepoint order), digits, and
+    # multi-byte codepoints that must sort after all ASCII.
+    val so = ["", "a", "abc", "cba", "aabbcc", "cBaA", "9081", "日本語",
+              "cba日A", "🙂a", "  a"]
+    i = 0
+    while i < so.len():
+        v = v.push(dual_check_text("sorted", twin_sorted(so[i]), rt_string_sorted(so[i])))
+        i = i + 1
+
+    # partition / rpartition: hit at the front, in the middle, at the end,
+    # repeated separator (first vs last), miss, EMPTY separator, separator ==
+    # receiver, empty receiver, multi-byte separator.
+    val pt = [["a=b=c", "="], ["=abc", "="], ["abc=", "="], ["abc", "="],
+              ["abc", ""], ["", "="], ["", ""], ["abc", "abc"],
+              ["日=本=語", "="], ["a日b日c", "日"]]
+    i = 0
+    while i < pt.len():
+        val ps = pt[i][0]
+        val psep = pt[i][1]
+        val tp = twin_partition(ps, psep)
+        val op = rt_string_partition(ps, psep)
+        var m = 0
+        while m < 3:
+            v = v.push(dual_check_text("partition", tp[m], op[m]))
+            m = m + 1
+        val tr = twin_rpartition(ps, psep)
+        val orr = rt_string_rpartition(ps, psep)
+        m = 0
+        while m < 3:
+            v = v.push(dual_check_text("rpartition", tr[m], orr[m]))
+            m = m + 1
+        i = i + 1
+
+    val summary = dual_summarize(v)
+    print("JIT dual-run: engine=cranelift-jit (simple run)")
+    print("cases=" + summary.total.to_text() + " divergent=" + summary.divergent.to_text())
+    if summary.divergent > 0:
+        print("first=" + summary.first_divergence)
+        print("VERDICT: FAIL")
+    else:
+        print("VERDICT: PASS")
