@@ -28,6 +28,7 @@ fn layouts_match_canonical_c_header() {
 static CLOSES: AtomicUsize = AtomicUsize::new(0);
 static LAST_SESSION: AtomicUsize = AtomicUsize::new(0);
 static LAST_REQUEST: AtomicUsize = AtomicUsize::new(0);
+static SHUTDOWN_ORDER: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn open(_: u64, _: *const BorrowedBytesV1, out: *mut u64) -> i32 {
     unsafe { *out = 41 };
@@ -61,11 +62,21 @@ unsafe extern "C" fn cancel(_: u64, call: *const CallHeaderV1) -> i32 {
 }
 unsafe extern "C" fn quiesce(_: u64, session: u64, _: u64, _: u64) -> i32 {
     LAST_SESSION.store(session as usize, Ordering::SeqCst);
+    SHUTDOWN_ORDER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
+            Some(order.saturating_mul(10).saturating_add(1))
+        })
+        .ok();
     Status::Ok as i32
 }
 unsafe extern "C" fn close(_: u64, session: u64) -> i32 {
     LAST_SESSION.store(session as usize, Ordering::SeqCst);
     CLOSES.fetch_add(1, Ordering::SeqCst);
+    SHUTDOWN_ORDER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
+            Some(order.saturating_mul(10).saturating_add(2))
+        })
+        .ok();
     Status::Ok as i32
 }
 
@@ -88,9 +99,10 @@ fn table() -> OperationTableV1 {
 #[test]
 fn safe_facade_drives_lifecycle_without_double_close() {
     CLOSES.store(0, Ordering::SeqCst);
+    SHUTDOWN_ORDER.store(0, Ordering::SeqCst);
     let operations = table();
     let provider = Provider::new(9, &operations).expect("valid table");
-    let session = provider.open_session(b"config").expect("open");
+    let mut session = provider.open_session(b"config").expect("open");
     let mut output = [0; 8];
     let (request, used, required) = session
         .submit(3, 7, 2, 4, 99, 0, b"abc", &mut output)
@@ -106,11 +118,13 @@ fn safe_facade_drives_lifecycle_without_double_close() {
     assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
     assert_eq!(LAST_SESSION.load(Ordering::SeqCst), 41);
     assert_eq!(LAST_REQUEST.load(Ordering::SeqCst), 7);
+    assert_eq!(SHUTDOWN_ORDER.load(Ordering::SeqCst), 12);
 }
 
 #[test]
 fn drop_closes_and_stale_request_is_not_forwarded() {
     CLOSES.store(0, Ordering::SeqCst);
+    SHUTDOWN_ORDER.store(0, Ordering::SeqCst);
     let operations = table();
     let provider = Provider::new(0, &operations).expect("valid table");
     {
@@ -126,6 +140,19 @@ fn drop_closes_and_stale_request_is_not_forwarded() {
         );
     }
     assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
+    assert_eq!(SHUTDOWN_ORDER.load(Ordering::SeqCst), 12);
+}
+
+#[test]
+fn close_before_quiesce_is_rejected_then_drop_quiesces_and_closes() {
+    CLOSES.store(0, Ordering::SeqCst);
+    SHUTDOWN_ORDER.store(0, Ordering::SeqCst);
+    let operations = table();
+    let provider = Provider::new(0, &operations).expect("valid table");
+    let session = provider.open_session(&[]).expect("open");
+    assert_eq!(session.close(), Err(Status::Rejected as i32));
+    assert_eq!(CLOSES.load(Ordering::SeqCst), 1);
+    assert_eq!(SHUTDOWN_ORDER.load(Ordering::SeqCst), 12);
 }
 
 #[test]

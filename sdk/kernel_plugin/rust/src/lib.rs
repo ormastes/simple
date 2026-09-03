@@ -245,6 +245,7 @@ impl<'table> Provider<'table> {
         Ok(Session {
             provider: self,
             raw: raw_session,
+            quiesced: false,
             closed: false,
             _not_send: PhantomData,
         })
@@ -254,6 +255,7 @@ impl<'table> Provider<'table> {
 pub struct Session<'provider, 'table> {
     provider: &'provider Provider<'table>,
     raw: u64,
+    quiesced: bool,
     closed: bool,
     _not_send: PhantomData<*mut c_void>,
 }
@@ -365,16 +367,25 @@ impl Session<'_, '_> {
         Status::from_code(unsafe { cancel(self.provider.context, &call) })
     }
 
-    pub fn quiesce(&self, deadline_ns: u64, flags: u64) -> Result<Status, StatusCode> {
+    pub fn quiesce(&mut self, deadline_ns: u64, flags: u64) -> Result<Status, StatusCode> {
         let quiesce = self
             .provider
             .operations
             .quiesce
             .ok_or(Status::Rejected as StatusCode)?;
-        Status::from_code(unsafe { quiesce(self.provider.context, self.raw, deadline_ns, flags) })
+        let status = Status::from_code(unsafe {
+            quiesce(self.provider.context, self.raw, deadline_ns, flags)
+        })?;
+        if status == Status::Ok {
+            self.quiesced = true;
+        }
+        Ok(status)
     }
 
     pub fn close(mut self) -> Result<(), StatusCode> {
+        if !self.quiesced {
+            return Err(Status::Rejected as StatusCode);
+        }
         let close = self
             .provider
             .operations
@@ -393,10 +404,22 @@ impl Session<'_, '_> {
 impl Drop for Session<'_, '_> {
     fn drop(&mut self) {
         if !self.closed {
-            if let Some(close) = self.provider.operations.close_session {
-                let _ = unsafe { close(self.provider.context, self.raw) };
+            if !self.quiesced {
+                let Some(quiesce) = self.provider.operations.quiesce else {
+                    return;
+                };
+                if unsafe { quiesce(self.provider.context, self.raw, 0, 0) }
+                    != Status::Ok as StatusCode
+                {
+                    return;
+                }
+                self.quiesced = true;
             }
-            self.closed = true;
+            if let Some(close) = self.provider.operations.close_session {
+                if unsafe { close(self.provider.context, self.raw) } == Status::Ok as StatusCode {
+                    self.closed = true;
+                }
+            }
         }
     }
 }
