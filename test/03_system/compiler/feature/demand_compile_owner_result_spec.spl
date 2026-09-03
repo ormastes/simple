@@ -22,6 +22,9 @@ use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
 use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
 use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
 use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
+use compiler.driver.perf.demand_compile_counters.{
+    demand_compile_counter_add_phase_owned_v1, demand_compile_counters_empty_v1
+}
 use std.common.crypto.sha256.{sha256_text}
 
 fn action(action_id: text, dependencies: [text], memory: i64) -> BuildActionV1:
@@ -84,6 +87,25 @@ fn link_elapsed(execution: DemandCompileExecutionV1) -> i64:
     -1
 
 describe "Demand compile owner-result completion":
+    it "should restore the counter owner across failure retry and sequential updates":
+        step("Reject an unknown phase without losing the counter owner")
+        val rejected = demand_compile_counter_add_phase_owned_v1(
+            demand_compile_counters_empty_v1(), "unknown-phase", 1)
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.counters.phases[6].phase).to_equal("baseline-backend")
+        expect(rejected.counters.phases[6].elapsed_ns).to_equal(0)
+        step("Retry using the exact owner returned by the failed transfer")
+        val baseline_counter = demand_compile_counter_add_phase_owned_v1(
+            rejected.counters, "baseline-backend", 1)
+        expect(baseline_counter.accepted).to_equal(true)
+        expect(baseline_counter.counters.phases[6].elapsed_ns >= 0).to_equal(true)
+        step("Consume that returned owner in the sequential total update")
+        val total_counter = demand_compile_counter_add_phase_owned_v1(
+            baseline_counter.counters, "total", 1)
+        expect(total_counter.accepted).to_equal(true)
+        expect(total_counter.counters.phases[9].phase).to_equal("total")
+        expect(total_counter.counters.phases[9].elapsed_ns >= 0).to_equal(true)
+
     it "should publish successfully before recording the link counter":
         val source_path = "snapshot/pkg/main.spl"
         val execution = demand_execution(source_path)
