@@ -51,7 +51,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
-    vulkan_sffi_readback_u32_checksum,
+    vulkan_sffi_readback_u32_into,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
@@ -1313,16 +1313,21 @@ impl RenderBackend for VulkanBackend:
 
     me _refresh_host_full() -> bool:
         val fb_size = _i64(self.w) * _i64(self.h) * 4
-        # One native call: download → [u32] tag-write → identity checksum.
-        # Replaces the per-pixel _bytes_to_pixel_array loop (~20.3ms per
-        # 800x600 frame under JIT, NFR doc
-        # doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md).
-        val (refreshed, checksum) = vulkan_sffi_readback_u32_checksum(
-            self.d_framebuffer, self.w * self.h, 0)
-        if refreshed.len() != self.w * self.h:
+        # One native call filling host_buf IN PLACE: download → [u32] tag-write
+        # → identity checksum. The destination is passed in rather than
+        # returned in a tuple, because a tuple return deep-copies the array
+        # (~12.1ms per 800x600 frame under JIT — larger than the download and
+        # native fill combined). Reusing host_buf also drops the per-frame
+        # 480,000-element allocation. See
+        # doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
+        val px_count = self.w * self.h
+        if self.host_buf.len() != px_count:
+            self.host_buf = [0u32; px_count]
+        val checksum = vulkan_sffi_readback_u32_into(
+            self.host_buf, self.d_framebuffer, px_count, 0)
+        if checksum < 0:
             self._mark_readback_length_failed()
             return false
-        self.host_buf = refreshed
         self.last_host_checksum = checksum
         self.host_mirror_valid = true
         self.present_readback_bytes = fb_size
@@ -1479,11 +1484,12 @@ impl RenderBackend for VulkanBackend:
         # fn contract forbids self mutation: dirty reads fetch straight from the
         # device; present() owns the host_buf cache refresh.
         if self.dirty:
-            # One native call: download → [u32] → identity checksum (same
-            # algorithm as engine2d_readback_with_identity).
-            val (pixels, checksum) = vulkan_sffi_readback_u32_checksum(
-                self.d_framebuffer, self.w * self.h, 0)
-            if pixels.len() != self.w * self.h:
+            # Fill a local buffer in place; see _refresh_host_full for why the
+            # destination is passed in rather than returned in a tuple.
+            var pixels: [u32] = [0u32; self.w * self.h]
+            val checksum = vulkan_sffi_readback_u32_into(
+                pixels, self.d_framebuffer, self.w * self.h, 0)
+            if checksum < 0:
                 return engine2d_readback([], "readback_failed")
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")

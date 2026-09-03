@@ -472,6 +472,7 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
     if byte_count > MAX_RAW_TRANSFER_BYTES {
         return 0;
     }
+    let t_dl_start = std::time::Instant::now();
     let downloaded = {
         let state = STATE.lock();
         let Some(buf) = state.buffers.get(&handle) else {
@@ -485,12 +486,17 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
             Err(_) => return 0,
         }
     };
+    let t_dl = t_dl_start.elapsed().as_micros();
+    let t_slot = std::time::Instant::now();
     let slots = unsafe { std::slice::from_raw_parts_mut(data_ptr, pixel_count as usize) };
     let mut checksum: i64 = 0;
     for (slot, chunk) in slots.iter_mut().zip(downloaded.chunks_exact(4)) {
         let px = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as i64;
         *slot = RuntimeValue::from_int(px);
         checksum = (checksum + px) % 2_147_483_647;
+    }
+    if std::env::var("SIMPLE_VK_DL_TRACE").as_deref() == Ok("1") {
+        eprintln!("rb_trace download_us={} slotloop_us={}", t_dl, t_slot.elapsed().as_micros());
     }
     checksum
 }

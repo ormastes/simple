@@ -879,31 +879,36 @@ fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [
     _vulkan_read_buffer_bytes_abi(handle, byte_count, offset)
 
 @unsafe(reason: "raw Vulkan one-call pixel readback facade", capabilities: [ffi])
-fn vulkan_sffi_readback_u32_checksum(handle: i64, pixel_count: i32, offset: i64) -> ([u32], i64):
-    """Download pixels straight into a fresh [u32] and compute the readback
-    identity checksum in the same native pass (replaces the per-pixel
-    _bytes_to_pixel_array + checksum loops; measured 20.3ms + 8.1ms per
-    800x600 frame under JIT — see doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md).
-    Interpreter ABI cannot pass runtime arrays: falls back to the byte path
-    there. Returns ([], 0) on failure."""
-    var pixels: [u32] = [0u32; pixel_count]
+fn vulkan_sffi_readback_u32_into(dest: [u32], handle: i64, pixel_count: i32, offset: i64) -> i64:
+    """Download pixels into a CALLER-OWNED [u32] and return the readback
+    identity checksum. Returns -1 on failure (a valid checksum is >= 0).
+
+    Why this shape and not `-> ([u32], i64)`: returning a large array inside a
+    TUPLE deep-copies its elements. Measured 800x600 (480,000 px) under JIT,
+    that copy alone cost ~12.1 ms per frame -- larger than the download and
+    the native fill combined (~3.6 ms). Passing the destination in and
+    returning only a scalar keeps the array by-reference (assignment of the
+    same array measures 22 us), and lets the caller reuse one buffer across
+    frames instead of allocating 480,000 elements every frame.
+    See doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md."""
     if pixel_count <= 0:
-        return (pixels, 0)
+        return -1
+    if dest.len().to_i64() < pixel_count.to_i64():
+        return -1
     if gpu_sffi_uses_interpreter_array_abi():
         val bytes = _vulkan_read_buffer_bytes_abi(handle, pixel_count.to_i64() * 4, offset)
         if bytes.len().to_i64() != pixel_count.to_i64() * 4:
-            return ([], 0)
+            return -1
         var i: i64 = 0
         var checksum: i64 = 0
         while i < pixel_count.to_i64():
             val off = i * 4
             val px = bytes[off].to_i64() | (bytes[off + 1].to_i64() << 8) | (bytes[off + 2].to_i64() << 16) | (bytes[off + 3].to_i64() << 24)
-            pixels[i] = px.to_i32().to_u32()
+            dest[i] = px.to_i32().to_u32()
             checksum = (checksum + px) % 2147483647
             i = i + 1
-        return (pixels, checksum)
-    val checksum = rt_vulkan_readback_u32_checksum(pixels, pixel_count.to_i64(), handle, offset)
-    (pixels, checksum)
+        return checksum
+    rt_vulkan_readback_u32_checksum(dest, pixel_count.to_i64(), handle, offset)
 
 @unsafe(reason: "raw Vulkan strided buffer-read facade", capabilities: [ffi])
 fn vulkan_sffi_read_buffer_strided_bytes(handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> [u8]:

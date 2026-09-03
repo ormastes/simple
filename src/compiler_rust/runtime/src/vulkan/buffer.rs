@@ -352,6 +352,22 @@ impl VulkanBuffer {
         let device = self.device()?;
         let _direct_compute = device.direct_compute_gate().lock();
         device.ensure_buffer_io_available()?;
+        if std::env::var("SIMPLE_VK_DL_TRACE").as_deref() == Ok("1") {
+            let t0 = std::time::Instant::now();
+            let staging = StagingBuffer::new(Arc::clone(&device), size)?;
+            let t_alloc = t0.elapsed().as_micros();
+            let t1 = std::time::Instant::now();
+            self.copy_to_staging(&device, &staging, offset, size)?;
+            let t_copy = t1.elapsed().as_micros();
+            let t2 = std::time::Instant::now();
+            let out = staging.read(size as usize);
+            let t_read = t2.elapsed().as_micros();
+            eprintln!(
+                "dl_trace size={} alloc_us={} submit_fence_us={} read_us={}",
+                size, t_alloc, t_copy, t_read
+            );
+            return out;
+        }
         let staging = StagingBuffer::new(Arc::clone(&device), size)?;
         self.copy_to_staging(&device, &staging, offset, size)?;
         staging.read(size as usize)
