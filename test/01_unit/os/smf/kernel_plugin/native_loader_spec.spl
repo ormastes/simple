@@ -15,7 +15,7 @@ use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_QUERY_V1_SIZE,
     SimpleProviderQueryV1, SimpleProviderQueryResultV1
 }
-use std.nogc_sync_mut.kernel_plugin.{KpfGenerationHandle, KpfGenerationTable}
+use std.nogc_sync_mut.kernel_plugin.{KpfGenerationHandle, KpfGenerationTable, KpfSyncStatus}
 
 fn provider_id() -> KpfId128: KpfId128(hi: 11, lo: 12)
 fn composition_digest() -> KpfDigest256: KpfDigest256(w0: 21, w1: 22, w2: 23, w3: 24)
@@ -121,3 +121,18 @@ describe "KPF SMF/native provider admission":
             pinned: true, open: true)
         assert_equal(kpf_smf_unload_v1(session), KpfSmfAdmissionStatus.StillPinned)
         assert_equal(generations.view(published.current).pin_count, 1u32)
+
+    it "rejects a replacement published between validation and exact generation pinning":
+        step("validate the first generation, publish a replacement, then pin the validated handle")
+        val generations = KpfGenerationTable.create(2, 2)
+        val first = generations.publish(provider_id(), composition_digest(), 1)
+        val first_policy = policy(first.current)
+        val validated = kpf_smf_admit_evidence_v1(first_policy, loader_request(), evidence(),
+            query(), result(), generations.view(first.current))
+        assert_true(validated.admitted)
+        val second = generations.publish(KpfId128(hi: 31, lo: 32),
+            KpfDigest256(w0: 41, w1: 42, w2: 43, w3: 44), 2)
+        assert_true(second.status.accepted())
+        val pin = kpf_smf_pin_policy_generation_v1(first_policy, generations)
+        assert_equal(pin.status.code(), KpfSyncStatus.GenerationNotActive.code())
+        assert_equal(generations.view(second.current).pin_count, 0u32)
