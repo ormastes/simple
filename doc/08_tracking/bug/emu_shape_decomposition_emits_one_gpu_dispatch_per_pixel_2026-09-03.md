@@ -79,6 +79,36 @@ Cheaper partial: give the outline algorithms a span-emitting plotter, matching
 what `emu_draw_circle_filled` already does. Reduces dispatches without changing
 which side owns the buffer.
 
+## Fixes LANDED
+
+| Function | before (vulkan) | after (vulkan) | speedup | technique |
+|---|---|---|---|---|
+| `emu_draw_circle_thick` | 9,955 us | 1,176 us | **8.5x** | span form (one rect per row) |
+| `emu_draw_linear_gradient_stops` | ~87,700 us | ~1,100 us | **~80x** | run-length merge within each row |
+| `emu_draw_radial_gradient` | ~76,700 us | ~42,000 us | ~1.8x | run-length merge within each row |
+| `emu_draw_radial_gradient_stops` | ~59,400 us | ~37,400 us | ~1.6x | run-length merge within each row |
+
+All verified pixel-identical against a pre-change golden framebuffer (`cmp`
+exit 0), with the parity gate PASS at 38 primitives.
+
+**Attribution note:** the three gradient rewrites were produced by a delegated
+agent. They were swept into commit `eb458b5a441` ("feat(lint): G2DP003 ...") by
+a `git add -A`, so that commit's message does not describe 52 of the lines it
+carries. Recorded here rather than rewritten, since the branch history is
+shared.
+
+### Why the two RADIAL gradients only improve ~1.6-1.8x — a real limit
+
+Run-length merging only helps where consecutive pixels quantize to the SAME
+colour. For the LINEAR stop gradient the position parameter is linear in `px`,
+so long spans share one 8-bit colour and the merge wins ~80x. For the RADIAL
+gradients the colour is a function of `dist = isqrt(px*px + py*py)`, which
+changes at almost every pixel near a row's centre; long runs only form near
+the circle's left/right extremities. **This is inherent to run-merging, not a
+missed optimisation.** Closing the remaining radial gap needs either a real GPU
+gradient shader (making these GPU-native rather than `emu_*`) or a per-row
+analytic computation of exact run boundaries from the distance function.
+
 ## Fixes ATTEMPTED, MEASURED, and REVERTED (do not retry blind)
 
 - **`val copy = self.host_buf` instead of the per-element copy loop** at
