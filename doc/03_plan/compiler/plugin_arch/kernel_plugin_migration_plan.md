@@ -19,6 +19,12 @@ requires `BLOCKED` plus deployment denial, and verifies that the native
 admission consumer binds candidate and Stage4 provenance digests. This does
 not convert blocked SPipe, bootstrap, startup, or native rows to PASS.
 
+Rust tooling update (2026-09-03): a generation-pinned authoritative session
+now covers supervised rust-analyzer lifecycle, Cargo/Clippy structured
+receipts, exact toolchain/build identity, cancellation, stale publication
+rejection, and explicit incomplete results. Evidence is recorded in
+`doc/09_report/kernel_plugin_authoritative_rust_ide_lint_session_2026-09-03.md`.
+
 Documentation reconciliation (2026-09-02): final requirements are recorded in
 `doc/02_requirements/feature/kernel_plugin_migration.md` and
 `doc/02_requirements/nfr/kernel_plugin_migration.md`. The selected authority in
