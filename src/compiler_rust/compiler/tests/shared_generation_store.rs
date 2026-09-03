@@ -26,7 +26,7 @@ fn shared_generation_store_has_durable_publication_and_pinned_gc_contracts() {
     assert!(generation_rename < pointer_fsync);
     assert!(pointer_fsync < pointer_rename);
     assert!(pointer_rename < directory_fsync);
-    assert!(source.contains("pins.contains(row.1)"));
+    assert!(source.contains("shared_generation_is_pinned_v1(candidate, pins)"));
     assert!(source.contains("generation-count-unbounded"));
     assert!(source.contains("lease-count-unbounded"));
     assert!(source.contains("protected-generations-exceed-bound"));
