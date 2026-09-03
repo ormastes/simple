@@ -23,6 +23,11 @@ use std.nogc_sync_mut.kernel_plugin.{
     KpfGenerationHandle, KpfGenerationTable, KpfGenerationView, KpfPinHandle,
     KpfPinResult, KpfSyncStatus
 }
+use os.posix.dynlib.DynLibKind
+use os.smf.kernel_plugin.signature_policy.{
+    KpfArtifactSignatureEvidenceV1, KpfSignatureTrustPolicyV1,
+    kpf_validate_signature_trust_v1
+}
 
 pub enum KpfSmfAdmissionStatus:
     Admitted
@@ -37,6 +42,7 @@ pub enum KpfSmfAdmissionStatus:
     StillPinned
     PinReleaseFailed
     UnloadFailed
+    SignatureTrustRejected
 
 pub struct KpfSmfCachedOperationTableV1:
     interface_handle: u64
@@ -99,6 +105,15 @@ fn _closed_session(loader: ProviderLoaderSessionV1, receipt: KpfSmfAdmissionRece
     KpfSmfNativeSessionV1(loader: loader, receipt: receipt, provider_pin_id: 0,
         generation_pin: KpfPinHandle(index: 0, epoch: 0), pinned: false, open: false)
 
+fn _empty_loader_session() -> ProviderLoaderSessionV1:
+    ProviderLoaderSessionV1(
+        library: DynLibKind.Invalid,
+        admission: ProviderAdmissionResultV1(
+            status: 1, query_symbol_address: 0, artifact_digest: "",
+            process_callable: false, reason: "signature-trust-rejected"),
+        open: false, next_pin_id: 1, live_pins: [],
+        cli_invoke_symbol_address: 0, cli_invoke_process_callable: false)
+
 pub fn kpf_smf_validate_admission_v1(policy: KpfSmfAdmissionPolicyV1,
         loader_admission: ProviderAdmissionResultV1, query: SimpleProviderQueryV1,
         result: SimpleProviderQueryResultV1, generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
@@ -145,6 +160,23 @@ pub fn kpf_smf_admit_evidence_v1(policy: KpfSmfAdmissionPolicyV1,
     val loader_admission = provider_admit_evidence_v1(loader_request, evidence)
     kpf_smf_validate_admission_v1(policy, loader_admission, query, result, generation)
 
+pub fn kpf_smf_admit_trusted_evidence_v1(policy: KpfSmfAdmissionPolicyV1,
+        trust_policy: KpfSignatureTrustPolicyV1,
+        signature_evidence: KpfArtifactSignatureEvidenceV1,
+        loader_request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1,
+        query: SimpleProviderQueryV1, result: SimpleProviderQueryResultV1,
+        generation: KpfGenerationView) -> KpfSmfAdmissionReceiptV1:
+    val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
+    if not trust.admitted:
+        return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+    if loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest or
+            evidence.artifact_digest != signature_evidence.artifact_digest:
+        return _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(),
+            "loader-signature-artifact-digest-mismatch")
+    kpf_smf_admit_evidence_v1(policy, loader_request, evidence, query, result, generation)
+
 pub fn kpf_smf_pin_policy_generation_v1(policy: KpfSmfAdmissionPolicyV1,
         generations: KpfGenerationTable) -> KpfPinResult:
     # Pin the generation that validation inspected. Using pin_active() here
@@ -184,6 +216,19 @@ pub fn kpf_smf_admit_native_v1(policy: KpfSmfAdmissionPolicyV1,
         provider_pin_id: call.pin_id, generation_pin: generation_pin.handle,
         pinned: true, open: true)
     KpfSmfNativeAdmissionV1(receipt: receipt, session: session)
+
+pub fn kpf_smf_admit_trusted_native_v1(policy: KpfSmfAdmissionPolicyV1,
+        trust_policy: KpfSignatureTrustPolicyV1,
+        signature_evidence: KpfArtifactSignatureEvidenceV1,
+        loader_request: ProviderAdmissionRequestV1, query: SimpleProviderQueryV1,
+        generations: KpfGenerationTable) -> KpfSmfNativeAdmissionV1:
+    val trust = kpf_validate_signature_trust_v1(trust_policy, signature_evidence)
+    if not trust.admitted or loader_request.expected_artifact_digest != trust_policy.expected_artifact_digest:
+        val receipt = _receipt(policy, KpfSmfAdmissionStatus.SignatureTrustRejected, false,
+            signature_evidence.artifact_digest, 0, 0, 0, _empty_table(), trust.reason)
+        val closed = _empty_loader_session()
+        return KpfSmfNativeAdmissionV1(receipt: receipt, session: _closed_session(closed, receipt))
+    kpf_smf_admit_native_v1(policy, loader_request, query, generations)
 
 pub fn kpf_smf_release_v1(session: KpfSmfNativeSessionV1,
         generations: KpfGenerationTable) -> KpfSmfAdmissionStatus:

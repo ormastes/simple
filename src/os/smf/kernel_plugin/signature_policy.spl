@@ -1,0 +1,101 @@
+# Explicit fail-closed artifact signature and publisher trust admission.
+
+pub enum KpfSignatureTrustStatus:
+    Trusted
+    MissingExpectedArtifactDigest
+    ArtifactDigestMismatch
+    MissingTrustedPublisher
+    PublisherMismatch
+    PublisherRevoked
+    MissingTrustedSigningKey
+    SigningKeyMismatch
+    SigningKeyRevoked
+    MissingSignatureScheme
+    SignatureSchemeMismatch
+    MissingExpectedSignatureDigest
+    SignatureDigestMismatch
+    UnsignedArtifact
+    SignatureNotVerified
+
+pub struct KpfSignatureTrustPolicyV1:
+    expected_artifact_digest: text
+    trusted_publisher_id: text
+    trusted_signing_key_id: text
+    required_signature_scheme: text
+    expected_signature_digest: text
+    publisher_revoked: bool
+    signing_key_revoked: bool
+
+pub struct KpfArtifactSignatureEvidenceV1:
+    artifact_digest: text
+    publisher_id: text
+    signing_key_id: text
+    signature_scheme: text
+    signature_digest: text
+    signature_present: bool
+    signature_verified: bool
+
+pub struct KpfSignatureTrustReceiptV1:
+    status: KpfSignatureTrustStatus
+    admitted: bool
+    artifact_digest: text
+    publisher_id: text
+    signing_key_id: text
+    signature_digest: text
+    reason: text
+
+fn _trust_receipt(status: KpfSignatureTrustStatus, admitted: bool,
+        evidence: KpfArtifactSignatureEvidenceV1, reason: text) -> KpfSignatureTrustReceiptV1:
+    KpfSignatureTrustReceiptV1(
+        status: status, admitted: admitted,
+        artifact_digest: evidence.artifact_digest,
+        publisher_id: evidence.publisher_id,
+        signing_key_id: evidence.signing_key_id,
+        signature_digest: evidence.signature_digest,
+        reason: reason)
+
+pub fn kpf_validate_signature_trust_v1(policy: KpfSignatureTrustPolicyV1,
+        evidence: KpfArtifactSignatureEvidenceV1) -> KpfSignatureTrustReceiptV1:
+    if policy.expected_artifact_digest.len() != 64:
+        return _trust_receipt(KpfSignatureTrustStatus.MissingExpectedArtifactDigest,
+            false, evidence, "missing-exact-artifact-digest")
+    if evidence.artifact_digest != policy.expected_artifact_digest:
+        return _trust_receipt(KpfSignatureTrustStatus.ArtifactDigestMismatch,
+            false, evidence, "artifact-digest-mismatch")
+    if policy.trusted_publisher_id.len() == 0:
+        return _trust_receipt(KpfSignatureTrustStatus.MissingTrustedPublisher,
+            false, evidence, "missing-trusted-publisher")
+    if evidence.publisher_id != policy.trusted_publisher_id:
+        return _trust_receipt(KpfSignatureTrustStatus.PublisherMismatch,
+            false, evidence, "publisher-mismatch")
+    if policy.publisher_revoked:
+        return _trust_receipt(KpfSignatureTrustStatus.PublisherRevoked,
+            false, evidence, "publisher-revoked")
+    if policy.trusted_signing_key_id.len() == 0:
+        return _trust_receipt(KpfSignatureTrustStatus.MissingTrustedSigningKey,
+            false, evidence, "missing-trusted-signing-key")
+    if evidence.signing_key_id != policy.trusted_signing_key_id:
+        return _trust_receipt(KpfSignatureTrustStatus.SigningKeyMismatch,
+            false, evidence, "signing-key-mismatch")
+    if policy.signing_key_revoked:
+        return _trust_receipt(KpfSignatureTrustStatus.SigningKeyRevoked,
+            false, evidence, "signing-key-revoked")
+    if policy.required_signature_scheme.len() == 0:
+        return _trust_receipt(KpfSignatureTrustStatus.MissingSignatureScheme,
+            false, evidence, "missing-required-signature-scheme")
+    if evidence.signature_scheme != policy.required_signature_scheme:
+        return _trust_receipt(KpfSignatureTrustStatus.SignatureSchemeMismatch,
+            false, evidence, "signature-scheme-mismatch")
+    if policy.expected_signature_digest.len() != 64:
+        return _trust_receipt(KpfSignatureTrustStatus.MissingExpectedSignatureDigest,
+            false, evidence, "missing-exact-signature-digest")
+    if not evidence.signature_present:
+        return _trust_receipt(KpfSignatureTrustStatus.UnsignedArtifact,
+            false, evidence, "unsigned-artifact")
+    if evidence.signature_digest != policy.expected_signature_digest:
+        return _trust_receipt(KpfSignatureTrustStatus.SignatureDigestMismatch,
+            false, evidence, "signature-digest-mismatch")
+    if not evidence.signature_verified:
+        return _trust_receipt(KpfSignatureTrustStatus.SignatureNotVerified,
+            false, evidence, "signature-not-verified")
+    _trust_receipt(KpfSignatureTrustStatus.Trusted, true, evidence, "trusted")
