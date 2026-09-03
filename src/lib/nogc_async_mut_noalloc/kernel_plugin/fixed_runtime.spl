@@ -1,0 +1,250 @@
+use common.kernel_plugin.contracts.{
+    KpfMemoryContractV1,
+    KPF_FLAG_FALSE,
+    KPF_MEMORY_ARENA_ONLY,
+    KPF_MEMORY_STATIC_NOALLOC,
+    kpf_validate_memory_contract_v1,
+}
+use std.nogc_async_mut_noalloc.kernel_plugin.fixed_arena.{
+    KpfFixedArena,
+    KpfFixedArenaStatus,
+}
+
+pub enum KpfNoallocPhase:
+    Configuring
+    Active
+    Quiescing
+    Retired
+
+pub enum KpfNoallocStatus:
+    Ok
+    InvalidConfiguration
+    InvalidPhase
+    CapacityExceeded
+    WouldBlock
+    StaleHandle
+    SessionBusy
+
+pub struct KpfSessionHandle:
+    slot: i32
+    epoch: u64
+
+pub struct KpfRequestHandle:
+    slot: i32
+    epoch: u64
+
+pub struct KpfSessionResult:
+    status: KpfNoallocStatus
+    handle: KpfSessionHandle
+
+pub struct KpfRequestResult:
+    status: KpfNoallocStatus
+    handle: KpfRequestHandle
+
+pub struct KpfFixedRuntimeConfig:
+    memory: KpfMemoryContractV1
+    arena_capacity_bytes: u64
+    request_capacity: i32
+
+class KpfFixedSessionSlot:
+    occupied: bool
+    epoch: u64
+    inflight: i32
+
+class KpfFixedRequestSlot:
+    occupied: bool
+    epoch: u64
+    session_slot: i32
+
+pub class KpfFixedRuntime:
+    config: KpfFixedRuntimeConfig
+    phase_value: KpfNoallocPhase
+    arena: KpfFixedArena
+    sessions: [KpfFixedSessionSlot]
+    requests: [KpfFixedRequestSlot]
+    open_session_count_value: i32
+    inflight_request_count_value: i32
+
+    pub static fn create(config: KpfFixedRuntimeConfig) -> Result<KpfFixedRuntime, KpfNoallocStatus>:
+        if not kpf_validate_memory_contract_v1(config.memory).accepted():
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if (config.memory.memory_class != KPF_MEMORY_STATIC_NOALLOC and
+            config.memory.memory_class != KPF_MEMORY_ARENA_ONLY):
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if config.memory.may_allocate_after_activation != KPF_FLAG_FALSE:
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+        if config.arena_capacity_bytes == 0u64 or config.request_capacity <= 0:
+            return Err(KpfNoallocStatus.InvalidConfiguration)
+
+        var sessions: [KpfFixedSessionSlot] = []
+        var session_index = 0
+        while session_index < config.memory.maximum_sessions as i32:
+            sessions.push(KpfFixedSessionSlot(occupied: false, epoch: 1u64, inflight: 0))
+            session_index = session_index + 1
+
+        var requests: [KpfFixedRequestSlot] = []
+        var request_index = 0
+        while request_index < config.request_capacity:
+            requests.push(KpfFixedRequestSlot(occupied: false, epoch: 1u64, session_slot: -1))
+            request_index = request_index + 1
+
+        var arena = KpfFixedArena.create(config.arena_capacity_bytes)
+        if config.memory.initialization_bytes > 0u64:
+            if arena.reserve_configuration(config.memory.initialization_bytes) != KpfFixedArenaStatus.Ok:
+                return Err(KpfNoallocStatus.CapacityExceeded)
+        if config.memory.persistent_bytes_per_instance > 0u64:
+            if arena.reserve_configuration(config.memory.persistent_bytes_per_instance) != KpfFixedArenaStatus.Ok:
+                return Err(KpfNoallocStatus.CapacityExceeded)
+
+        Ok(KpfFixedRuntime(
+            config: config,
+            phase_value: KpfNoallocPhase.Configuring,
+            arena: arena,
+            sessions: sessions,
+            requests: requests,
+            open_session_count_value: 0,
+            inflight_request_count_value: 0,
+        ))
+
+    pub me activate() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Configuring:
+            return KpfNoallocStatus.InvalidPhase
+        self.arena.activate()
+        self.phase_value = KpfNoallocPhase.Active
+        KpfNoallocStatus.Ok
+
+    pub me begin_quiesce() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return KpfNoallocStatus.InvalidPhase
+        self.phase_value = KpfNoallocPhase.Quiescing
+        KpfNoallocStatus.Ok
+
+    pub me retire() -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if self.open_session_count_value != 0 or self.inflight_request_count_value != 0:
+            return KpfNoallocStatus.WouldBlock
+        self.phase_value = KpfNoallocPhase.Retired
+        KpfNoallocStatus.Ok
+
+    pub me open_session() -> KpfSessionResult:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return session_failure(KpfNoallocStatus.InvalidPhase)
+        if self.open_session_count_value >= self.sessions.len:
+            return session_failure(KpfNoallocStatus.CapacityExceeded)
+        val session_bytes = self.config.memory.bytes_per_session
+        if session_bytes > 0u64:
+            if self.arena.reserve_active(session_bytes) != KpfFixedArenaStatus.Ok:
+                return session_failure(KpfNoallocStatus.CapacityExceeded)
+        var index = 0
+        while index < self.sessions.len:
+            if not self.sessions[index].occupied:
+                self.sessions[index].occupied = true
+                self.sessions[index].inflight = 0
+                self.open_session_count_value = self.open_session_count_value + 1
+                return KpfSessionResult(
+                    status: KpfNoallocStatus.Ok,
+                    handle: KpfSessionHandle(slot: index, epoch: self.sessions[index].epoch),
+                )
+            index = index + 1
+        if session_bytes > 0u64:
+            self.arena.release(session_bytes)
+        session_failure(KpfNoallocStatus.CapacityExceeded)
+
+    pub me close_session(handle: KpfSessionHandle) -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if not self.session_valid(handle):
+            return KpfNoallocStatus.StaleHandle
+        if self.sessions[handle.slot].inflight != 0:
+            return KpfNoallocStatus.SessionBusy
+        self.sessions[handle.slot].occupied = false
+        self.sessions[handle.slot].epoch = self.sessions[handle.slot].epoch + 1u64
+        self.open_session_count_value = self.open_session_count_value - 1
+        val session_bytes = self.config.memory.bytes_per_session
+        if session_bytes > 0u64:
+            self.arena.release(session_bytes)
+        KpfNoallocStatus.Ok
+
+    pub me submit(handle: KpfSessionHandle) -> KpfRequestResult:
+        if self.phase_value != KpfNoallocPhase.Active:
+            return request_failure(KpfNoallocStatus.InvalidPhase)
+        if not self.session_valid(handle):
+            return request_failure(KpfNoallocStatus.StaleHandle)
+        if self.sessions[handle.slot].inflight >= self.config.memory.maximum_inflight_per_session as i32:
+            return request_failure(KpfNoallocStatus.WouldBlock)
+        if self.inflight_request_count_value >= self.requests.len:
+            return request_failure(KpfNoallocStatus.CapacityExceeded)
+        val request_bytes = self.config.memory.bytes_per_inflight_request
+        if request_bytes > 0u64:
+            if self.arena.reserve_active(request_bytes) != KpfFixedArenaStatus.Ok:
+                return request_failure(KpfNoallocStatus.CapacityExceeded)
+        var index = 0
+        while index < self.requests.len:
+            if not self.requests[index].occupied:
+                self.requests[index].occupied = true
+                self.requests[index].session_slot = handle.slot
+                self.sessions[handle.slot].inflight = self.sessions[handle.slot].inflight + 1
+                self.inflight_request_count_value = self.inflight_request_count_value + 1
+                return KpfRequestResult(
+                    status: KpfNoallocStatus.Ok,
+                    handle: KpfRequestHandle(slot: index, epoch: self.requests[index].epoch),
+                )
+            index = index + 1
+        if request_bytes > 0u64:
+            self.arena.release(request_bytes)
+        request_failure(KpfNoallocStatus.CapacityExceeded)
+
+    pub me complete(handle: KpfRequestHandle) -> KpfNoallocStatus:
+        if self.phase_value != KpfNoallocPhase.Active and self.phase_value != KpfNoallocPhase.Quiescing:
+            return KpfNoallocStatus.InvalidPhase
+        if not self.request_valid(handle):
+            return KpfNoallocStatus.StaleHandle
+        val session_slot = self.requests[handle.slot].session_slot
+        self.requests[handle.slot].occupied = false
+        self.requests[handle.slot].epoch = self.requests[handle.slot].epoch + 1u64
+        self.requests[handle.slot].session_slot = -1
+        self.sessions[session_slot].inflight = self.sessions[session_slot].inflight - 1
+        self.inflight_request_count_value = self.inflight_request_count_value - 1
+        val request_bytes = self.config.memory.bytes_per_inflight_request
+        if request_bytes > 0u64:
+            self.arena.release(request_bytes)
+        KpfNoallocStatus.Ok
+
+    pub fn phase() -> KpfNoallocPhase:
+        self.phase_value
+
+    pub fn open_session_count() -> i32:
+        self.open_session_count_value
+
+    pub fn inflight_request_count() -> i32:
+        self.inflight_request_count_value
+
+    pub fn arena_used_bytes() -> u64:
+        self.arena.used()
+
+    pub fn arena_high_water_bytes() -> u64:
+        self.arena.high_water()
+
+    pub fn post_activation_allocation_count() -> u64:
+        self.arena.post_activation_allocation_count()
+
+    fn session_valid(handle: KpfSessionHandle) -> bool:
+        handle.slot >= 0 and handle.slot < self.sessions.len and
+            self.sessions[handle.slot].occupied and self.sessions[handle.slot].epoch == handle.epoch
+
+    fn request_valid(handle: KpfRequestHandle) -> bool:
+        handle.slot >= 0 and handle.slot < self.requests.len and
+            self.requests[handle.slot].occupied and self.requests[handle.slot].epoch == handle.epoch
+
+fn invalid_session_handle() -> KpfSessionHandle:
+    KpfSessionHandle(slot: -1, epoch: 0u64)
+
+fn invalid_request_handle() -> KpfRequestHandle:
+    KpfRequestHandle(slot: -1, epoch: 0u64)
+
+fn session_failure(status: KpfNoallocStatus) -> KpfSessionResult:
+    KpfSessionResult(status: status, handle: invalid_session_handle())
+
+fn request_failure(status: KpfNoallocStatus) -> KpfRequestResult:
+    KpfRequestResult(status: status, handle: invalid_request_handle())
