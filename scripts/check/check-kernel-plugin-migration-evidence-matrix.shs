@@ -298,6 +298,77 @@ phase4_lint_table_positive_probe() {
     trap - EXIT HUP INT TERM
 }
 
+phase5_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root"
+    for path in \
+        src/compiler/70.backend/backend \
+        src/compiler/80.driver/bootstrap_k1_selected.spl \
+        src/app/cli/_CliMain/main_and_help.spl \
+        src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl \
+        src/plugins/backend_registry \
+        doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn \
+        scripts/bootstrap/write-k1-composition-receipt.shs; do
+        source_path=$REPO_ROOT/$path
+        destination=$workspace_root/$path
+        mkdir -p "$(dirname "$destination")"
+        cp -RL "$source_path" "$destination" || blocked "phase 5 private copy failed: $path"
+    done
+    mkdir -p "$workspace_root/scripts/check"
+    cp "$REPO_ROOT/scripts/check/kernel-phase5-backend-relocations.tsv" \
+        "$workspace_root/scripts/check/kernel-phase5-backend-relocations.tsv" ||
+        blocked 'phase 5 private relocation map copy failed'
+    while IFS="$(printf '\t')" read -r old_path new_path extra; do
+        mkdir -p "$workspace_root/$(dirname "$new_path")"
+        cp "$REPO_ROOT/$new_path" "$workspace_root/$new_path" ||
+            blocked "phase 5 private canonical backend copy failed: $new_path"
+    done <"$REPO_ROOT/scripts/check/kernel-phase5-backend-relocations.tsv"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 5 private workspace contains symlinks'
+    fi
+}
+
+phase5_dispatch_probe() {
+    probe_root=$1
+    output=$2
+    state_root=$3
+    mkdir -p "$state_root/home" "$state_root/cache" "$state_root/build" "$state_root/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$state_root/home" \
+        XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" \
+        SIMPLE_BUILD_DIR="$state_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend" \
+        PHASE5_DISPATCH_ROOT="$probe_root" \
+        sh "$REPO_ROOT/scripts/check/check-phase5-backend-dispatch.shs") >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase5_backend_dispatch_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase5-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase5_workspace "$private_root/workspace"
+    if ! phase5_dispatch_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged backend dispatch probe could not execute successfully'
+    fi
+    grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged probe did not enter policy dispatch assertion'
+    }
+    grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS' "$private_root/output" || {
+        cat "$private_root/output" >&2
+        blocked 'phase 5 unchanged probe lacked policy dispatch PASS receipt'
+    }
+    echo 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
+    echo 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
 probe_phase() {
     phase=$1
     case "$phase" in
@@ -348,6 +419,7 @@ probe_phase() {
             require_text "$seam" '"llvm-cranelift"'
             require_text "$seam" 'static_backend_entry_v1(BackendKind.Cranelift'
             require_text "$seam" 'static_backend_entry_v1(BackendKind.Llvm'
+            phase5_backend_dispatch_positive_probe
             ;;
         6)
             seam=src/lib/common/plugin/negotiation.spl
@@ -510,6 +582,38 @@ selftest() {
             echo 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
             echo 'KPM_PHASE4_LINT_TABLE_STATUS=FAIL'
             echo 'KPM_PHASE4_COPIED_PROVIDER_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 5 ]; then
+            rm -rf "$tmp/root"
+            phase5_workspace "$tmp/root"
+            sed 's/"llvm-cranelift"/"llvm-only"/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 5 policy mutation did not change selected composition'
+            if phase5_dispatch_probe "$tmp/root" "$tmp/phase5-output.txt" "$tmp/phase5-state"; then
+                fail 'phase 5 policy mutation was accepted by backend dispatch behavior probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked "phase 5 policy mutant returned infrastructure status $mutant_rc"
+            }
+            grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN' "$tmp/phase5-output.txt" || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant did not enter the exact policy dispatch assertion'
+            }
+            grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=FAIL reason=selected-policy-drift' "$tmp/phase5-output.txt" || {
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant lacked the exact policy dispatch failure receipt'
+            }
+            if grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS' "$tmp/phase5-output.txt"; then
+                cat "$tmp/phase5-output.txt" >&2
+                blocked 'phase 5 mutant emitted contradictory policy dispatch PASS evidence'
+            fi
+            echo 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
+            echo 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=FAIL'
+            echo 'KPM_PHASE5_POLICY_DISPATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
             current=$((current + 1))
             continue
         else

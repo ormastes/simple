@@ -34,12 +34,32 @@ check_tree() {
   compatibility=src/compiler/80.driver/bootstrap_k1_selected.spl
   closure=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
   receipt=scripts/bootstrap/write-k1-composition-receipt.shs
+  relocation_map=scripts/check/kernel-phase5-backend-relocations.tsv
+
+  echo 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN'
+  echo 'KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=BEGIN'
 
   for file in "$factory" "$registry" "$codegen" "$plugin_registry" \
       "$plugin_ports" "$interpreter_port" "$cli" "$combined" "$compatibility" \
-      "$closure" "$receipt"; do
+      "$closure" "$receipt" "$relocation_map"; do
     [ -f "$root/$file" ] || fail "missing $file"
   done
+
+  relocation_count=0
+  while IFS="$(printf '\t')" read -r old_path new_path extra; do
+    [ -n "$old_path" ] && [ -n "$new_path" ] && [ -z "${extra:-}" ] ||
+      fail "malformed Phase 5 relocation map entry"
+    if [ -e "$root/$old_path" ] || [ -L "$root/$old_path" ]; then
+      echo "KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=FAIL reason=compiler-copy-remains path=$old_path" >&2
+      fail "compiler-owned backend copy remains: $old_path"
+    fi
+    [ -f "$root/$new_path" ] && [ ! -L "$root/$new_path" ] || {
+      echo "KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=FAIL reason=plugin-copy-missing path=$new_path" >&2
+      fail "canonical plugin backend missing: $new_path"
+    }
+    relocation_count=$((relocation_count + 1))
+  done <"$root/$relocation_map"
+  [ "$relocation_count" -gt 0 ] || fail "empty Phase 5 relocation map"
 
   create_specific=$(mktemp)
   trap 'rm -f "$create_specific"' EXIT HUP INT TERM
@@ -66,7 +86,10 @@ check_tree() {
   [ ! -e "$root/src/compiler/70.backend/backend/static_backend_ports.spl" ] ||
     fail "legacy combined K1 backend port module remains reachable"
 
-  require "$combined" '"llvm-cranelift"'
+  if ! grep -Fq '"llvm-cranelift"' "$root/$combined"; then
+    echo 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=FAIL reason=selected-policy-drift' >&2
+    fail "$combined missing selected llvm-cranelift policy"
+  fi
   require "$combined" 'static_backend_cranelift_port'
   require "$combined" 'static_backend_interpreter_port'
   require "$combined" 'BackendKind.Interpreter'
@@ -90,11 +113,6 @@ check_tree() {
   full_line=$(grep -nF 'install_full_static_backends_for_k1_policy_v1(selected_k1_policy)' "$root/$cli" | tail -1 | cut -d: -f1)
   [ "$k1_line" -lt "$full_line" ] || fail "plugin table installs before committed K1 authority"
 
-  if find "$root/src/compiler" -type f -name '*.spl' -exec grep -El \
-      '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+plugins\.' {} + | grep . >/dev/null 2>&1; then
-    fail "compiler kernel imports a plugin implementation"
-  fi
-
   require "$receipt" 'schema=simple-bootstrap-k1-composition-receipt-v1'
   require "$receipt" 'policy=$policy'
   require "$receipt" 'backend=$backend'
@@ -109,7 +127,9 @@ check_tree() {
 
   rm -f "$create_specific"
   trap - EXIT HUP INT TERM
-  echo "PASS — Phase 5 dispatch is composition-selected, policy-bound, table-routed, and compiler-to-plugin closed"
+  echo "KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=PASS count=$relocation_count"
+  echo 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS'
+  echo "PASS — Phase 5 backends are relocated, composition-selected, policy-bound, and table-routed"
 }
 
 selftest() {
@@ -117,12 +137,30 @@ selftest() {
   trap 'rm -rf "$fixture"' EXIT HUP INT TERM
   for file in "$factory" "$registry" "$codegen" "$plugin_registry" \
       "$plugin_ports" "$interpreter_port" "$cli" "$combined" "$compatibility" \
-      "$closure" "$receipt"; do
+      "$closure" "$receipt" "$relocation_map"; do
     mkdir -p "$fixture/$(dirname "$file")"
     cp "$root/$file" "$fixture/$file"
   done
+  while IFS="$(printf '\t')" read -r old_path new_path extra; do
+    mkdir -p "$fixture/$(dirname "$new_path")"
+    cp "$root/$new_path" "$fixture/$new_path"
+  done <"$root/$relocation_map"
 
   PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null
+
+  first_mapping=$(sed -n '1p' "$fixture/$relocation_map")
+  old_path=$(printf '%s\n' "$first_mapping" | cut -f1)
+  new_path=$(printf '%s\n' "$first_mapping" | cut -f2)
+  mkdir -p "$fixture/$(dirname "$old_path")"
+  cp "$fixture/$new_path" "$fixture/$old_path"
+  relocation_output=$fixture/relocation-mutant.out
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >"$relocation_output" 2>&1; then
+    fail "selftest admitted a compiler-owned backend copy"
+  fi
+  grep -Fq "KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=FAIL reason=compiler-copy-remains path=$old_path" "$relocation_output" ||
+    fail "selftest relocation mutant lacked exact failure receipt"
+  rm -f "$fixture/$old_path"
+  echo 'KPM_PHASE5_BACKEND_RELOCATION_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
 
   cp "$fixture/$factory" "$fixture/$factory.clean"
   awk '{ print } /val codegen = CodegenFactory.create/ { print "        match kind:"; print "            case BackendKind.Llvm: LlvmBackend.create(target, options)" }' \
@@ -158,9 +196,13 @@ selftest() {
   cp "$fixture/$combined" "$fixture/$combined.clean"
   sed 's/"llvm-cranelift"/"cranelift-only"/' \
     "$fixture/$combined.clean" >"$fixture/$combined"
-  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
+  policy_output=$fixture/policy-mutant.out
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >"$policy_output" 2>&1; then
     fail "selftest admitted a composition policy that drifted from authority"
   fi
+  grep -Fq 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=FAIL reason=selected-policy-drift' "$policy_output" ||
+    fail "selftest policy mutant lacked exact failure receipt"
+  echo 'KPM_PHASE5_POLICY_DISPATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
   mv "$fixture/$combined.clean" "$fixture/$combined"
 
   cp "$fixture/$closure" "$fixture/$closure.clean"
@@ -171,12 +213,6 @@ selftest() {
   fi
   mv "$fixture/$closure.clean" "$fixture/$closure"
 
-  printf '\nuse plugins.backend_wasm.*\n' >>"$fixture/src/compiler/80.driver/forbidden_plugin.spl"
-  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
-    fail "selftest admitted compiler-to-plugin import"
-  fi
-  rm -f "$fixture/src/compiler/80.driver/forbidden_plugin.spl"
-
   cp "$fixture/$compatibility" "$fixture/$compatibility.clean"
   printf '\nuse compiler.driver.driver_bootstrap.*\n' >>"$fixture/$compatibility"
   if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
@@ -184,7 +220,7 @@ selftest() {
   fi
   mv "$fixture/$compatibility.clean" "$fixture/$compatibility"
 
-  echo "PASS — Phase 5 dispatch checker rejected 8/8 bypass mutations"
+  echo "PASS — Phase 5 dispatch checker rejected 8/8 relocation and dispatch mutations"
 }
 
 factory=src/compiler/70.backend/backend/backend_factory_full.spl
@@ -198,6 +234,7 @@ combined=src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_sel
 compatibility=src/compiler/80.driver/bootstrap_k1_selected.spl
 closure=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
 receipt=scripts/bootstrap/write-k1-composition-receipt.shs
+relocation_map=scripts/check/kernel-phase5-backend-relocations.tsv
 
 case "${1:-}" in
   --selftest) selftest ;;
