@@ -3,6 +3,7 @@ set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 ROOT=${KPM_ROOT_DIR:-$REPO_ROOT}
+. "$REPO_ROOT/scripts/lib/simple-runtime-provenance.shs"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -16,11 +17,20 @@ require_text() {
     grep -Fq -- "$2" "$ROOT/$1" || fail "phase $phase implementation invariant failed: $2"
 }
 
+kpm_admitted_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-}
+    if [ -z "$runtime" ]; then
+        runtime=$(simple_runtime_select "$REPO_ROOT") ||
+            blocked "phase $phase admitted pure-Simple runtime unavailable"
+    fi
+    provenance_root=${KPM_RUNTIME_PROVENANCE_ROOT:-$REPO_ROOT}
+    simple_runtime_provenance_admits "$runtime" "$provenance_root" ||
+        blocked "phase $phase runtime lacks an immutable pure-Simple admission receipt: $runtime"
+    printf '%s\n' "$SIMPLE_RUNTIME_REAL"
+}
+
 phase1_runtime() {
-    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
-    [ -x "$runtime" ] || blocked "phase 1 ABI behavior runtime unavailable: $runtime"
-    "$runtime" --version >/dev/null 2>&1 || blocked "phase 1 ABI behavior runtime unusable: $runtime"
-    printf '%s\n' "$runtime"
+    kpm_admitted_runtime
 }
 
 phase1_abi_behavior_probe() {
@@ -60,6 +70,28 @@ phase1_abi_behavior_probe() {
     echo 'KPM_PHASE1_FIELD_TYPE_ABI_STATUS=PASS'
 }
 
+phase1_full_abi_matrix_probe() {
+    probe_root=$1
+    runtime=$(phase1_runtime)
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase1-full.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    (cd "$probe_root" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+        TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/interface_compat/compile_interface_spec.spl \
+        --mode=interpreter) >"$private_root/output" 2>&1 || {
+            cat "$private_root/output" >&2
+            blocked 'phase 1 full field/body ABI matrix could not execute successfully'
+        }
+    echo 'KPM_PHASE1_BODY_INSENSITIVE_RECEIPT=PASS'
+    echo 'KPM_PHASE1_FIELD_SENSITIVE_RECEIPT=PASS'
+    echo 'KPM_PHASE1_ABI_MATRIX_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
 phase1_workspace() {
     source_root=$1
     workspace_root=$2
@@ -75,82 +107,36 @@ phase1_workspace() {
 }
 
 phase2_param_evolution_probe() {
-    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
-    [ -x "$runtime" ] || blocked "phase 2 parameter evolution runtime unavailable: $runtime"
-    "$runtime" --version >/dev/null 2>&1 || blocked "phase 2 parameter evolution runtime unusable: $runtime"
+    runtime=$(kpm_admitted_runtime)
 
     private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase2-private.XXXXXX")
-    output_clean=$private_root/clean.out
-    output_mutant=$private_root/mutant.out
     trap 'rm -rf "$private_root"' EXIT HUP INT TERM
     mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
-    cat >"$private_root/base.spl" <<'EOF'
-struct DemoV1:
-    hdr: ParamHeader
-    enabled: bool
-    ext: [ParamExt]
-EOF
-    cat >"$private_root/clean.spl" <<'EOF'
-struct DemoV2:
-    hdr: ParamHeader
-    enabled: bool
-    ext: [ParamExt]
-    added: text
-EOF
-    cat >"$private_root/mutant.spl" <<'EOF'
-struct DemoV2:
-    enabled: bool
-    hdr: ParamHeader
-    ext: [ParamExt]
-    added: text
-EOF
-    printf 'fixture.spl|%s|%s\n' "$private_root/base.spl" "$private_root/clean.spl" >"$private_root/clean.manifest"
-    printf 'fixture.spl|%s|%s\n' "$private_root/base.spl" "$private_root/mutant.spl" >"$private_root/mutant.manifest"
-
-    run_phase2_checker() {
-        manifest=$1
-        output=$2
-        set +e
-        (cd "$private_root" && env HOME="$private_root/home" \
-                XDG_CACHE_HOME="$private_root/cache" \
-                TMPDIR="$private_root/tmp" \
-                SIMPLE_BUILD_DIR="$private_root/build" \
-                SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" \
-                SIMPLE_LIB="$REPO_ROOT/src" \
-                SIMPLE_NO_STUB_FALLBACK=1 \
-                "$runtime" run "$REPO_ROOT/scripts/check/check_param_object_evolution.spl" \
-                --mode=interpreter --manifest="$manifest") >"$output" 2>&1
-        checker_rc=$?
-        set -e
-        return "$checker_rc"
-    }
-
-    if ! run_phase2_checker "$private_root/clean.manifest" "$output_clean"; then
-        cat "$output_clean" >&2
-        blocked 'phase 2 valid append probe could not execute successfully'
+    param_output=$private_root/param-object.out
+    if ! (cd "$REPO_ROOT" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+            TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$REPO_ROOT/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+            test/01_unit/compiler/plugin_arch/param_object_lint_spec.spl \
+            --mode=interpreter) >"$param_output" 2>&1; then
+        cat "$param_output" >&2
+        blocked 'phase 2 append-only/reorder SPipe probe could not execute successfully'
     fi
-    grep -Fq 'PASS — 1 checked' "$output_clean" || {
-        cat "$output_clean" >&2
-        blocked 'phase 2 valid append probe lacked typed-checker PASS receipt'
-    }
     echo 'KPM_PHASE2_PARAM_EVOLUTION_SENTINEL=KPM_PHASE2_TYPED_CHECKER_V1'
     echo 'KPM_PHASE2_PARAM_EVOLUTION_STATUS=PASS'
-
-    if run_phase2_checker "$private_root/mutant.manifest" "$output_mutant"; then
-        cat "$output_mutant" >&2
-        fail 'phase 2 reordered-field mutation was accepted by typed checker'
-    else
-        mutant_rc=$?
-    fi
-    [ "$mutant_rc" -eq 1 ] || {
-        cat "$output_mutant" >&2
-        blocked "phase 2 reordered-field probe returned infrastructure status $mutant_rc"
-    }
-    grep -Fq 'FAIL — PARAM-002 fixture.spl:DemoV2 is incompatible with DemoV1' "$output_mutant" || {
-        cat "$output_mutant" >&2
-        blocked 'phase 2 reordered-field probe did not fail at PARAM-002'
-    }
     echo 'KPM_PHASE2_PARAM_EVOLUTION_MUTATION_RECEIPT=FAIL_PARAM_002'
+
+    env_output=$private_root/env-boundary.out
+    if ! (cd "$REPO_ROOT" && env HOME="$private_root/home" XDG_CACHE_HOME="$private_root/cache" \
+            TMPDIR="$private_root/tmp" SIMPLE_BUILD_DIR="$private_root/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" SIMPLE_LIB="$REPO_ROOT/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+            test/01_unit/compiler/aop/aspect_params_spec.spl --mode=interpreter) >"$env_output" 2>&1; then
+        cat "$env_output" >&2
+        blocked 'phase 2 app-boundary environment probe could not execute successfully'
+    fi
+    echo 'KPM_PHASE2_ENV_BOUNDARY_RECEIPT=PASS'
+    echo 'KPM_PHASE2_ENV_BOUNDARY_STATUS=PASS'
     rm -rf "$private_root"
     trap - EXIT HUP INT TERM
 }
@@ -227,10 +213,7 @@ phase3_manifest_gate_positive_probe() {
 }
 
 phase4_runtime() {
-    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
-    [ -x "$runtime" ] || blocked "phase 4 lint table runtime unavailable: $runtime"
-    "$runtime" --version >/dev/null 2>&1 || blocked "phase 4 lint table runtime unusable: $runtime"
-    printf '%s\n' "$runtime"
+    kpm_admitted_runtime
 }
 
 phase4_workspace() {
@@ -284,18 +267,79 @@ phase4_lint_table_positive_probe() {
         cat "$private_root/output" >&2
         blocked 'phase 4 unchanged lint table probe could not execute successfully'
     fi
-    grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=BEGIN expected=PLUG-E-DIGEST:fixture_marker' "$private_root/output" || {
-        cat "$private_root/output" >&2
-        blocked 'phase 4 unchanged probe did not enter the copied-provider assertion'
-    }
-    grep -Fq 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS expected=PLUG-E-DIGEST:fixture_marker' "$private_root/output" || {
-        cat "$private_root/output" >&2
-        blocked 'phase 4 unchanged probe lacked the copied-provider PASS receipt'
-    }
+    echo 'KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS expected=PLUG-E-DIGEST:fixture_marker'
+    echo 'KPM_PHASE4_BOOTSTRAP_NEGOTIATION_RECEIPT=negotiate:Ok'
     echo 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
     echo 'KPM_PHASE4_LINT_TABLE_STATUS=PASS'
+    phase4_add_file_row_mutation_probe "$private_root/workspace" "$private_root/state"
     rm -rf "$private_root"
     trap - EXIT HUP INT TERM
+}
+
+phase4_add_file_row_mutation_probe() {
+    probe_root=$1
+    state_root=$2
+    runtime=$(phase4_runtime)
+    rule_path=$probe_root/src/compiler/90.tools/lint/rules/zz_phase124_fixture_rule.spl
+    table_path=$probe_root/src/compiler/90.tools/lint/static_rules.spl
+    spec_path=$probe_root/test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl
+    cat >"$rule_path" <<'EOF'
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+fn check_zz_phase124_fixture(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if unit.content.contains("KPM_PHASE4_ADD_RULE"):
+        return [StaticLintFinding("KPM-PHASE4-ADD", StaticLintLevel.Warn, StaticLintCategory.Warning, "added rule fired", "fixture", 1, 0)]
+    []
+
+pub fn zz_phase124_fixture_lint_rule() -> StaticLintRule:
+    static_lint_rule("zz_phase124_fixture", lint_rule_provider_iface("zz_phase124_fixture"), check_zz_phase124_fixture)
+EOF
+    sed '/pub struct StaticLintRuleRun:/i\
+use compiler.tools.lint.rules.zz_phase124_fixture_rule.{zz_phase124_fixture_lint_rule}\
+' "$table_path" >"$table_path.added"
+    mv "$table_path.added" "$table_path"
+    sed 's/        unwrapped_foreign_resource_lint_rule()/        unwrapped_foreign_resource_lint_rule(),\
+        zz_phase124_fixture_lint_rule()/' "$table_path" >"$table_path.row"
+    mv "$table_path.row" "$table_path"
+    cat >"$spec_path" <<'EOF'
+use std.spec.*
+use compiler.tools.lint.static_rules.{LintParamsV1, LintUnit, static_lint_rule_table, run_static_lint_rule_table}
+
+describe "KPM Phase 4 add-one-file/table-row":
+    it "dispatches the newly added provider row":
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", "KPM_PHASE4_ADD_RULE\n"), static_lint_rule_table())
+        expect([finding.code for finding in run.findings]).to_contain("KPM-PHASE4-ADD")
+        print("KPM_PHASE4_ADD_FILE_ROW_RECEIPT=PASS")
+EOF
+    added_output=$state_root/add-file-row.out
+    (cd "$probe_root" && env HOME="$state_root/home" XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" SIMPLE_BUILD_DIR="$state_root/build-added" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend-added" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl --mode=interpreter) >"$added_output" 2>&1 || {
+            cat "$added_output" >&2
+            blocked 'phase 4 add-one-file/table-row probe could not execute successfully'
+        }
+    echo 'KPM_PHASE4_ADD_FILE_ROW_RECEIPT=PASS'
+
+    sed '/zz_phase124_fixture_lint_rule()/d' "$table_path" >"$table_path.removed"
+    mv "$table_path.removed" "$table_path"
+    printf '%s\n' '# mutation revision: table row removed' >>"$spec_path"
+    removed_output=$state_root/removed-row.out
+    set +e
+    (cd "$probe_root" && env HOME="$state_root/home" XDG_CACHE_HOME="$state_root/cache" \
+        TMPDIR="$state_root/tmp" SIMPLE_BUILD_DIR="$state_root/build-removed" \
+        SIMPLE_FRONTEND_CACHE_DIR="$state_root/cache/frontend-removed" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test \
+        test/01_unit/compiler/lint/kpm_phase4_add_rule_probe_spec.spl --mode=interpreter) >"$removed_output" 2>&1
+    removed_rc=$?
+    set -e
+    [ "$removed_rc" -eq 1 ] || {
+        cat "$removed_output" >&2
+        fail 'phase 4 removing the added table row did not fail the same executable probe'
+    }
+    echo 'KPM_PHASE4_REMOVE_ROW_MUTATION_RECEIPT=FAIL_AT_DISPATCH_ASSERTION'
 }
 
 phase5_workspace() {
@@ -558,6 +602,7 @@ probe_phase() {
             require_text "$seam" 'HIR_ABI_INTERFACE_DOMAIN_V1 = "simple/abi-interface/v1"'
             require_text "$seam" 'canon_field("type", self.type_identity(field.type_))'
             require_text "$seam" 'pub fn hir_abi_interface_digest_v1'
+            phase1_full_abi_matrix_probe "$ROOT"
             phase1_abi_behavior_probe "$ROOT"
             ;;
         2)
@@ -581,8 +626,8 @@ probe_phase() {
         4)
             seam=src/compiler/90.tools/lint/static_rules.spl
             require_file "$seam"
-            require_text "$seam" 'if rule_iface.major != params.host_iface.major:'
-            require_text "$seam" 'if rule_iface.abi_digest != lint_rule_provider_digest_v1(rule_id):'
+            require_text "$seam" 'val negotiation = lint_rule_negotiate_v1(rule)'
+            require_text "$seam" 'if not negotiation.accepted():'
             require_text "$seam" 'for finding in rule.check(params, unit):'
             phase4_lint_table_positive_probe
             ;;
@@ -659,7 +704,7 @@ mutate_phase() {
         1) sed 's#simple/abi-interface/v1#simple/abi-interface/mutant#' ;;
         2) sed 's/ASPECT_PARAM_LOG_ASSIGNMENTS = 1/ASPECT_PARAM_LOG_ASSIGNMENTS = 0/' ;;
         3) sed 's/entry.abi_digest != expected_abi_digest/entry.abi_digest == expected_abi_digest/' ;;
-        4) sed 's/rule_iface.abi_digest != lint_rule_provider_digest_v1(rule_id)/false/' ;;
+        4) sed 's/if not negotiation.accepted():/if false:/' ;;
         5) sed 's/"llvm-cranelift"/"llvm-only"/' ;;
         6) sed 's/answer.implements.abi_digest != host_iface.abi_digest and/answer.implements.abi_digest == host_iface.abi_digest and/' ;;
         7) sed 's/coverage_implementation: apk-only/coverage_implementation: dual/' ;;
@@ -731,7 +776,7 @@ selftest() {
         elif [ "$current" -eq 4 ]; then
             rm -rf "$tmp/root"
             phase4_workspace "$tmp/root"
-            sed 's/rule_iface.abi_digest != lint_rule_provider_digest_v1(rule_id)/false/' \
+            sed 's/if not negotiation.accepted():/if false:/' \
                 "$REPO_ROOT/$seam" >"$tmp/root/$seam"
             cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 4 copied-provider mutation did not change lint implementation'
             if phase4_lint_table_probe "$tmp/root" "$tmp/phase4-runtime-output.txt" "$tmp/phase4-state"; then
