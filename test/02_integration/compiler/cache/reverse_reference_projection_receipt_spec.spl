@@ -456,6 +456,44 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
             "missing-generation")
 
+    it "attributes an unrecognized existing generation distinctly and rebuilds the closure":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val root = fixture_root()
+        rt_dir_remove_all(root)
+        dir_create_all(root)
+        val source_a = "{root}/unknown-generation-a.spl"
+        val source_b = "{root}/unknown-generation-b.spl"
+        val source_c = "{root}/unknown-generation-c.spl"
+        val cache = "{root}/build-cache.sdn"
+        rt_file_write_text(source_a, "export fn a(): 1\n")
+        rt_file_write_text(source_b, "export fn b(): 2\n")
+        rt_file_write_text(source_c, "export fn c(): 3\n")
+        rt_file_write_text("{root}/a.o", "a")
+        rt_file_write_text("{root}/b.o", "b")
+        rt_file_write_text("{root}/c.o", "c")
+        register_real_owner_publication_seams(source_a, source_b)
+        register_real_owner_publication_seams(source_b, source_c)
+        expect(build_cache_record_entry_at(cache, source_a, [], ["{root}/a.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
+        expect(build_cache_record_entry_at(cache, source_c, [source_b], ["{root}/c.o"])).to_equal(true)
+        val unknown_receipt = "simple-reverse-reference-generation-receipt-v2\n" +
+            "schema=2\nowner=declared-v2\nroot=declared-v2\ncount=0"
+        val unknown_digest = sha256_text(unknown_receipt)
+        val generation_dir = "{cache}.reverse-references"
+        rt_file_write_text("{generation_dir}/{unknown_digest}.receipt", unknown_receipt)
+        rt_file_write_text("{generation_dir}/CURRENT", unknown_digest)
+        val unknown_read = reverse_reference_read_current_v1(cache)
+        expect(unknown_read.valid).to_equal(false)
+        expect(unknown_read.reason).to_equal("unknown-generation")
+        rt_file_write_text(source_a, "export fn a(): 44\n")
+        val changes = incremental_detect_changes_at(cache, [source_a, source_b, source_c])
+        expect(changes.files.contains(source_a)).to_equal(true)
+        expect(changes.files.contains(source_b)).to_equal(true)
+        expect(changes.files.contains(source_c)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "unknown-generation")
+
     it "does not leak facts across sequential compilation owners or workspaces":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
