@@ -29,12 +29,33 @@ framebuffer is HOST_COHERENT mapped memory: readback is free.
 | # | Defect | Status | Reproduce | Lint? |
 |---|---|---|---|---|
 | 1 | Array returned in a tuple deep-copies it (~12.1 ms/frame at 800x600) | **FIXED** | `sh scripts/check/check-vulkan-2d-c-compare.shs` (ratio 25 -> 59-80) | **YES — G2DP001** |
-| 2 | Per-element array copy loop (~2.5 ms/frame) | open | same gate; `backend_vulkan.spl:1504` | **YES — G2DP002** |
+| 2 | Per-element array copy loop (~2.5 ms/frame) | **UNBLOCKED by #7** — the loop can now be replaced by `val copy = self.host_buf` | same gate; `backend_vulkan.spl:1504` | **YES — G2DP002** |
 | 3 | 1x1 draw inside a loop = one GPU dispatch per pixel (up to 127x) | 1 of ~20 sites fixed | `sh scripts/check/check-engine2d-backend-parity.shs` then compare `feat` lines in `build/engine2d-backend-parity/{cpu,vulkan}.log` | **YES — G2DP003** |
 | 4 | Full-frame readback is O(pixels) with real per-pixel work; C's is a free map | open | resolution sweep above — the gap widens 10% -> 1.06% from 800x600 to 8K | **NO** (see below) |
 | 5 | 5 primitives force a device->host round trip PER CALL (~4 ms steady state) | open | `feat draw_rect_blend_2nd` in the vulkan showcase log | **PARTIAL** (see below) |
 | 6 | ~330 ms ONE-TIME cost on first forced-readback call | open, **site not located** | `feat draw_rect_blend` (1st) vs `draw_rect_blend_2nd` in one run: ~330 ms vs ~4 ms | **NO** |
-| 7 | `rt_array_copy` on a packed `[u32]` is slower than a per-element loop | open | replace the `backend_vulkan.spl:1504` loop with `val copy = self.host_buf`: readback 2.57 -> 11.1 ms/frame | **NO** |
+| 7 | `rt_array_copy` slower than a per-element loop | **FIXED** (~28x; 3.2x slower -> 8.2x faster) | replace the `backend_vulkan.spl:1504` loop with `val copy = self.host_buf`: readback 2.57 -> 11.1 ms/frame | **NO** |
+
+## Defect #7 — resolved, and the cause was not what was suspected
+
+`[u32]` arrays are **not packed at all**. `[0u32; n]` lowers to
+`rt_array_repeat` -> `rt_array_new`, which sets neither `U64_PACKED` nor
+`BYTE_PACKED`; only `rt_array_new_uninit_u64` / `rt_byte_array_new` do, and no
+source-level construction reaches those. So `rt_array_copy`'s packed fast paths
+were dead for this shape and the GENERIC branch ran: `rt_array_new(len)` plus
+`rt_array_push` per element — a non-inlined call, heap-handle untag, capacity
+compare and length store, 480,000 times.
+
+Replaced with `ptr::copy_nonoverlapping` of the tagged words plus a length
+store. Within-run ratio (load-robust): `val b = a` went from **3.2x slower**
+than a hand loop to **8.2x faster** — ~28x on the copy itself.
+
+This is a whole-language fix: `rt_array_copy` backs every array-typed binding,
+not just this lane.
+
+**New item (reported, unmeasured):** `rt_array_concat`
+(`collections.rs:5142`) still carries the identical per-element push loop, so
+`a + b` on arrays pays the same cost. Same fix shape should apply.
 
 ## Why some are not lint-detectable, stated plainly
 
@@ -60,11 +81,14 @@ The rest are **architectural or empirical properties, not shapes**:
   is not possible; three hypotheses were measured and disproved (staging
   allocation 7 us, per-frame array allocation 351 us, `_pixels_to_bytes` upload
   — its trace never fires on this path).
-- **#7 (`rt_array_copy` slower than a loop)** is a defect in the RUNTIME, not
-  in the calling source. The call site looks optimal — it is the idiomatic
-  form the runtime documents as lowering to a native copy. No source-level rule
-  should flag it; flagging idiomatic code because one runtime path is slow
-  would be wrong. It needs fixing in `runtime/src/value/collections.rs`.
+- **#7 (`rt_array_copy` slower than a loop)** was a defect in the RUNTIME, not
+  in the calling source, which is why no source-level rule should have flagged
+  it: the idiomatic call site was correct and the runtime was wrong. **Now
+  fixed** in `runtime/src/value/collections.rs`. This is the clearest case in
+  the register for why "can a lint find it?" must sometimes be answered NO —
+  a rule that flagged the idiomatic form would have pushed users toward the
+  hand loop, i.e. toward permanently slower code, and would have hidden the
+  real bug.
 
 ## Reproducing tests
 
