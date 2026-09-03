@@ -140,7 +140,7 @@ done
 # Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
 #
 # Output layout uses <arch>-<vendor>-<os>-<abi> target triple:
-#   build/bootstrap/stage{1,2,3}/<triple>/simple
+#   <SIMPLE_WORKTREE_STORAGE_ROOT>/build/bootstrap/stage{1,2,3}/<triple>/simple
 #
 # Triple examples:
 #   Linux:   x86_64-unknown-linux-gnu
@@ -168,7 +168,8 @@ Subcommands:
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (selected default: llvm;
                      explicit cranelift remains supported).
-  --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
+  --output=<dir>     Explicit legacy-compatible output override. The default is
+                     <SIMPLE_WORKTREE_STORAGE_ROOT>/build/bootstrap.
   --bootstrap-receipt=<path>
                      Canonical non-None typed-reason receipt emitted by
                      `simple build bootstrap`; required before any stage starts

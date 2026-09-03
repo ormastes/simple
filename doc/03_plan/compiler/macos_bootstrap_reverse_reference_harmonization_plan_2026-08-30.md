@@ -7,6 +7,11 @@
 checks are recorded separately from SPipe, native, cross-host, and release
 qualification. No unavailable row is treated as `PASS`.
 
+**Independent M0–M5 re-audit (2026-09-03):**
+`doc/09_report/compiler/macos_bootstrap_reverse_reference_m0_m5_independent_audit_2026-09-03.md`
+records the current requirement-by-requirement result, centralized-storage
+repairs, exact unavailable authority, and next-command prerequisites.
+
 **Documentation reconciliation (2026-09-02):** Final requirements are recorded in
 `doc/02_requirements/feature/macos_bootstrap_reverse_reference_harmonization.md`
 and `doc/02_requirements/nfr/macos_bootstrap_reverse_reference_harmonization.md`.

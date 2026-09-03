@@ -63,6 +63,30 @@ policy_version=1"
     fi
 }
 
+storage_roots_repair_darwin_case_marker() {
+    _sr_canonical=$1
+    _sr_requested=$2
+    _sr_kind=$3
+    [ "$(uname -s 2>/dev/null || echo unknown)" = Darwin ] || return 0
+    [ "$_sr_canonical" != "$_sr_requested" ] || return 0
+    [ "$(printf '%s' "$_sr_canonical" | tr '[:upper:]' '[:lower:]')" = \
+      "$(printf '%s' "$_sr_requested" | tr '[:upper:]' '[:lower:]')" ] || return 0
+    _sr_marker="$_sr_canonical/.simple-storage-root-v1"
+    [ -f "$_sr_marker" ] && [ ! -L "$_sr_marker" ] || return 0
+    _sr_legacy_digest=$(storage_roots_digest "simple-storage-root-v1
+$_sr_requested") || return 1
+    grep -Fqx 'magic=simple-storage-root-v1' "$_sr_marker" &&
+        grep -Fqx "root_kind=$_sr_kind" "$_sr_marker" &&
+        grep -Fqx "canonical_root_digest=$_sr_legacy_digest" "$_sr_marker" &&
+        grep -Fqx 'policy_version=1' "$_sr_marker" || return 0
+    _sr_canonical_digest=$(storage_roots_digest "simple-storage-root-v1
+$_sr_canonical") || return 1
+    _sr_repaired="$_sr_marker.case-repair.$$"
+    sed "s/^canonical_root_digest=$_sr_legacy_digest$/canonical_root_digest=$_sr_canonical_digest/" \
+        "$_sr_marker" >"$_sr_repaired" || return 1
+    mv -f "$_sr_repaired" "$_sr_marker"
+}
+
 storage_roots_init() {
     _sr_repo=${STORAGE_ROOTS_REPO_ROOT:-}
     if [ -z "$_sr_repo" ]; then
@@ -70,20 +94,30 @@ storage_roots_init() {
     fi
     _sr_repo=$(CDPATH= cd -- "$_sr_repo" 2>/dev/null && pwd -P) || return 2
 
+    _sr_legacy_user=
     if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then
         _sr_user=$SIMPLE_USER_STORAGE_ROOT
     else
         case "$(uname -s 2>/dev/null || echo unknown)" in
-            Darwin) _sr_user="$HOME/Library/Caches/Simple/storage" ;;
+            Darwin)
+                _sr_user="$HOME/Library/Caches/simple/storage"
+                _sr_legacy_user="$HOME/Library/Caches/Simple/storage"
+                ;;
             *) _sr_user="${XDG_CACHE_HOME:-$HOME/.cache}/simple/storage" ;;
         esac
     fi
     _sr_worktree=${SIMPLE_WORKTREE_STORAGE_ROOT:-$_sr_repo/.simple/storage}
+    _sr_user_requested=$_sr_user
+    _sr_worktree_requested=$_sr_worktree
     _sr_user=$(storage_roots_canonical_dir "$_sr_user") || return 2
     _sr_worktree=$(storage_roots_canonical_dir "$_sr_worktree") || return 2
     storage_roots_validate_root "$_sr_user" "$_sr_repo" || return 2
     storage_roots_validate_root "$_sr_worktree" "$_sr_repo" || return 2
     [ "$_sr_user" != "$_sr_worktree" ] || return 2
+    [ -z "$_sr_legacy_user" ] || \
+        storage_roots_repair_darwin_case_marker "$_sr_user" "$_sr_legacy_user" user || return 2
+    storage_roots_repair_darwin_case_marker "$_sr_user" "$_sr_user_requested" user || return 2
+    storage_roots_repair_darwin_case_marker "$_sr_worktree" "$_sr_worktree_requested" worktree || return 2
     storage_roots_ensure_marker "$_sr_user" user || return 2
     storage_roots_ensure_marker "$_sr_worktree" worktree || return 2
     SIMPLE_USER_STORAGE_ROOT=$_sr_user

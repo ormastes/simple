@@ -51,7 +51,7 @@ Recommended defaults:
 
 | Platform | User root | Worktree root |
 |---|---|---|
-| macOS | `~/Library/Caches/Simple/storage` | `<worktree>/.simple/storage` |
+| macOS | `~/Library/Caches/simple/storage` | `<worktree>/.simple/storage` |
 | Linux | `${XDG_CACHE_HOME:-~/.cache}/simple/storage` | `<worktree>/.simple/storage` |
 | Windows | `%LOCALAPPDATA%/Simple/storage` | `<worktree>/.simple/storage` |
 | SimpleOS | platform user storage `/simple/storage` | `<worktree>/.simple/storage` |
