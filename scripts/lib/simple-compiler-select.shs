@@ -164,8 +164,9 @@ simple_compiler_is_seed() {
 # If every rung is inconclusive we reject -- fail-CLOSED, because we then have no
 # evidence the candidate can do anything at all.
 #
-# A non-signal, non-unknown-command exit (e.g. a type error about the fixture)
-# IS a pass: that is a source-level verdict from a pipeline that plainly ran.
+# The fixture is valid, so merely reaching a source-level error is not evidence
+# of a usable compiler.  Admission requires either a successful `check`, or a
+# successful native build whose executable produces the expected output.
 simple_compiler_env_write_ok() {
     _scs_bin="$1"
     case "$_scs_bin" in /*) ;; *) _scs_bin="$PWD/$_scs_bin" ;; esac
@@ -213,7 +214,33 @@ simple_compiler_env_write_ok() {
             _scs_verdict=1; _scs_conclusive=1
             break
         fi
-        _scs_conclusive=1   # it ran; whatever it said is about the fixture
+        case "$_scs_rung" in
+            check\ *)
+                if [ "$_scs_rc" -eq 0 ]; then
+                    _scs_conclusive=1
+                    break
+                fi
+                # A candidate may lack or have a broken check frontend while
+                # still supporting the native-build contract. Try that rung.
+                continue
+                ;;
+            native-build\ *)
+                _scs_conclusive=1
+                if [ "$_scs_rc" -ne 0 ] || [ ! -x "$_scs_dir/probe_bin" ]; then
+                    _scs_verdict=1
+                    break
+                fi
+                _scs_probe_out="$(timeout "$SIMPLE_COMPILER_PROBE_TIMEOUT" \
+                    "$_scs_dir/probe_bin" 2>/dev/null)" || {
+                    _scs_verdict=1
+                    break
+                }
+                if [ "$_scs_probe_out" != ok ]; then
+                    _scs_verdict=1
+                fi
+                break
+                ;;
+        esac
     done
 
     rm -rf "$_scs_dir"
@@ -345,6 +372,60 @@ simple_compiler_select_self_test() {
             _scs_st_fail=$((_scs_st_fail + 1))
         fi
     }
+
+    # Deterministic regression control for bootstrap_main's historical
+    # fail-open shape: no check command, then an explicit refusal to fabricate
+    # a native wrapper. Reaching that diagnostic must never count as success.
+    _scs_fake_dir="$(mktemp -d "${TMPDIR:-/tmp}/simple-compiler-self-test.XXXXXX")" || return 1
+    _scs_fake="$_scs_fake_dir/simple-bootstrap"
+    cat >"$_scs_fake" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    check)
+        echo "error: unknown command 'check'" >&2
+        exit 1
+        ;;
+    native-build)
+        echo "error: bootstrap_main cannot emit a seed-wrapper fallback" >&2
+        exit 1
+        ;;
+esac
+exit 1
+EOF
+    chmod +x "$_scs_fake"
+    _scs_st_ran=$((_scs_st_ran + 1))
+    if simple_compiler_env_write_ok "$_scs_fake"; then
+        echo "  FAIL  bootstrap fallback refusal was admitted" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
+    else
+        echo "  PASS  bootstrap fallback refusal is rejected"
+    fi
+
+    _scs_good="$_scs_fake_dir/simple-native"
+    cat >"$_scs_good" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    check)
+        echo "error: unknown command 'check'" >&2
+        exit 1
+        ;;
+    native-build)
+        printf '#!/bin/sh\nprintf "ok\\n"\n' >probe_bin
+        chmod +x probe_bin
+        exit 0
+        ;;
+esac
+exit 1
+EOF
+    chmod +x "$_scs_good"
+    _scs_st_ran=$((_scs_st_ran + 1))
+    if simple_compiler_env_write_ok "$_scs_good"; then
+        echo "  PASS  successful native artifact is admitted"
+    else
+        echo "  FAIL  successful native artifact was rejected" >&2
+        _scs_st_fail=$((_scs_st_fail + 1))
+    fi
+    rm -rf "$_scs_fake_dir"
 
     # Expectations below are MEASURED on this tree (2026-08-06), not assumed.
     # The self-test's job is to pin WHY each candidate is accepted or rejected,
