@@ -803,6 +803,14 @@ deploy_lock_handle=
 bootstrap_deploy_tx_active=0
 bootstrap_progress_state=
 build_progress_events=
+build_progress_storage_root=${SIMPLE_WORKTREE_STORAGE_ROOT:-"${repo_root}/.simple/storage"}
+build_progress_snapshot="${build_progress_storage_root}/build/progress/current.sdn"
+build_id="bootstrap-$$"
+mkdir -p "$(dirname -- "${build_progress_snapshot}")"
+rm -f "${build_progress_snapshot}"
+export SIMPLE_WORKTREE_STORAGE_ROOT="${build_progress_storage_root}"
+export SIMPLE_BUILD_PROGRESS_SNAPSHOT="${build_progress_snapshot}"
+export SIMPLE_BUILD_ID="${build_id}"
 bootstrap_progress_event() {
   [ -n "${build_progress_events}" ] || return 0
   progress_phase=$1
