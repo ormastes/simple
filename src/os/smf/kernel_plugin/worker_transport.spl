@@ -1,0 +1,135 @@
+use std.nogc_async_mut.kernel_plugin.runtime.{KpfRequestHandleV1}
+use os.smf.kernel_plugin.worker_process.KpfWorkerProcessFacadeV1
+use os.smf.kernel_plugin.worker_protocol.*
+use os.smf.kernel_plugin.crash_supervisor.KpfWorkerCrashSupervisorV1
+
+pub class KpfWorkerTransportV1:
+    process: KpfWorkerProcessFacadeV1
+    supervisor: KpfWorkerCrashSupervisorV1
+    generation: i64
+    session_slot: i64
+    session_epoch: i64
+    maximum_frame_bytes: i64
+    granted_capability_bits: u64
+    var handshake_pending: bool
+    var handshaken: bool
+    var quiescing: bool
+    var closed: bool
+    var inflight: i64
+
+impl KpfWorkerTransportV1:
+    pub static fn create(process: KpfWorkerProcessFacadeV1, generation: i64,
+            session_slot: i64, session_epoch: i64, maximum_frame_bytes: i64,
+            granted_capability_bits: u64, timeout_ns: i64) -> KpfWorkerTransportV1:
+        KpfWorkerTransportV1(process: process,
+            supervisor: KpfWorkerCrashSupervisorV1.create(timeout_ns),
+            generation: generation, session_slot: session_slot, session_epoch: session_epoch,
+            maximum_frame_bytes: maximum_frame_bytes,
+            granted_capability_bits: granted_capability_bits, handshake_pending: false,
+            handshaken: false,
+            quiescing: false, closed: false, inflight: 0)
+
+    me handshake(required_capability_bits: u64, now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if (self.granted_capability_bits & required_capability_bits) != required_capability_bits:
+            return KpfWorkerOutcome.CapabilityDenied
+        val frame = KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Handshake, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: required_capability_bits, payload_length: 0, payload: [])
+        val sent = self.process.send(frame)
+        if sent != KpfWorkerOutcome.Accepted: return sent
+        self.supervisor.arm(now_ns)
+        self.handshake_pending = true
+        KpfWorkerOutcome.Accepted
+
+    me submit(request: KpfRequestHandleV1, required_capability_bits: u64,
+            payload: [u8], now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if self.quiescing: return KpfWorkerOutcome.Quiescing
+        if not self.handshaken: return KpfWorkerOutcome.ProtocolMismatch
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWorkerOutcome.StaleCompletion
+        if (self.granted_capability_bits & required_capability_bits) != required_capability_bits:
+            return KpfWorkerOutcome.CapabilityDenied
+        if payload.len > self.maximum_frame_bytes: return KpfWorkerOutcome.FrameTooLarge
+        val frame = KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Submit, generation: request.generation,
+            session_epoch: self.session_epoch, request_slot: request.request_slot,
+            request_epoch: request.request_epoch, capability_bits: required_capability_bits,
+            payload_length: payload.len, payload: payload)
+        val sent = self.process.send(frame)
+        if sent == KpfWorkerOutcome.Accepted:
+            self.inflight = self.inflight + 1
+            self.supervisor.arm(now_ns)
+        sent
+
+    me poll(now_ns: i64) -> KpfWorkerResultV1:
+        val health = self.supervisor.observe(self.process, now_ns)
+        if health != KpfWorkerOutcome.Accepted:
+            return KpfWorkerResultV1(outcome: health, request: kpf_worker_empty_request_v1(), payload: [])
+        val received = self.process.receive()
+        if received.0 != KpfWorkerOutcome.Accepted:
+            return KpfWorkerResultV1(outcome: received.0, request: kpf_worker_empty_request_v1(), payload: [])
+        val frame = received.1
+        val valid = kpf_worker_validate_frame_v1(frame, self.maximum_frame_bytes)
+        if valid != KpfWorkerOutcome.Accepted:
+            return KpfWorkerResultV1(outcome: valid, request: kpf_worker_empty_request_v1(), payload: [])
+        if frame.kind == KpfWorkerFrameKind.HandshakeAccepted:
+            if not self.handshake_pending or frame.generation != self.generation or frame.session_epoch != self.session_epoch:
+                return KpfWorkerResultV1(outcome: KpfWorkerOutcome.ProtocolMismatch,
+                    request: kpf_worker_empty_request_v1(), payload: [])
+            if (self.granted_capability_bits & frame.capability_bits) != frame.capability_bits:
+                return KpfWorkerResultV1(outcome: KpfWorkerOutcome.CapabilityDenied,
+                    request: kpf_worker_empty_request_v1(), payload: [])
+            self.handshake_pending = false
+            self.handshaken = true
+            self.supervisor.disarm()
+            return KpfWorkerResultV1(outcome: KpfWorkerOutcome.Accepted,
+                request: kpf_worker_empty_request_v1(), payload: [])
+        if frame.kind == KpfWorkerFrameKind.Quiesced:
+            return KpfWorkerResultV1(outcome: KpfWorkerOutcome.Quiescing,
+                request: kpf_worker_empty_request_v1(), payload: [])
+        if frame.kind != KpfWorkerFrameKind.Completion:
+            return KpfWorkerResultV1(outcome: KpfWorkerOutcome.MalformedFrame,
+                request: kpf_worker_empty_request_v1(), payload: [])
+        if frame.generation != self.generation or frame.session_epoch != self.session_epoch:
+            return KpfWorkerResultV1(outcome: KpfWorkerOutcome.StaleCompletion,
+                request: kpf_worker_empty_request_v1(), payload: [])
+        if self.inflight <= 0:
+            return KpfWorkerResultV1(outcome: KpfWorkerOutcome.StaleCompletion,
+                request: kpf_worker_empty_request_v1(), payload: [])
+        self.inflight = self.inflight - 1
+        if self.inflight == 0: self.supervisor.disarm()
+        val request = KpfRequestHandleV1(generation: frame.generation,
+            session_slot: self.session_slot, request_slot: frame.request_slot,
+            request_epoch: frame.request_epoch)
+        KpfWorkerResultV1(outcome: KpfWorkerOutcome.Accepted, request: request, payload: frame.payload)
+
+    me cancel(request: KpfRequestHandleV1) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if request.generation != self.generation or request.session_slot != self.session_slot:
+            return KpfWorkerOutcome.StaleCompletion
+        self.process.send(KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Cancel, generation: request.generation,
+            session_epoch: self.session_epoch, request_slot: request.request_slot,
+            request_epoch: request.request_epoch, capability_bits: 0,
+            payload_length: 0, payload: []))
+
+    me quiesce() -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        self.quiescing = true
+        self.process.send(KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Quiesce, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: 0, payload_length: 0, payload: []))
+
+    me close() -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if not self.quiescing or self.inflight != 0: return KpfWorkerOutcome.Quiescing
+        val sent = self.process.send(KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+            kind: KpfWorkerFrameKind.Close, generation: self.generation,
+            session_epoch: self.session_epoch, request_slot: -1, request_epoch: 0,
+            capability_bits: 0, payload_length: 0, payload: []))
+        if sent == KpfWorkerOutcome.Accepted: self.closed = true
+        sent
