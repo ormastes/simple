@@ -45,20 +45,23 @@ fail() {
     [ -n "${2:-}" ] && printf '    fix: %s\n' "$2"
 }
 
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+# See the jj-colocation note in check-guard-wiring.shs: jj sets core.bare=true
+# in a colocated .git/config, so --show-toplevel fails even with a working tree
+# present. This script previously exited 2 there — while ALSO being the script
+# whose job is to report that guards are installed-but-inert. Derive the root
+# from --git-common-dir instead, and only refuse when that fails too.
+_hook_repo_root() {
+    _r=$(git rev-parse --show-toplevel 2>/dev/null) && [ -n "$_r" ] && { printf '%s\n' "$_r"; return 0; }
+    _c=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+    [ -n "$_c" ] || return 1
+    case "$_c" in /*) : ;; *) _c="$PWD/$_c" ;; esac
+    _t=$(CDPATH= cd -- "$_c/.." 2>/dev/null && pwd -P) || return 1
+    [ -f "$_t/FILE.md" ] || [ -d "$_t/scripts/check" ] || return 1
+    printf '%s\n' "$_t"
+}
+
+repo_root=$(_hook_repo_root) || {
     printf '%s: not inside a git repository\n' "$name"
-    # Most common real cause, measured on this repo 2026-09-03: core.bare=true
-    # set on a clone that HAS a 134k-file working tree. git then answers
-    # --is-inside-work-tree=false and --show-toplevel fails, here and in every
-    # LINKED worktree, so any guard that establishes its root that way refuses
-    # to run — check-guard-wiring.shs aborted the mandatory push gate with
-    # "ERROR — nothing was checked: not inside a git repository" and the push
-    # died part-way through the gate list. Naming it here turns a 20-minute
-    # hunt into one line.
-    if [ "$(git config --get --type=bool core.bare 2>/dev/null || true)" = "true" ]; then
-        printf '%s: core.bare=true is set on this repo. If it has a working tree, that is wrong\n' "$name"
-        printf '    fix: git config core.bare false\n'
-    fi
     printf '%s: ERROR — nothing was checked (exit 2)\n' "$name"
     exit 2
 }
