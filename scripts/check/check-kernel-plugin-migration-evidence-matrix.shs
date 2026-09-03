@@ -448,26 +448,45 @@ phase6_acceptance_positive_probe() {
 }
 
 phase8_runtime() {
-    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
-    [ -x "$runtime" ] || blocked "phase 8 range/lock runtime unavailable: $runtime"
-    "$runtime" --version >/dev/null 2>&1 || blocked "phase 8 range/lock runtime unusable: $runtime"
-    printf '%s\n' "$runtime"
+    private_state=$1
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64) default_runtime=$REPO_ROOT/bin/release/aarch64-apple-darwin/simple ;;
+        Darwin:x86_64) default_runtime=$REPO_ROOT/bin/release/x86_64-apple-darwin/simple ;;
+        Linux:aarch64) default_runtime=$REPO_ROOT/bin/release/aarch64-unknown-linux-gnu/simple ;;
+        Linux:x86_64) default_runtime=$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple ;;
+        *) default_runtime=$REPO_ROOT/bin/release/simple ;;
+    esac
+    runtime_source=${KPM_SIMPLE_BINARY:-$default_runtime}
+    [ -f "$runtime_source" ] && [ -x "$runtime_source" ] ||
+        blocked "phase 8 range/lock runtime source unavailable for host: $runtime_source"
+    mkdir -p "$private_state/runtime"
+    private_runtime=$private_state/runtime/simple
+    cp "$runtime_source" "$private_runtime" || blocked 'phase 8 private runtime copy failed'
+    chmod 700 "$private_runtime" || blocked 'phase 8 private runtime permissions failed'
+    "$private_runtime" --version >/dev/null 2>&1 ||
+        blocked "phase 8 copied runtime is incompatible with this host: $runtime_source"
+    printf '%s\n' "$private_runtime"
 }
 
 phase8_workspace() {
     workspace_root=$1
-    mkdir -p "$workspace_root"
-    for source_tree in src test; do
-        find "$REPO_ROOT/$source_tree" -type l -print | while IFS= read -r link_path; do
-            resolved=$(realpath "$link_path") || blocked 'phase 8 workspace contains an unresolved source link'
-            case "$resolved" in
-                "$REPO_ROOT"/*) ;;
-                *) blocked 'phase 8 workspace source link escapes the repository' ;;
-            esac
-        done
-        cp -RL "$REPO_ROOT/$source_tree" "$workspace_root/$source_tree" ||
-            blocked "phase 8 private full-copy $source_tree tree could not be created"
+    mkdir -p "$workspace_root/src" "$workspace_root/test/01_unit/app/pkg" \
+        "$workspace_root/test/03_system/app/pkg/feature"
+    find "$REPO_ROOT/src" -maxdepth 1 -type f \( -name '*.spl' -o -name '*.sdn' \) \
+        -exec cp {} "$workspace_root/src/" \; ||
+        blocked 'phase 8 private root source closure could not be created'
+    for source_tree in app compiler compositions generated hardware i18n lib os plugins runtime spec tooling type unit verification; do
+        mkdir -p "$workspace_root/src/$source_tree"
+        rsync -a --copy-links --prune-empty-dirs --include='*/' --include='*.spl' --include='*.sdn' --exclude='*' \
+            "$REPO_ROOT/src/$source_tree/" "$workspace_root/src/$source_tree/" ||
+            blocked "phase 8 private $source_tree source closure could not be created"
     done
+    cp "$REPO_ROOT/test/01_unit/app/pkg/requires_range_spec.spl" \
+        "$workspace_root/test/01_unit/app/pkg/requires_range_spec.spl" ||
+        blocked 'phase 8 private unit acceptance spec copy failed'
+    cp "$REPO_ROOT/test/03_system/app/pkg/feature/requires_range_spec.spl" \
+        "$workspace_root/test/03_system/app/pkg/feature/requires_range_spec.spl" ||
+        blocked 'phase 8 private system acceptance spec copy failed'
     [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
     if find "$workspace_root" -type l -print -quit | grep -q .; then
         blocked 'phase 8 private full-copy workspace contains symlinks'
@@ -478,8 +497,11 @@ phase8_range_lock_probe() {
     probe_root=$1
     output=$2
     private_state=$3
-    runtime=$(phase8_runtime)
     mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    runtime=$(phase8_runtime "$private_state")
+    mkdir -p "$probe_root/bin"
+    cp "$runtime" "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime copy failed'
+    chmod 700 "$probe_root/bin/simple" || blocked 'phase 8 workspace runtime permissions failed'
     : >"$output"
     for spec in test/01_unit/app/pkg/requires_range_spec.spl test/03_system/app/pkg/feature/requires_range_spec.spl; do
         set +e
@@ -494,12 +516,14 @@ phase8_range_lock_probe() {
 }
 
 phase8_range_lock_positive_probe() {
-    phase8_runtime >/dev/null
     private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase8-positive.XXXXXX")
     trap 'rm -rf "$private_root"' EXIT HUP INT TERM
     phase8_workspace "$private_root/workspace"
     if ! phase8_range_lock_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
         cat "$private_root/output" >&2
+        if grep -Fq 'HIR lowering error' "$private_root/output"; then
+            blocked 'phase 8 copied runtime is incompatible with the current range/lock source closure'
+        fi
         blocked 'phase 8 unchanged range/lock acceptance probe could not execute successfully'
     fi
     for receipt in \
