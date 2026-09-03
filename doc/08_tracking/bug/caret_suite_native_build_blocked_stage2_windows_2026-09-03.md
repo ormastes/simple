@@ -28,7 +28,7 @@ the root-cause list below — three of its entries are now wrong or resolved.
 | B1 | **Fixed in source**, `fa87eda863b`. Parser defect, not stdlib. The class/struct member loop recognised only `@layer_field(...)`; a member-position twin of the module-decl `@unsafe` arm was added, capturing the metadata rather than skipping it (310 annotated methods across src/std + src/lib depend on it, so a stdlib workaround does not scale). Native proof pends a self-hosted rebuild — the parser is compiled into the stage binary. |
 | B2 | **Fixed and proven**, `f556f23aca4`. One missing type in an existing import line in `src/app/io/context_ops.spl`. 5 hir-fatals before, 0 after. |
 | B3 | **Re-diagnosed — NOT a missing import.** `Id` is the type PARAMETER of `struct PostingList<Id>`; there is nothing to import. Superseded by `hir_generic_type_param_unresolved_cross_module_2026-09-03.md`, which carries a 14-line two-module repro. Deliberately not patched: the fix lands in the resolver file another session is editing for devhub. |
-| B4 | **Not an independent defect.** It was a cascade of B2's poisoning of `app.io.*`; it disappeared with the B2 fix, with no edit to `cli_util.spl`. |
+| B4 | **Still open. Partly mis-stated in an earlier revision of this row — corrected here.** It disappeared from the `slang_pack` build after the B2 fix, but that is because slang's module closure never lowers `cli_util.spl`, not because B2 caused it. The `agent_manager_view` build, whose closure DOES include it, still reports `unresolved name: cwd` after the B2 fix. `cwd` is a plain `fn` in `src/std/nogc_sync_mut/io/env_ops.spl:93`, re-exported by `io/__init__.spl:93` in the same bare-`export` form as `file_exists`/`file_read`, which resolve — so the shape of the export is not the discriminator. Untested hypothesis: the paren-form `use std.io (cwd, file_exists, file_read)` at `cli_util.spl:4` (238 uses tree-wide vs 8,754 brace-form) resolves differently, and the other two names happen to be reachable through another module in the closure (`cwd` is also `pub fn` in `io_runtime.spl:421`). Not confirmed: the obvious cheap fixture cannot discriminate, because an ad-hoc sibling-module import fails first with `missing importing module surface` under BOTH forms. |
 | B6 | **Fixed in source**, `55bc4cfdd0a`. Not a "bare `int` alias" problem — `int` has no alias anywhere; it was simply missing from `lower_named_kind`'s primitive arms while the seed resolves it (`"i64" \| "int"`, calls.rs:528) and this compiler's own SFFI reader already canonicalises `"int" -> "i64"`. Exact twin of the documented `float` gap. Native proof pends the same rebuild. |
 | B7 | Unchanged, owned elsewhere. Same corruption class also masks the AOT backend error — see below. |
 | B8 | Unchanged, still filed. |
@@ -42,7 +42,8 @@ taken through the broken invocation. Details and the working command line:
 `native_build_requires_simple_bootstrap_env_windows_2026-09-03.md`.
 
 After the B2 fix, slang's ONLY remaining hir-fatals are 11 x
-`unresolved type: Id` (B3). The `Result` / `Option` / `Dict` / `list`
+`unresolved type: Id` (B3). Agent manager's are 12: the same `Id` set plus the
+one `unresolved name: cwd` (B4). The `Result` / `Option` / `Dict` / `list`
 `dep-origin-unresolved` lines in the log are advisories, not fatals.
 
 Known edge in the B1 fix, stated rather than left to be found:
