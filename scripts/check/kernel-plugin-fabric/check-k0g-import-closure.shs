@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SELF_DIR/../../.." && pwd)
+DESCRIPTOR=${KPF_K0G_DESCRIPTOR:-$SELF_DIR/k0g-import-closure.sdn}
+SOURCE_ROOT=${KPF_SOURCE_ROOT:-$REPO_ROOT}
+
+fail() {
+    echo "KPF_K0G_IMPORT_CLOSURE: FAIL: $1" >&2
+    exit 1
+}
+
+check_descriptor() {
+    descriptor=$1
+    source_root=$2
+    [ -f "$descriptor" ] && [ ! -L "$descriptor" ] || fail "descriptor is not a regular file: $descriptor"
+
+    format_count=0
+    root_count=0
+    allow_count=0
+    checked_files=0
+    checked_imports=0
+    roots_file=$work/roots
+    allows_file=$work/allows
+    : >"$roots_file"
+    : >"$allows_file"
+
+    while IFS='|' read -r kind value extra || [ -n "${kind}${value}${extra}" ]; do
+        [ -z "$kind" ] && continue
+        [ -z "${extra:-}" ] || fail "malformed descriptor row: $kind|$value|$extra"
+        case "$kind" in
+            format)
+                [ "$value" = kpf-k0g-import-closure-v1 ] || fail "unknown descriptor format: $value"
+                format_count=$((format_count + 1))
+                ;;
+            root)
+                [ -n "$value" ] || fail "empty root"
+                case "$value" in /*|*..*) fail "unsafe root: $value" ;; esac
+                printf '%s\n' "$value" >>"$roots_file"
+                root_count=$((root_count + 1))
+                ;;
+            allow)
+                [ -n "$value" ] || fail "empty allow prefix"
+                printf '%s\n' "$value" >>"$allows_file"
+                allow_count=$((allow_count + 1))
+                ;;
+            *) fail "unknown descriptor record: $kind" ;;
+        esac
+    done <"$descriptor"
+
+    [ "$format_count" -eq 1 ] || fail "descriptor must contain exactly one format row"
+    [ "$root_count" -gt 0 ] || fail "descriptor contains zero K0g roots"
+    [ "$allow_count" -gt 0 ] || fail "descriptor contains zero allowed import prefixes"
+
+    while IFS= read -r relative_root; do
+        root=$source_root/$relative_root
+        [ -d "$root" ] || fail "declared K0g root is absent: $relative_root"
+        while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            checked_files=$((checked_files + 1))
+            while IFS= read -r module; do
+                [ -n "$module" ] || continue
+                checked_imports=$((checked_imports + 1))
+                admitted=false
+                while IFS= read -r prefix; do
+                    case "$module" in "$prefix"|"$prefix".*) admitted=true; break ;; esac
+                done <"$allows_file"
+                [ "$admitted" = true ] || fail "K0g import escapes closure: ${file#"$source_root/"} -> $module"
+            done <<EOF
+$(sed -n 's/^[[:space:]]*use[[:space:]]\{1,\}\([A-Za-z0-9_.]*\).*/\1/p' "$file")
+EOF
+        done <<EOF
+$(find "$root" -type f -name '*.spl' -print | LC_ALL=C sort)
+EOF
+    done <"$roots_file"
+
+    [ "$checked_files" -gt 0 ] || fail "zero K0g source files checked"
+    echo "KPF_K0G_IMPORT_CLOSURE: PASS files=$checked_files imports=$checked_imports roots=$root_count"
+}
+
+selftest() {
+    fixture=$work/fixture
+    mkdir -p "$fixture/src/k0g"
+    printf '%s\n' 'format|kpf-k0g-import-closure-v1' 'root|src/k0g' 'allow|common.kernel_plugin' >"$fixture/valid.sdn"
+    printf '%s\n' 'use common.kernel_plugin.contract' >"$fixture/src/k0g/clean.spl"
+    check_descriptor "$fixture/valid.sdn" "$fixture" >/dev/null
+
+    printf '%s\n' 'use compiler.parser' >"$fixture/src/k0g/clean.spl"
+    if (check_descriptor "$fixture/valid.sdn" "$fixture") >/dev/null 2>&1; then
+        fail "selftest accepted a K0g-to-product import"
+    fi
+
+    printf '%s\n' 'format|kpf-k0g-import-closure-v1|unexpected' >"$fixture/malformed.sdn"
+    if (check_descriptor "$fixture/malformed.sdn" "$fixture") >/dev/null 2>&1; then
+        fail "selftest accepted a malformed descriptor"
+    fi
+
+    : >"$fixture/src/k0g/clean.spl"
+    rm "$fixture/src/k0g/clean.spl"
+    if (check_descriptor "$fixture/valid.sdn" "$fixture") >/dev/null 2>&1; then
+        fail "selftest accepted zero checked source files"
+    fi
+    echo "KPF_K0G_IMPORT_CLOSURE_SELFTEST: PASS clean=accepted escape=rejected malformed=rejected zero_files=rejected"
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/kpf-k0g-closure.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+case "${1:-}" in
+    --selftest) selftest ;;
+    "") check_descriptor "$DESCRIPTOR" "$SOURCE_ROOT" ;;
+    *) fail "usage: $0 [--selftest]" ;;
+esac
