@@ -1,0 +1,37 @@
+use app.io.mod.process_run_with_limits_bounded
+use app.lint.provider.cpp.model.{CppAnalysisState, CppToolFailure, CppToolResultV1, CppToolchainFingerprintV1, TranslationUnitConfigReceiptV1}
+use os.tooling.clang_worker.protocol.parse_clang_structured_output_v1
+
+pub struct ClangWorkerLimitsV1:
+    timeout_ms: i64
+    memory_bytes: i64
+    cpu_seconds: i64
+    max_fds: i64
+    max_processes: i64
+    max_output_bytes: i64
+
+pub fn clang_worker_default_limits_v1() -> ClangWorkerLimitsV1:
+    ClangWorkerLimitsV1(10000, 536870912, 10, 64, 8, 4194304)
+
+pub fn classify_clang_worker_result_v1(stdout: text, stderr: text, exit_code: i64, limit_exceeded: bool, limit_type: text, revision: u64, receipt: TranslationUnitConfigReceiptV1, toolchain: CppToolchainFingerprintV1) -> CppToolResultV1:
+    val timed_out = (limit_exceeded and limit_type == "timeout") or exit_code == -1
+    if timed_out:
+        return CppToolResultV1(CppAnalysisState.Failed, CppToolFailure.TimedOut, [], exit_code, "clang worker timed out", receipt, toolchain)
+    if exit_code != 0 or limit_exceeded:
+        return CppToolResultV1(CppAnalysisState.Failed, CppToolFailure.Crashed, [], exit_code, "clang worker failed: " + stderr, receipt, toolchain)
+
+    val parsed = parse_clang_structured_output_v1(stdout, revision)
+    if not parsed.valid:
+        return CppToolResultV1(CppAnalysisState.Failed, CppToolFailure.MalformedOutput, [], exit_code, parsed.reason, receipt, toolchain)
+    CppToolResultV1(CppAnalysisState.Complete, CppToolFailure.None, parsed.diagnostics, exit_code, "", receipt, toolchain)
+
+pub fn run_clang_tidy_worker_v1(command: text, arguments: [text], revision: u64, receipt: TranslationUnitConfigReceiptV1, toolchain: CppToolchainFingerprintV1, limits: ClangWorkerLimitsV1) -> CppToolResultV1:
+    if command == "" or limits.timeout_ms <= 0 or limits.max_output_bytes <= 0:
+        return CppToolResultV1(CppAnalysisState.Failed, CppToolFailure.MalformedOutput, [], -1, "invalid clang worker command or limits", receipt, toolchain)
+
+    val process = process_run_with_limits_bounded(
+        command, arguments, limits.timeout_ms, limits.memory_bytes,
+        limits.cpu_seconds, limits.max_fds, limits.max_processes,
+        limits.max_output_bytes,
+    )
+    classify_clang_worker_result_v1(process.stdout, process.stderr, process.exit_code, process.limit_exceeded, process.limit_type, revision, receipt, toolchain)
