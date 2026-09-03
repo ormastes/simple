@@ -970,18 +970,21 @@ impl CompilerDriver:
                 eprint("[collect-all]   poisoned: {summary_ctx.poisoned_modules[poisoned_idx]}")
                 poisoned_idx = poisoned_idx + 1
 
-        var phase_ctx: CompileContext = self.ctx
-        phase_ctx.hir_modules = phase_hir_modules
-        phase_ctx.hir_module_count_value = retained_hir_module_count
-        phase_ctx.bootstrap_entry_hir = phase_entry_hir
-        if phase_ctx.has_errors():
-            return (phase_ctx, false)
+        # Commit through the canonical driver owner. Copying this closure-sized
+        # context into a second local produced a zero receiver in the Phase-2
+        # native ABI and crashed at phase_ctx.has_errors() after a clean HIR
+        # loop. The streaming sibling already uses this in-place owner shape.
+        self.ctx.hir_modules = phase_hir_modules
+        self.ctx.hir_module_count_value = retained_hir_module_count
+        self.ctx.bootstrap_entry_hir = phase_entry_hir
+        if self.ctx.error_count_value > 0:
+            return (self.ctx, false)
         for validation_error in driver_validate_value_struct_layouts(
                 validation_module_keys, validation_module_values,
-                phase_ctx.hir_modules):
-            phase_ctx.add_error(validation_error)
-        if phase_ctx.has_errors():
-            return (phase_ctx, false)
+                self.ctx.hir_modules):
+            self.ctx.add_error(validation_error)
+        if self.ctx.error_count_value > 0:
+            return (self.ctx, false)
 
         # Profile-gated HM type inference and visibility diagnostics. Advisory
         # remains log-only; robust warns; critical/verified fail the build.
@@ -989,7 +992,7 @@ impl CompilerDriver:
             case TypecheckPassSeverity.Advisory: false
             case _: true
         if ((env_get("SIMPLE_TYPECHECK_WARN")) == "1") or typecheck_enforcing:
-            val tc_warnings = run_typecheck_warn_pass(phase_ctx, phase_hir_modules)
+            val tc_warnings = run_typecheck_warn_pass(self.ctx, phase_hir_modules)
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
@@ -1003,7 +1006,7 @@ impl CompilerDriver:
             case SafetyPassSeverity.Advisory: false
             case _: true
         if ((env_get("SIMPLE_SAFETY_WARN")) == "1") or safety_enforcing:
-            val safety_warnings = run_safety_warn_pass(phase_ctx, phase_hir_modules)
+            val safety_warnings = run_safety_warn_pass(self.ctx, phase_hir_modules)
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -1016,21 +1019,21 @@ impl CompilerDriver:
         # Severity is still profile-gated inside each pass -- `critical` raises
         # errors, every other profile raises warnings -- and each records a
         # receipt whether or not it found anything.
-        val any_escape_warnings = run_any_escape_pass(phase_ctx, phase_hir_modules)
+        val any_escape_warnings = run_any_escape_pass(self.ctx, phase_hir_modules)
         log_warn("any-escape pass: {any_escape_warnings.len()} diagnostic(s)")
         var ae_idx = 0
         while ae_idx < any_escape_warnings.len():
             log_warn(any_escape_warnings[ae_idx])
             ae_idx = ae_idx + 1
 
-        val enum_contract_warnings = run_enum_contract_pass(phase_ctx, phase_hir_modules)
+        val enum_contract_warnings = run_enum_contract_pass(self.ctx, phase_hir_modules)
         log_warn("enum-contract pass: {enum_contract_warnings.len()} diagnostic(s)")
         var ec_idx = 0
         while ec_idx < enum_contract_warnings.len():
             log_warn(enum_contract_warnings[ec_idx])
             ec_idx = ec_idx + 1
 
-        (phase_ctx, not phase_ctx.has_errors())
+        (self.ctx, self.ctx.error_count_value == 0)
 
     # --------------------------------------------------------------------------
     # Phase 3a: Lower to HIR (standalone, kept for compatibility)
