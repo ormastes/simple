@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use common.kernel_plugin.ids.KpfDigest256
+use app.lint.provider.cpp.model.{CppAnalysisState, CppToolFailure, CppToolchainFingerprintV1}
+use app.lint.provider.cpp.worker.{cpp_lint_worker_default_limits_v1, run_cpp_lint_worker_v1}
+
+fn _database_v1() -> text:
+    "[{\"directory\":\"/workspace\",\"file\":\"/workspace/a.cc\",\"arguments\":[\"clang++\",\"-std=c++20\",\"-c\",\"a.cc\"],\"configuration_id\":\"debug\"}]"
+
+fn _toolchain_v1() -> CppToolchainFingerprintV1:
+    CppToolchainFingerprintV1("clang-tidy", "20.1.0", "arm64-apple-darwin", "/toolchain/lib/clang/20", KpfDigest256(1, 2, 3, 4))
+
+describe "real C and C++ lint worker":
+    it "requires an exact translation-unit compile command":
+        val run = run_cpp_lint_worker_v1("[]", "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug", "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", 7, _toolchain_v1(), cpp_lint_worker_default_limits_v1())
+        expect(run.result.state).to_equal(CppAnalysisState.Incomplete)
+        expect(run.result.diagnostics.len()).to_equal(0)
+        expect(run.worker_receipt.authoritative).to_equal(false)
+
+    it "runs bounded structured output and normalizes fixes":
+        val run = run_cpp_lint_worker_v1(_database_v1(), "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug", "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", 7, _toolchain_v1(), cpp_lint_worker_default_limits_v1())
+        expect(run.result.state).to_equal(CppAnalysisState.Complete)
+        expect(run.result.failure).to_equal(CppToolFailure.None)
+        expect(run.result.diagnostics.len()).to_equal(1)
+        expect(run.result.diagnostics[0].fixes[0].replacement).to_equal("nullptr")
+        expect(run.worker_receipt.authoritative).to_equal(true)
+        expect(run.worker_receipt.configuration_fingerprint.len()).to_equal(64)
+        expect(run.worker_receipt.toolchain_fingerprint.len()).to_equal(64)
+        expect(run.worker_receipt.invocation_fingerprint.len()).to_equal(64)
+
+    it "rejects incomplete toolchain identity before process execution":
+        val incomplete = CppToolchainFingerprintV1("clang-tidy", "unknown", "unknown", "unknown", KpfDigest256(0, 0, 0, 0))
+        val run = run_cpp_lint_worker_v1(_database_v1(), "/workspace/build/compile_commands.json", "/workspace/a.cc", "debug", "test/01_unit/app/lint/provider/cpp/fixtures/fake_clang_tidy_wrapper.shs", 7, incomplete, cpp_lint_worker_default_limits_v1())
+        expect(run.result.state).to_equal(CppAnalysisState.Incomplete)
+        expect(run.worker_receipt.authoritative).to_equal(false)
