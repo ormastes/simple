@@ -87,7 +87,12 @@ committed table is bit-identical by construction and self-evidently so.
   tier table requires. Existing `src/app/ui_showcase` drives DrawIR, not the
   primitive surface, so this is new; wire into those hosts only after the
   bench-side scenes work.
-- **P5 Fixes, in measured order.** Named already: the 5 forced-readback
+- **P5 Fixes, in measured order.** FIRST ONE LANDED:
+  `emu_draw_circle_thick` converted from a per-pixel bounding-box scan to
+  span form — vulkan **9,955 us -> 1,176 us (8.5x)**, cpu 122 -> 31 us,
+  pixel-identical (verified against a pre-change golden, since the parity gate
+  cannot validate a shared-`emu_*` rewrite: both backends change together).
+  30 per-pixel sites remain in `backend_emu.spl`. Named already: the 5 forced-readback
   primitives (defer the flush / GPU-native alpha blend — research items 3, 4),
   and the per-element copy loop at `backend_vulkan.spl:1504` (`rt_array_copy`
   exists in the runtime but has no Simple-level surface). Both are already
@@ -107,11 +112,26 @@ vs 306818 and 10460147 vs 11073548).
 byte-identical to the C Vulkan reference for clear + 64 rect fills. Calibrated
 against a single flipped bit.
 
-### P4 — feature showcase + backend parity: DONE, no rendering bug found
-`bench/vulkan_2d_c/feature_showcase.spl` (32 primitives) +
+### P4 — feature showcase + backend parity: DONE for the exercised surface
+
+`bench/vulkan_2d_c/feature_showcase.spl` (**38 timed marks**, ~32 distinct draw
+primitives of the 34-primitive census) +
 `scripts/check/check-engine2d-backend-parity.shs`:
-**PASS — 1,920,000 bytes across 32 primitives, 0 differing** between the cpu
-and vulkan backends. Rendering correctness is not the problem.
+**PASS — 1,920,000 bytes across 38 primitives, 0 differing** between the cpu
+and vulkan backends.
+
+Includes `draw_text`/`draw_text_bg`, which matter most here: they are
+GPU-native (vulkan SPIR-V glyph path) versus the cpu rasterizer, so unlike the
+shared `emu_*` primitives they are a genuine divergence candidate. Verified
+NON-VACUOUS — the text band carries 1,696 non-clear pixels, so the diff is
+comparing rendered glyphs, not two blank regions.
+
+**Scope of the claim:** no divergence **in the primitives exercised**. Not
+covered yet: the `draw_engine`/`draw_ir_*` composition family and
+`draw_software_offscreen_opacity_consume`. The mechanism argument (16 `emu_*`
+primitives share CPU code, so divergence can only be in the ~13 GPU-native
+ones) is sound, but only ~9 of those 13 have actually been run through the
+gate.
 
 ### P3 — per-primitive perf matrix: the systemic finding
 
@@ -132,6 +152,14 @@ two orders of magnitude apart. The cost is therefore not in the primitives but
 in the per-call host/device synchronisation wrapped around them on the vulkan
 lane. That is the target for P5, and it is a bigger lever than any individual
 primitive.
+
+### Root cause of the systemic gap (found 2026-09-03)
+
+`emu_*` does not write pixels — it decomposes shapes into the backend's own
+`draw_rect_filled`, and for outlines that is **one 1x1 rect per pixel** (31
+such sites in `backend_emu.spl`). On cpu that is a memory write; on vulkan it
+is a GPU compute dispatch. An r=35 ring is ~1021 dispatches. Full record:
+`doc/08_tracking/bug/emu_shape_decomposition_emits_one_gpu_dispatch_per_pixel_2026-09-03.md`.
 
 ### Correction worth keeping
 
