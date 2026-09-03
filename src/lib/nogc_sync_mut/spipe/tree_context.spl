@@ -1,0 +1,815 @@
+# SPipe common context tree parser.
+#
+# Language-neutral parser API for command output, logs, file trees, and packed
+# text. It keeps raw text addressable while rendering parent chains beside
+# selected nodes so mid-context snippets remain understandable.
+
+struct SourceBlob:
+    id: text
+    kind: text
+    uri: text
+    command: text
+    cwd: text
+    raw_text: text
+
+struct TreeNode:
+    id: text
+    source_id: text
+    parent_id: text
+    kind: text
+    name: text
+    path: text
+    depth: i64
+    start_line: i64
+    end_line: i64
+    level_norm: text
+    level_raw: text
+    level_present: bool
+    level_confidence: text
+    text: text
+    summary: text
+
+struct TreeDoc:
+    source: SourceBlob
+    parser_name: text
+    level_detected: bool
+    nodes: [TreeNode]
+
+struct ContextStore:
+    docs: [TreeDoc]
+
+fn spipe_source_blob(id: text, kind: text, command: text, raw_text: text) -> SourceBlob:
+    SourceBlob(id: id, kind: kind, uri: "", command: command, cwd: "", raw_text: raw_text)
+
+fn spipe_parser_names() -> [text]:
+    [
+        "generic_text",
+        "generic_log_level",
+        "file_tree",
+        "find",
+        "ls",
+        "tree",
+        "rg",
+        "grep",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "gcc_clang",
+        "ld_linker",
+        "cmake",
+        "ninja",
+        "make",
+        "shell",
+        "python_traceback",
+        "pytest",
+        "ctest",
+        "cargo",
+        "npm",
+        "apt",
+        "dpkg",
+        "tar",
+        "zip",
+        "unzip",
+        "rsync",
+        "journalctl",
+        "systemctl",
+        "repomix_markdown",
+        "repomix_xml",
+        "markdown_headings"
+    ]
+
+fn spipe_match_parser(source_kind: text, command: text, raw_text: text) -> text:
+    val c = command.to_lower()
+    val k = source_kind.to_lower()
+    val sample = raw_text[0:_min_i64(raw_text.len(), 4096)].to_lower()
+    if sample.contains("<file path="):
+        return "repomix_xml"
+    if k == "repomix" or sample.contains("## file:"):
+        return "repomix_markdown"
+    if k == "markdown" or k == "md" or c.contains("markdown") or c.ends_with(".md") or _looks_like_markdown_headings(raw_text):
+        return "markdown_headings"
+    if c.contains("git diff") or sample.starts_with("diff --git "):
+        return "git_diff"
+    if c.contains("git status") or sample.contains("changes not staged"):
+        return "git_status"
+    if c.contains("git log"):
+        return "git_log"
+    if c.contains("journalctl"):
+        return "journalctl"
+    if c.contains("systemctl"):
+        return "systemctl"
+    if c.contains("python") or sample.contains("traceback (most recent call last):"):
+        return "python_traceback"
+    if c.contains("pytest"):
+        return "pytest"
+    if c.contains("ctest"):
+        return "ctest"
+    if c.contains("cargo"):
+        return "cargo"
+    if c.contains("npm"):
+        return "npm"
+    if c.contains("apt-get") or c.contains("apt ") or c.ends_with("/apt"):
+        return "apt"
+    if c.contains("dpkg"):
+        return "dpkg"
+    if c == "tar" or c.starts_with("tar ") or c.ends_with("/tar"):
+        return "tar"
+    if c == "zip" or c.starts_with("zip ") or c.ends_with("/zip"):
+        return "zip"
+    if c == "unzip" or c.starts_with("unzip ") or c.ends_with("/unzip"):
+        return "unzip"
+    if c == "rsync" or c.starts_with("rsync ") or c.ends_with("/rsync"):
+        return "rsync"
+    if c.contains("cmake"):
+        return "cmake"
+    if c.contains("ninja"):
+        return "ninja"
+    if c == "make" or c.contains(" make ") or c.ends_with("/make"):
+        return "make"
+    if c == "sh" or c.starts_with("sh ") or c.ends_with("/sh") or c.contains(" bash") or c.starts_with("bash ") or c.contains("/bash") or sample.starts_with("sh: ") or sample.starts_with("bash: ") or sample.contains(": line "):
+        return "shell"
+    if c.contains("gcc") or c.contains("clang") or sample.contains("undefined reference"):
+        return "gcc_clang"
+    if c == "ld" or c.contains(" ld") or c.ends_with("/ld"):
+        return "ld_linker"
+    if c.contains("rg ") or c.ends_with("/rg"):
+        return "rg"
+    if c.contains("grep"):
+        return "grep"
+    if c.contains("find "):
+        return "find"
+    if c.contains("tree"):
+        return "tree"
+    if c.contains("ls"):
+        return "ls"
+    if _looks_like_file_tree(raw_text):
+        return "file_tree"
+    if _has_explicit_level(raw_text, true):
+        return "generic_log_level"
+    "generic_text"
+
+fn spipe_parse_text(source_kind: text, command: text, raw_text: text) -> TreeDoc:
+    val source = spipe_source_blob("src:1", source_kind, command, raw_text)
+    spipe_parse_source(source)
+
+fn spipe_parse_source(source: SourceBlob) -> TreeDoc:
+    val parser_name = spipe_match_parser(source.kind, source.command, source.raw_text)
+    val lines = source.raw_text.split("\n")
+    val level_detected = _has_explicit_level(source.raw_text, _parser_allows_compiler_levels(parser_name))
+    var nodes: [TreeNode] = []
+    var command_parent = TreeNode(id: "p0", source_id: source.id, parent_id: "", kind: "command", name: source.command, path: "", depth: 0, start_line: 1, end_line: lines.len(), level_norm: "NONE", level_raw: "", level_present: false, level_confidence: "none", text: source.command, summary: source.command)
+    nodes.push(command_parent)
+    var tree_stack: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line_no = i + 1
+        val line = lines[i]
+        if line == "" and i + 1 == lines.len():
+            i = i + 1
+            continue
+        var path = _detect_path(line, parser_name)
+        if parser_name == "tree":
+            val tree_name = _tree_line_name(line)
+            if tree_name != "":
+                val tree_depth = _tree_line_depth(line)
+                val prefix = _tree_stack_prefix(tree_stack, tree_depth)
+                if prefix == "":
+                    path = tree_name
+                else:
+                    path = prefix + "/" + tree_name
+                tree_stack = _tree_stack_update(tree_stack, tree_depth, tree_name)
+        val depth = if path == "" then 1 else _path_depth(path) + 1
+        val level = _detect_level(line, _parser_allows_compiler_levels(parser_name))
+        val path_has_children = _path_line_has_children(lines, i, path, parser_name)
+        val kind = if path == "" then "line" else if line.ends_with("/") or path_has_children or (parser_name == "ls" and _ls_line_is_dir(line)) then "dir" else "file"
+        nodes.push(TreeNode(
+            id: "n{line_no}",
+            source_id: source.id,
+            parent_id: "p0",
+            kind: kind,
+            name: _basename(path),
+            path: path,
+            depth: depth,
+            start_line: line_no,
+            end_line: line_no,
+            level_norm: level[0],
+            level_raw: level[1],
+            level_present: level[2] == "true",
+            level_confidence: level[3],
+            text: line,
+            summary: line.trim()
+        ))
+        i = i + 1
+    TreeDoc(source: source, parser_name: parser_name, level_detected: level_detected, nodes: nodes)
+
+fn spipe_context_store_new() -> ContextStore:
+    ContextStore(docs: [])
+
+fn spipe_context_put(store: ContextStore, source: SourceBlob) -> ContextStore:
+    var docs = store.docs
+    docs.push(spipe_parse_source(source))
+    ContextStore(docs: docs)
+
+fn spipe_context_get(store: ContextStore, source_id: text) -> text:
+    for doc in store.docs:
+        if doc.source.id == source_id:
+            return spipe_render_tree(doc)
+    ""
+
+fn spipe_context_search(store: ContextStore, query: text) -> text:
+    val q = query.to_lower()
+    var parts: [text] = []
+    for doc in store.docs:
+        if doc.source.raw_text.to_lower().contains(q) or doc.source.command.to_lower().contains(q):
+            parts.push(spipe_render_tree(doc))
+    parts.join("\n")
+
+fn spipe_context_raw(store: ContextStore, source_id: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    for doc in store.docs:
+        if doc.source.id == source_id:
+            return _raw_range_with_parents(doc, source_id, start_line, end_line, before, after)
+    ""
+
+fn spipe_raw_context(source_id: text, source_kind: text, command: text, raw_text: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    val doc = spipe_parse_source(spipe_source_blob(source_id, source_kind, command, raw_text))
+    _raw_range_with_parents(doc, source_id, start_line, end_line, before, after)
+
+fn spipe_render_tree(doc: TreeDoc) -> text:
+    var parts: [text] = []
+    parts.push("@ctx v=1 render=tree-log parser=\"{doc.parser_name}\"")
+    val level_state = if doc.level_detected then "true" else "false"
+    parts.push("@source id={doc.source.id} cmd=\"{doc.source.command}\" level_detected={level_state} raw_available=true")
+    if doc.level_detected:
+        val fatal = _render_level_group(doc, "FATAL")
+        if fatal != "":
+            parts.push(fatal)
+        val error = _render_level_group(doc, "ERROR")
+        if error != "":
+            parts.push(error)
+        val warn = _render_level_group(doc, "WARN")
+        if warn != "":
+            parts.push(warn)
+        val info = _render_level_group(doc, "INFO")
+        if info != "":
+            parts.push(info)
+        val debug = _render_level_group(doc, "DEBUG")
+        if debug != "":
+            parts.push(debug)
+        val trace = _render_level_group(doc, "TRACE")
+        if trace != "":
+            parts.push(trace)
+        val none = _render_level_group(doc, "NONE")
+        if none != "":
+            parts.push(none)
+    else:
+        val rendered_nodes = _render_nodes(doc, "ALL")
+        if rendered_nodes != "":
+            parts.push(rendered_nodes)
+    parts.push("@more raw=raw:{doc.source.id} lines=all")
+    parts.join("\n")
+
+fn spipe_raw_range(raw_text: text, source_id: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    val lines = raw_text.split("\n")
+    var start = start_line - before
+    if start < 1:
+        start = 1
+    var finish = end_line + after
+    if finish > lines.len():
+        finish = lines.len()
+    var parts: [text] = []
+    parts.push("@raw id={source_id} range=L{start}-L{finish} mode=exact")
+    var i = start
+    while i <= finish:
+        parts.push("| " + lines[i - 1])
+        i = i + 1
+    parts.join("\n")
+
+fn _raw_range_with_parents(doc: TreeDoc, source_id: text, start_line: i64, end_line: i64, before: i64, after: i64) -> text:
+    val parents = _render_range_parents(doc, start_line, end_line)
+    val raw = spipe_raw_range(doc.source.raw_text, source_id, start_line, end_line, before, after)
+    if parents != "":
+        return parents + "\n" + raw
+    raw
+
+fn _render_level_group(doc: TreeDoc, level: text) -> text:
+    val count = _count_level(doc.nodes, level)
+    if count == 0:
+        return ""
+    var parts: [text] = []
+    parts.push("")
+    parts.push("@group level={level} count={count}")
+    val nodes = _render_nodes(doc, level)
+    if nodes != "":
+        parts.push(nodes)
+    parts.join("\n")
+
+fn _render_nodes(doc: TreeDoc, level: text) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < doc.nodes.len():
+        val node = doc.nodes[i]
+        if node.kind == "command":
+            i = i + 1
+            continue
+        if level != "ALL" and node.level_norm != level:
+            i = i + 1
+            continue
+        val parent_chain = _render_parent_chain(doc, node)
+        if parent_chain != "":
+            parts.push(parent_chain)
+        val raw = "raw:{doc.source.id}#L{node.start_line}-L{node.end_line}"
+        parts.push("@node id={node.id} d={node.depth} kind={node.kind} level={node.level_norm} level_raw=\"{node.level_raw}\" conf={node.level_confidence} lines={node.start_line}-{node.end_line} raw={raw}")
+        parts.push("| " + node.text)
+        i = i + 1
+    parts.join("\n")
+
+fn _render_parent_chain(doc: TreeDoc, node: TreeNode) -> text:
+    var parts: [text] = []
+    parts.push("@parent d=0 kind=command text=\"{doc.source.command}\"")
+    if node.path == "":
+        return parts.join("\n")
+    val dirs = _dirs_for_path(node.path)
+    var d = 0
+    while d < dirs.len():
+        parts.push("@parent d={d + 1} kind=dir path=\"{dirs[d]}\"")
+        d = d + 1
+    if node.kind != "dir":
+        parts.push("@parent d={dirs.len() + 1} kind=file path=\"{node.path}\"")
+    parts.join("\n")
+
+fn _render_range_parents(doc: TreeDoc, start_line: i64, end_line: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < doc.nodes.len():
+        val node = doc.nodes[i]
+        if node.kind != "command" and node.start_line <= end_line and node.end_line >= start_line:
+            parts.push("@context line={node.start_line}")
+            parts.push(_render_parent_chain(doc, node))
+        i = i + 1
+    parts.join("\n")
+
+fn _detect_level(line: text, compiler_mode: bool) -> [text]:
+    val t = line.trim()
+    val up = t.to_upper()
+    if up.starts_with("[TRACE]"):
+        return ["TRACE", "[TRACE]", "true", "exact"]
+    if up.starts_with("[DEBUG]"):
+        return ["DEBUG", "[DEBUG]", "true", "exact"]
+    if up.starts_with("[INFO]"):
+        return ["INFO", "[INFO]", "true", "exact"]
+    if up.starts_with("[WARN]") or up.starts_with("[WARNING]"):
+        return ["WARN", t.split("]")[0] + "]", "true", "exact"]
+    if up.starts_with("[ERROR]") or up.starts_with("[ERR]"):
+        return ["ERROR", t.split("]")[0] + "]", "true", "exact"]
+    if up.starts_with("[FATAL]"):
+        return ["FATAL", "[FATAL]", "true", "exact"]
+    val first = t.split(" ")[0].to_upper()
+    if first == "TRACE" or first == "DEBUG" or first == "INFO" or first == "WARN" or first == "WARNING" or first == "ERROR" or first == "ERR" or first == "FATAL":
+        return [_norm_level(first), first, "true", "exact"]
+    if compiler_mode and t.starts_with("error:"):
+        return ["ERROR", "error:", "true", "parser"]
+    if compiler_mode and t.starts_with("warning:"):
+        return ["WARN", "warning:", "true", "parser"]
+    if compiler_mode and _looks_like_python_error_line(t):
+        return ["ERROR", t.split(":")[0] + ":", "true", "parser"]
+    if compiler_mode and (t.starts_with("E:") or t.starts_with("Err:")):
+        return ["ERROR", t.split(" ")[0], "true", "parser"]
+    if compiler_mode and t.starts_with("W:"):
+        return ["WARN", "W:", "true", "parser"]
+    ["NONE", "", "false", "none"]
+
+fn _has_explicit_level(raw_text: text, compiler_mode: bool) -> bool:
+    for line in raw_text.split("\n"):
+        val level = _detect_level(line, compiler_mode)
+        if level[2] == "true":
+            return true
+    false
+
+fn _parser_allows_compiler_levels(name: text) -> bool:
+    name == "gcc_clang" or name == "ld_linker" or name == "cmake" or name == "ninja" or name == "make" or name == "shell" or name == "python_traceback" or name == "cargo" or name == "npm" or name == "apt" or name == "dpkg" or name == "pytest" or name == "ctest"
+
+fn _detect_path(line: text, parser_name: text) -> text:
+    val t = _strip_level_prefix(line.trim())
+    if parser_name == "find" or parser_name == "file_tree":
+        if t.starts_with("./"):
+            return t[2:]
+        if t.starts_with("/"):
+            return t
+    if parser_name == "tree":
+        return _tree_line_name(line)
+    if parser_name == "ls":
+        return _ls_line_name(line)
+    if parser_name == "git_status":
+        return _git_status_path(line)
+    if parser_name == "git_diff":
+        return _git_diff_path(line)
+    if parser_name == "git_log":
+        return _plain_path_line(t)
+    if parser_name == "python_traceback":
+        return _python_traceback_path(t)
+    if parser_name == "pytest":
+        return _pytest_path(t)
+    if parser_name == "cargo":
+        return _rust_location_path(t)
+    if parser_name == "npm":
+        return _node_stack_path(t)
+    if parser_name == "apt" or parser_name == "dpkg":
+        return _first_local_path_token(t)
+    if parser_name == "tar" or parser_name == "zip" or parser_name == "unzip" or parser_name == "rsync":
+        return _archive_or_copy_path(t)
+    if parser_name == "cmake":
+        return _cmake_path(t)
+    if parser_name == "ninja":
+        return _ninja_path(t)
+    if parser_name == "make":
+        return _make_path(t)
+    if parser_name == "shell":
+        return _shell_path(t)
+    if parser_name == "ctest":
+        return _ctest_path(t)
+    if parser_name == "ld_linker":
+        return _ld_path(t)
+    if parser_name == "journalctl" or parser_name == "systemctl":
+        return _system_tool_path(t)
+    if parser_name == "repomix_xml":
+        return _repomix_xml_path(t)
+    if parser_name == "repomix_markdown":
+        return _repomix_markdown_path(t)
+    val parts = t.split(":")
+    if parts.len() > 1 and (parts[0].contains("/") or parts[0].contains(".")):
+        return parts[0]
+    ""
+
+fn _ls_line_name(line: text) -> text:
+    var t = line.trim()
+    if t == "" or t.starts_with("total "):
+        return ""
+    if not (t.starts_with("d") or t.starts_with("-") or t.starts_with("l")):
+        return ""
+    if t.contains(" -> "):
+        val arrow_parts = t.split(" -> ")
+        t = arrow_parts[0].trim()
+    var name = ""
+    for part in t.split(" "):
+        if part != "":
+            name = part
+    name
+
+fn _ls_line_is_dir(line: text) -> bool:
+    line.trim().starts_with("d")
+
+fn _git_status_path(line: text) -> text:
+    val t = line.trim()
+    if t.contains(" -> "):
+        val rename_parts = t.split(" -> ")
+        return rename_parts[rename_parts.len() - 1].trim()
+    for marker in ["modified:", "new file:", "deleted:", "renamed:", "both modified:"]:
+        if t.starts_with(marker):
+            return t[marker.len():].trim()
+    ""
+
+fn _git_diff_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("diff --git "):
+        return ""
+    val parts = t.split(" ")
+    if parts.len() < 4:
+        return ""
+    val dst = parts[3]
+    if dst.starts_with("b/"):
+        return dst[2:]
+    dst
+
+fn _plain_path_line(line: text) -> text:
+    val t = line.trim()
+    if t == "" or t.contains(" ") or t.starts_with("commit ") or t.starts_with("Author:") or t.starts_with("Date:"):
+        return ""
+    if t.contains("/") or t.contains("."):
+        return t
+    ""
+
+fn _pytest_path(line: text) -> text:
+    val t = line.trim()
+    if not (t.starts_with("FAILED ") or t.starts_with("ERROR ")):
+        return ""
+    val parts = t.split(" ")
+    if parts.len() < 2:
+        return ""
+    val test_id = parts[1]
+    val path_parts = test_id.split("::")
+    _plain_path_line(path_parts[0])
+
+fn _python_traceback_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("File \""):
+        return ""
+    val parts = t.split("\"")
+    if parts.len() > 1:
+        return parts[1].trim()
+    ""
+
+fn _looks_like_python_error_line(line: text) -> bool:
+    val t = line.trim()
+    if not t.contains(":"):
+        return false
+    val first = t.split(":")[0]
+    first.ends_with("Error") or first.ends_with("Exception")
+
+fn _rust_location_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("--> "):
+        return ""
+    val rest = t[4:]
+    val loc = rest.trim()
+    val parts = loc.split(":")
+    if parts.len() > 1:
+        return parts[0].trim()
+    ""
+
+fn _node_stack_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("at "):
+        return ""
+    val rest = t[3:].trim()
+    val parts = rest.split(":")
+    if parts.len() > 1 and (parts[0].contains("/") or parts[0].contains(".")):
+        return parts[0].trim()
+    ""
+
+fn _cmake_path(line: text) -> text:
+    val t = line.trim()
+    if not (t.starts_with("CMake Error at ") or t.starts_with("CMake Warning at ")):
+        return ""
+    val parts = t.split(" at ")
+    if parts.len() < 2:
+        return ""
+    val loc_parts = parts[1].split(":")
+    if loc_parts.len() > 1:
+        return loc_parts[0].trim()
+    ""
+
+fn _ninja_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("ninja: error: "):
+        return ""
+    if not t.contains("'"):
+        return ""
+    val parts = t.split("'")
+    if parts.len() > 1:
+        return parts[1].trim()
+    ""
+
+fn _make_path(line: text) -> text:
+    val t = line.trim()
+    if not t.contains("[") or not t.contains("]"):
+        return ""
+    val open_parts = t.split("[")
+    if open_parts.len() < 2:
+        return ""
+    val close_parts = open_parts[open_parts.len() - 1].split("]")
+    if close_parts.len() == 0:
+        return ""
+    val payload = close_parts[0]
+    val loc_parts = payload.split(":")
+    if loc_parts.len() > 1 and (loc_parts[0].contains("/") or loc_parts[0].contains(".")):
+        return loc_parts[0].trim()
+    ""
+
+fn _shell_path(line: text) -> text:
+    var t = line.trim()
+    if t.starts_with("bash: ") or t.starts_with("sh: "):
+        val parts = t.split(": ")
+        if parts.len() > 1:
+            t = parts[1].trim()
+    if t.contains(": line "):
+        val loc = t.split(": line ")[0].trim()
+        if loc == "bash" or loc == "sh":
+            return ""
+        return _plain_path_line(loc)
+    val colon_parts = t.split(":")
+    if colon_parts.len() > 1 and (colon_parts[0].contains("/") or colon_parts[0].contains(".")):
+        return _plain_path_line(colon_parts[0].trim())
+    ""
+
+fn _ctest_path(line: text) -> text:
+    for token in line.trim().split(" "):
+        val parts = token.split(":")
+        if parts.len() > 1 and (parts[0].contains("/") or parts[0].contains(".")):
+            return parts[0].trim()
+    ""
+
+fn _ld_path(line: text) -> text:
+    val t = line.trim()
+    val parts = t.split(":")
+    if parts.len() < 2:
+        return ""
+    var i: i64 = 0
+    while i < parts.len():
+        val candidate = parts[i].trim()
+        if (candidate.contains("/") or candidate.contains(".")) and _basename(candidate) != "ld":
+            return candidate
+        i = i + 1
+    ""
+
+fn _first_local_path_token(line: text) -> text:
+    for token in line.trim().split(" "):
+        var candidate = token.trim()
+        candidate = candidate.replace("(", "")
+        candidate = candidate.replace(")", "")
+        candidate = candidate.replace(",", "")
+        if candidate.ends_with(":"):
+            candidate = candidate[0:candidate.len() - 1]
+        if candidate.starts_with("http://") or candidate.starts_with("https://"):
+            candidate = ""
+        if candidate.starts_with("/") or candidate.starts_with("./") or (candidate.contains("/") and candidate.contains(".")):
+            return candidate
+    ""
+
+fn _archive_or_copy_path(line: text) -> text:
+    for token in line.trim().split(" "):
+        var candidate = token.trim()
+        candidate = candidate.replace("(", "")
+        candidate = candidate.replace(")", "")
+        candidate = candidate.replace(",", "")
+        candidate = candidate.replace("'", "")
+        candidate = candidate.replace("\"", "")
+        if candidate.ends_with(":"):
+            candidate = candidate[0:candidate.len() - 1]
+        val lower = candidate.to_lower()
+        if lower == "x" or lower == "a" or lower == "adding" or lower == "inflating" or lower == "extracting" or lower == "sending" or lower == "sent" or lower == "receiving":
+            candidate = ""
+        if candidate.starts_with("http://") or candidate.starts_with("https://"):
+            candidate = ""
+        if candidate.starts_with("/") or candidate.starts_with("./") or candidate.contains("/") or candidate.contains("."):
+            return candidate
+    ""
+
+fn _system_tool_path(line: text) -> text:
+    val t = line.trim()
+    for token in t.split(" "):
+        var candidate = token.trim()
+        candidate = candidate.replace("●", "")
+        candidate = candidate.replace("(", "")
+        candidate = candidate.replace(")", "")
+        candidate = candidate.replace(",", "")
+        candidate = candidate.replace(";", "")
+        if candidate.ends_with(":"):
+            candidate = candidate[0:candidate.len() - 1]
+        if candidate.contains(".service") or candidate.contains(".socket") or candidate.contains(".timer") or candidate.starts_with("/"):
+            return _plain_path_line(candidate)
+    ""
+
+fn _repomix_xml_path(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("<file "):
+        return ""
+    if not t.contains("path=\""):
+        return ""
+    val parts = t.split("path=\"")
+    if parts.len() < 2:
+        return ""
+    val rest = parts[1]
+    val end_parts = rest.split("\"")
+    if end_parts.len() > 0:
+        return end_parts[0].trim()
+    ""
+
+fn _repomix_markdown_path(line: text) -> text:
+    val t = line.trim()
+    val lower = t.to_lower()
+    if not lower.starts_with("## file:"):
+        return ""
+    t[8:].trim()
+
+fn _tree_line_name(line: text) -> text:
+    if line.contains("├── "):
+        val parts = line.split("├── ")
+        return parts[parts.len() - 1].trim()
+    if line.contains("└── "):
+        val parts = line.split("└── ")
+        return parts[parts.len() - 1].trim()
+    ""
+
+fn _tree_line_depth(line: text) -> i64:
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i + 4 <= line.len():
+        val chunk = line[i:i + 4]
+        if chunk == "│   " or chunk == "    ":
+            depth = depth + 1
+            i = i + 4
+        else:
+            return depth
+    depth
+
+fn _tree_stack_prefix(stack: [text], depth: i64) -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < depth and i < stack.len():
+        parts.push(stack[i])
+        i = i + 1
+    parts.join("/")
+
+fn _tree_stack_update(stack: [text], depth: i64, name: text) -> [text]:
+    var next: [text] = []
+    var i: i64 = 0
+    while i < depth and i < stack.len():
+        next.push(stack[i])
+        i = i + 1
+    next.push(name)
+    next
+
+fn _tree_line_has_children(lines: [text], index: i64, depth: i64) -> bool:
+    var i = index + 1
+    while i < lines.len():
+        if _tree_line_name(lines[i]) != "":
+            return _tree_line_depth(lines[i]) > depth
+        i = i + 1
+    false
+
+fn _path_line_has_children(lines: [text], index: i64, path: text, parser_name: text) -> bool:
+    if path == "":
+        return false
+    if parser_name == "tree":
+        return _tree_line_has_children(lines, index, _tree_line_depth(lines[index]))
+    if parser_name != "find" and parser_name != "file_tree":
+        return false
+    val prefix = path + "/"
+    var i = index + 1
+    while i < lines.len():
+        val child = _detect_path(lines[i], parser_name)
+        if child.starts_with(prefix):
+            return true
+        i = i + 1
+    false
+
+fn _strip_level_prefix(line: text) -> text:
+    var t = line
+    if t.starts_with("[") and t.contains("]"):
+        val parts = t.split("]")
+        if parts.len() > 1:
+            t = parts[1].trim()
+    val first = t.split(" ")[0].to_upper()
+    if first == "TRACE" or first == "DEBUG" or first == "INFO" or first == "WARN" or first == "WARNING" or first == "ERROR" or first == "ERR" or first == "FATAL":
+        return t[first.len():].trim()
+    t
+
+fn _looks_like_file_tree(raw_text: text) -> bool:
+    raw_text.contains("├── ") or raw_text.contains("└── ") or raw_text.contains("\n./")
+
+fn _looks_like_markdown_headings(raw_text: text) -> bool:
+    for line in raw_text.split("\n"):
+        val t = line.trim()
+        if t.starts_with("# "):
+            return true
+        if t.starts_with("## "):
+            return true
+        if t.starts_with("### "):
+            return true
+    false
+
+fn _norm_level(level: text) -> text:
+    if level == "WARNING":
+        return "WARN"
+    if level == "ERR":
+        return "ERROR"
+    level
+
+fn _count_level(nodes: [TreeNode], level: text) -> i64:
+    var count = 0
+    for node in nodes:
+        if node.kind != "command" and node.level_norm == level:
+            count = count + 1
+    count
+
+fn _path_depth(path: text) -> i64:
+    if path == "":
+        return 0
+    path.split("/").len()
+
+fn _dirs_for_path(path: text) -> [text]:
+    var dirs: [text] = []
+    val parts = path.split("/")
+    var cur = ""
+    var i = 0
+    while i + 1 < parts.len():
+        if cur == "":
+            cur = parts[i]
+        else:
+            cur = cur + "/" + parts[i]
+        if cur != "":
+            dirs.push(cur)
+        i = i + 1
+    dirs
+
+fn _basename(path: text) -> text:
+    if path == "":
+        return ""
+    val parts = path.split("/")
+    parts[parts.len() - 1]
+
+fn _min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
