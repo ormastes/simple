@@ -1,6 +1,6 @@
 # Quadratic fragment-accumulator neighbors in networking code
 
-**Status:** OPEN
+**Status:** FIXED 2026-09-02 (site 1 was already fixed; two unlisted tcp.spl siblings fixed here -- see the 2026-09-02 disposition at the bottom). Was: OPEN
 **Found:** 2026-08-21
 **Owner:** networking / SSH / HTTP service lanes
 
@@ -140,3 +140,59 @@ counters were added and the specs were executed against BOTH shapes.
 The 4 correctness scenarios pass in BOTH shapes, confirming the refactor is
 behavior-preserving and that only the 3 work-counter scenarios discriminate.
 Regression: `io/buffer_spec.spl` PASS.
+
+---
+
+## Disposition 2026-09-02 — site 1 already fixed; two UNLISTED siblings fixed here
+
+Host: aarch64-apple-darwin. Verified by reading current source, then by an
+executable class guard.
+
+**Site 1 (`ssh_session.spl`) — ALREADY FIXED.** The encrypted-packet receive
+loop no longer concatenates. It fills `self.recv_ring` via `push_bytes(...)`
+and consumes with `take_front(total_needed)` (`ssh_session.spl:674, 696, 725,
+731`), i.e. exactly the `SftpSessionV3._append` ring shape this record names as
+the reference. No `rt_bytes_concat` accumulation and no `_slice_range`
+compaction remain on that path; the only `rt_bytes_concat` left in the file is
+its `extern fn` declaration at :59. Control for the grep: `rt_bytes_concat` is
+still found in `ssh_session_channel.spl` and `ssh_session_helpers.spl`, so the
+scan is live.
+
+**Site 6 (`dbd.spl`) — unchanged, and the 2026-08-21 reclassification stands.**
+
+**NEW: two siblings in `tcp.spl` that the 2026-08-21 pass missed.** Both sit in
+the file that pass already edited, below the four readers it converted, and one
+of them is three lines under the `io_append_chunk` import it added:
+
+1. `tcp_fd_read_bytes_or_empty` (`tcp.spl:828`) — `buf = buf + chunk!` per read.
+   Now `io_append_chunk(buf, chunk!)`, the shape used by the three readers above
+   it.
+2. `tcp_fd_read_text_or_empty` (`tcp.spl:847`) — `out = out + chunk` per line,
+   rebuilding the whole retained body on every line of a multi-line HTTP body.
+   Now accumulates into `chunks: [text]` and `.join("")`s once, the shape
+   `http_server/parser.spl` already uses for its Content-Length body. Bytes
+   returned and the break condition are unchanged by construction; verified by
+   running both functions on the `fd < 0` path after the edit.
+
+This is the way this class survives a fix — a sibling in the already-edited
+file — so the guard added with it scans for the SHAPE, not for the one variable
+name.
+
+### Evidence
+
+`test/01_unit/lib/nogc_sync_mut/io/stream_reader_append_shape_spec.spl`, run
+with `src/compiler_rust/target/release/simple run <spec>`:
+
+- before the two edits: `4 examples, 2 failures`, naming `tcp.spl:828` and
+  `tcp.spl:847`.
+- after: `4 examples, 0 failures`
+  (`SPEC FILE VERDICT: ... outcome=OK declared>=4 executed=4 passed=4 failed=0`).
+
+The spec carries a non-vacuity control (the same grep for `io_append_chunk`
+must find `byte_append.spl`), and its generalised scan is scoped to the two
+reader files because the hex-dump builders in `tls_common_hooks.spl` match the
+same shape and are on this record's own "checked and excluded as benign" list.
+
+Still deferred, unchanged: `http_server/parser.spl`'s `self.buffer =
+self.buffer + data` and its slice compaction, which need a read-offset cursor
+that changes `feed`'s `consumed` contract.

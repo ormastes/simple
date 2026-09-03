@@ -1,0 +1,74 @@
+#!/bin/sh
+# Guard: no guard/gate may hardcode the compiler under test.
+#
+# Regression guard for
+# doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md
+#
+# A guard that resolves its compiler as a bare `$ROOT/bin/simple`, with no
+# override, reports on whatever binary happens to be deployed — not on the tree
+# being pushed. That census found 27 such files; the worst shape of guard
+# failure, because it PASSES BY CONSTRUCTION and its green verdict then gets
+# cited as evidence when real rows are retired.
+#
+# The rule this enforces is exactly the record's "Required fix" item 1: every
+# file that names `$ROOT/bin/simple` must also mention `SIMPLE_BIN`, i.e. it
+# must accept an injected binary. This does NOT check staleness (item 2) — that
+# is per-guard verdict logic, already implemented in
+# test/01_unit/engine_divergence/check-engine-divergence-probes.shs.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> file(s) checked, 0 hardcoded      exit 0
+#   FAIL  — <n> file(s) checked, <k> hardcoded    exit 1
+#   ERROR — nothing was checked                   exit 2   (never a pass)
+#
+# --selftest runs first and is fatal: two fixtures, one hardcoded (must be
+# detected) and one injectable (must not be), so a scanner that reports nothing
+# cannot be mistaken for a clean tree.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+GREP=/usr/bin/grep
+
+scan_dirs() {
+    # $1 = root to scan. Prints one path per hardcoding file.
+    _r=$1
+    for _f in $($GREP -rlE '\$\{?ROOT\}?/bin/simple' "$_r/scripts/check" "$_r/test" 2>/dev/null); do
+        $GREP -q 'SIMPLE_BIN' "$_f" || printf '%s\n' "$_f"
+    done
+}
+
+selftest() {
+    _t=$(mktemp -d)
+    mkdir -p "$_t/scripts/check" "$_t/test"
+    printf 'BIN="$ROOT/bin/simple"\n' > "$_t/scripts/check/bad.shs"
+    printf 'BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"\n' > "$_t/scripts/check/good.shs"
+    _hits=$(scan_dirs "$_t")
+    rm -rf "$_t"
+    case "$_hits" in
+        */bad.shs) ;;
+        *) echo "SELFTEST FAILED — hardcoded fixture not detected"; exit 2 ;;
+    esac
+    case "$_hits" in
+        *good.shs*) echo "SELFTEST FAILED — injectable fixture flagged"; exit 2 ;;
+    esac
+}
+
+selftest
+
+CHECKED=$($GREP -rlE '\$\{?ROOT\}?/bin/simple' "$ROOT/scripts/check" "$ROOT/test" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no file names \$ROOT/bin/simple)"
+    exit 2
+fi
+
+OFFENDERS=$(scan_dirs "$ROOT")
+if [ -n "$OFFENDERS" ]; then
+    echo "$OFFENDERS" | sed "s|^$ROOT/||"
+    N=$(echo "$OFFENDERS" | wc -l | tr -d ' ')
+    echo "FAIL — $CHECKED file(s) checked, $N hardcode the compiler with no SIMPLE_BIN override"
+    exit 1
+fi
+
+echo "PASS — $CHECKED file(s) checked, 0 hardcoded"
+exit 0

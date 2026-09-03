@@ -46,7 +46,8 @@ dimensions to a tiny fixture while preserving the same code path.
 - REQ-CPU-SIMD-SCALE-003: The wrapper emits `gui_perf_cpu_base_compare_*`
   fields for the focused CPU-SIMD vs scalar software baseline row.
 - REQ-CPU-SIMD-SCALE-004: The wrapper remains runnable at small overridden
-  dimensions for fast contract verification.
+  dimensions for fast contract verification, using GNU `time -f` or Darwin
+  `time -l` while normalizing maximum resident-set evidence to KiB.
 - REQ-CPU-SIMD-SCALE-005: The executable contract records native mode,
   default 300dpi retina density, and sample count so reports cannot pass with
   interpreter fallback or DPI drift.
@@ -128,11 +129,31 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-cpu-simd-render-scale-contract.shs")
+expect(script).to_contain("cpu_simd_render_scale_4k_cold_start_us")
+expect(script).to_contain("cpu_simd_render_scale_4k_warm_start_us")
+expect(script).to_contain("cpu_simd_render_scale_4k_p95_input_to_paint_us")
 expect(script).to_contain("cpu_simd_render_scale_4k_p95_frame_us")
+expect(script).to_contain("cpu_simd_render_scale_4k_software_warm_start_us")
+expect(script).to_contain("cpu_simd_render_scale_4k_software_p95_input_to_paint_us")
 expect(script).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_4k_software_p95_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_4k_vs_software_p50_ratio_permille")
 expect(script).to_contain("cpu_simd_render_scale_8k_p95_frame_us")
+expect(script).to_contain("cpu_simd_render_scale_8k_cold_start_us")
+expect(script).to_contain("cpu_simd_render_scale_8k_warm_start_us")
+expect(script).to_contain("cpu_simd_render_scale_8k_p95_input_to_paint_us")
+expect(script).to_contain("cpu_simd_render_scale_8k_software_warm_start_us")
+expect(script).to_contain("cpu_simd_render_scale_8k_software_p95_input_to_paint_us")
+val producer = file_read("src/app/wm_compare/backend_measurement_software_export.spl")
+expect(producer).to_contain("simple_web_layout_render_html_pixels_at_scroll")
+expect(producer).to_contain("html.replace(\"</body>\", \"<div style='height:20000px'></div></body>\")")
+expect(producer).to_contain("val cold_start = ck.now_micros()")
+expect(producer).to_contain("val warm_start = ck.now_micros()")
+expect(producer).to_contain("val input_start = ck.now_micros()")
+expect(producer).to_contain("input_to_paint_scope: \\\"scroll-state-to-present\\\"")
+expect(producer.contains("\"cold_start_us: \" + p50.to_string()")).to_equal(false)
+expect(producer.contains("\"warm_start_us: \" + p50.to_string()")).to_equal(false)
+expect(producer.contains("\"p95_input_to_paint_us: \" + p95.to_string()")).to_equal(false)
 expect(script).to_contain("cpu_simd_render_scale_8k_software_p50_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_8k_software_p95_frame_us")
 expect(script).to_contain("cpu_simd_render_scale_8k_vs_software_p50_ratio_permille")
@@ -444,6 +465,10 @@ expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_status=")
 expect(out).to_contain("cpu_simd_render_scale_runtime_source_fresh_required=0")
 expect(out).to_contain("cpu_simd_render_scale_4k_pixels=16x16")
 expect(out).to_contain("cpu_simd_render_scale_8k_pixels=32x32")
+expect(out).to_contain("cpu_simd_render_scale_4k_warm_start_us=")
+expect(out).to_contain("cpu_simd_render_scale_4k_p95_input_to_paint_us=")
+expect(out).to_contain("cpu_simd_render_scale_8k_warm_start_us=")
+expect(out).to_contain("cpu_simd_render_scale_8k_p95_input_to_paint_us=")
 expect(out).to_contain("cpu_simd_render_scale_4k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_8k_software_p50_frame_us=")
 expect(out).to_contain("cpu_simd_render_scale_4k_vs_software_p50_ratio_permille=")

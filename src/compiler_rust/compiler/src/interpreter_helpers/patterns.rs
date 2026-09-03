@@ -558,7 +558,10 @@ fn handle_method_call_with_self_update_inner(
                         impl_methods,
                     )? {
                         if let Some((ref obj_name, _)) = inner_update {
-                            if let Value::Object { class: updated_class, .. } = &updated_inner_self {
+                            if let Value::Object {
+                                class: updated_class, ..
+                            } = &updated_inner_self
+                            {
                                 if updated_class == class {
                                     return Ok((outer_result.clone(), Some((obj_name.clone(), outer_result))));
                                 }

@@ -1,0 +1,266 @@
+# codex-impl: lazy, portable system-location path templates.
+
+use std.env.types.{rt_env_get, rt_platform_name}
+use std.nogc_sync_mut.fs.host_path.{host_path_native_for, host_path_native}
+
+pub enum SystemLocationKind:
+    Home
+    UserLocal
+    UserCache
+    UserConfig
+    UserData
+    UserState
+    Runtime
+    Temp
+    CompilerCache
+
+pub struct SystemLocationError:
+    code: text
+    message: text
+
+pub struct SystemLocationInputs:
+    platform: text
+    home: text
+    user_profile: text
+    local_app_data: text
+    app_data: text
+    xdg_cache: text
+    xdg_config: text
+    xdg_data: text
+    xdg_state: text
+    xdg_runtime: text
+    temp_dir: text
+    simple_home: text
+    simple_user_local: text
+    simple_user_cache: text
+    simple_user_config: text
+    simple_user_data: text
+    simple_user_state: text
+    simple_runtime: text
+    simple_temp: text
+    simple_cache: text
+
+fn _location_error(code: text, message: text) -> SystemLocationError:
+    SystemLocationError(code: code, message: message)
+
+fn _env(name: text) -> text:
+    rt_env_get(name) ?? ""
+
+fn _process_temp_dir() -> text:
+    val tmpdir = _env("TMPDIR")
+    if tmpdir != "": return tmpdir
+    val temp = _env("TEMP")
+    if temp != "": return temp
+    _env("TMP")
+
+pub fn system_location_process_inputs() -> SystemLocationInputs:
+    # This bounded snapshot is constructed only by first template resolution.
+    SystemLocationInputs(
+        platform: rt_platform_name().lower(),
+        home: _env("HOME"),
+        user_profile: _env("USERPROFILE"),
+        local_app_data: _env("LOCALAPPDATA"),
+        app_data: _env("APPDATA"),
+        xdg_cache: _env("XDG_CACHE_HOME"),
+        xdg_config: _env("XDG_CONFIG_HOME"),
+        xdg_data: _env("XDG_DATA_HOME"),
+        xdg_state: _env("XDG_STATE_HOME"),
+        xdg_runtime: _env("XDG_RUNTIME_DIR"),
+        temp_dir: _process_temp_dir(),
+        simple_home: _env("SIMPLE_SYS_HOME"),
+        simple_user_local: _env("SIMPLE_SYS_USER_LOCAL"),
+        simple_user_cache: _env("SIMPLE_SYS_USER_CACHE"),
+        simple_user_config: _env("SIMPLE_SYS_USER_CONFIG"),
+        simple_user_data: _env("SIMPLE_SYS_USER_DATA"),
+        simple_user_state: _env("SIMPLE_SYS_USER_STATE"),
+        simple_runtime: _env("SIMPLE_SYS_RUNTIME"),
+        simple_temp: _env("SIMPLE_SYS_TEMP"),
+        simple_cache: _env("SIMPLE_CACHE"),
+    )
+
+fn _ascii_letter(value: text) -> bool:
+    value.len() == 1 and ((value >= "A" and value <= "Z") or (value >= "a" and value <= "z"))
+
+fn _canonical_slashes(value: text) -> text:
+    val replaced = value.replace("\\", "/")
+    val preserve_unc = replaced.starts_with("//")
+    var buffer = ""
+    var index = 0
+    while index < replaced.len():
+        val part = replaced.slice(index, index + 1)
+        if part != "/" or buffer == "" or not buffer.ends_with("/"):
+            buffer = buffer + part
+        index = index + 1
+    if preserve_unc and not buffer.starts_with("//"):
+        buffer = "/" + buffer
+    if buffer.len() > 1 and buffer.ends_with("/") and not (buffer.len() == 3 and buffer.slice(1, 3) == ":/"):
+        buffer = buffer.trim_end("/")
+    buffer
+
+fn _absolute_path(value: text) -> bool:
+    if value.starts_with("/"):
+        return true
+    value.len() >= 3 and _ascii_letter(value.slice(0, 1)) and value.slice(1, 3) == ":/"
+
+pub fn system_path_native_for(path: text, platform: text) -> text:
+    host_path_native_for(path, platform)
+
+pub fn system_path_native(path: text) -> text:
+    host_path_native(path)
+
+fn _admit_root(value: text, label: text) -> Result<text, SystemLocationError>:
+    if value == "":
+        return Err(_location_error("unsupported_platform_location", "no value for system location {label}"))
+    if value.contains("\u0000"):
+        return Err(_location_error("nul_in_system_location", "system location {label} contains NUL"))
+    val canonical = _canonical_slashes(value)
+    if not _absolute_path(canonical):
+        return Err(_location_error("relative_system_location", "system location {label} must be absolute"))
+    Ok(canonical)
+
+fn _home_candidate(inputs: SystemLocationInputs) -> text:
+    if inputs.simple_home != "": return inputs.simple_home
+    if inputs.platform == "windows" and inputs.user_profile != "": return inputs.user_profile
+    if inputs.home != "": return inputs.home
+    inputs.user_profile
+
+fn _join_root(root: text, child: text) -> text:
+    _canonical_slashes(root.trim_end("/") + "/" + child.trim_start("/"))
+
+fn _user_cache_candidate(inputs: SystemLocationInputs) -> text:
+    if inputs.simple_user_cache != "": return inputs.simple_user_cache
+    if inputs.platform == "windows": return inputs.local_app_data
+    if inputs.platform == "macos": return _join_root(_home_candidate(inputs), "Library/Caches")
+    if inputs.xdg_cache != "": return inputs.xdg_cache
+    _join_root(_home_candidate(inputs), ".cache")
+
+pub fn system_location_resolve_from(kind: SystemLocationKind, inputs: SystemLocationInputs) -> Result<text, SystemLocationError>:
+    var candidate = ""
+    var label = ""
+    match kind:
+        case SystemLocationKind.Home:
+            label = "home"
+            candidate = _home_candidate(inputs)
+        case SystemLocationKind.UserLocal:
+            label = "user_local"
+            if inputs.simple_user_local != "": candidate = inputs.simple_user_local
+            elif inputs.platform == "windows": candidate = inputs.local_app_data
+            elif inputs.platform == "macos": candidate = _join_root(_home_candidate(inputs), "Library/Application Support")
+            elif inputs.xdg_data != "": candidate = inputs.xdg_data
+            else: candidate = _join_root(_home_candidate(inputs), ".local/share")
+        case SystemLocationKind.UserCache:
+            label = "user_cache"
+            candidate = _user_cache_candidate(inputs)
+        case SystemLocationKind.UserConfig:
+            label = "user_config"
+            if inputs.simple_user_config != "": candidate = inputs.simple_user_config
+            elif inputs.platform == "windows": candidate = inputs.app_data
+            elif inputs.platform == "macos": candidate = _join_root(_home_candidate(inputs), "Library/Application Support")
+            elif inputs.xdg_config != "": candidate = inputs.xdg_config
+            else: candidate = _join_root(_home_candidate(inputs), ".config")
+        case SystemLocationKind.UserData:
+            label = "user_data"
+            if inputs.simple_user_data != "": candidate = inputs.simple_user_data
+            elif inputs.platform == "windows": candidate = inputs.app_data
+            elif inputs.platform == "macos": candidate = _join_root(_home_candidate(inputs), "Library/Application Support")
+            elif inputs.xdg_data != "": candidate = inputs.xdg_data
+            else: candidate = _join_root(_home_candidate(inputs), ".local/share")
+        case SystemLocationKind.UserState:
+            label = "user_state"
+            if inputs.simple_user_state != "": candidate = inputs.simple_user_state
+            elif inputs.platform == "windows": candidate = inputs.local_app_data
+            elif inputs.xdg_state != "": candidate = inputs.xdg_state
+            else: candidate = _join_root(_home_candidate(inputs), ".local/state")
+        case SystemLocationKind.Runtime:
+            label = "runtime"
+            if inputs.simple_runtime != "": candidate = inputs.simple_runtime
+            elif inputs.platform == "windows": candidate = inputs.temp_dir
+            elif inputs.xdg_runtime != "": candidate = inputs.xdg_runtime
+            else: candidate = inputs.temp_dir
+        case SystemLocationKind.Temp:
+            label = "temp"
+            if inputs.simple_temp != "": candidate = inputs.simple_temp
+            elif inputs.temp_dir != "": candidate = inputs.temp_dir
+            elif inputs.platform == "windows": candidate = _join_root(_home_candidate(inputs), "AppData/Local/Temp")
+            else: candidate = "/tmp"
+        case SystemLocationKind.CompilerCache:
+            label = "compiler_cache"
+            if inputs.simple_cache != "": candidate = inputs.simple_cache
+            else: candidate = _join_root(_user_cache_candidate(inputs), "simple/cache-manager")
+    _admit_root(candidate, label)
+
+pub fn system_location_resolve(kind: SystemLocationKind) -> Result<text, SystemLocationError>:
+    system_location_resolve_from(kind, system_location_process_inputs())
+
+fn _kind_from_name(name: text) -> SystemLocationKind?:
+    match name:
+        case "home": SystemLocationKind.Home
+        case "user_local": SystemLocationKind.UserLocal
+        case "user_cache": SystemLocationKind.UserCache
+        case "user_config": SystemLocationKind.UserConfig
+        case "user_data": SystemLocationKind.UserData
+        case "user_state": SystemLocationKind.UserState
+        case "runtime": SystemLocationKind.Runtime
+        case "temp": SystemLocationKind.Temp
+        case "compiler_cache": SystemLocationKind.CompilerCache
+        case _: nil
+
+pub fn resolve_system_path_template_from(template: text, inputs: SystemLocationInputs) -> Result<text, SystemLocationError>:
+    var buffer = ""
+    var index = 0
+    while index < template.len():
+        val ch = template.slice(index, index + 1)
+        if ch == "{" and index + 1 < template.len() and template.slice(index + 1, index + 2) == "{":
+            buffer = buffer + "{"
+            index = index + 2
+            continue
+        if ch == "}" and index + 1 < template.len() and template.slice(index + 1, index + 2) == "}":
+            buffer = buffer + "}"
+            index = index + 2
+            continue
+        if ch == "{" and template.slice(index, template.len()).starts_with("{sys:"):
+            val rest = template.slice(index + 5, template.len())
+            val close = rest.index_of("}")
+            if close < 0:
+                return Err(_location_error("malformed_path_template", "unterminated system location reference"))
+            val name = rest.slice(0, close)
+            if val kind = _kind_from_name(name):
+                buffer = buffer + system_location_resolve_from(kind, inputs)?
+            else:
+                return Err(_location_error("unknown_system_location", "unknown system location {name}"))
+            index = index + 5 + close + 1
+            continue
+        if ch == "{" or ch == "}":
+            return Err(_location_error("malformed_path_template", "path templates accept only {sys:name}, {{, and }}"))
+        buffer = buffer + ch
+        index = index + 1
+    if buffer.contains("\u0000"):
+        return Err(_location_error("nul_in_system_location", "resolved path contains NUL"))
+    Ok(_canonical_slashes(buffer))
+
+pub class LazyPathTemplate:
+    source: text
+    resolved_once: bool
+    cached_value: text
+    cached_error: SystemLocationError?
+
+    static fn new(source: text) -> LazyPathTemplate:
+        LazyPathTemplate(source: source, resolved_once: false, cached_value: "", cached_error: nil)
+
+    me resolve() -> Result<text, SystemLocationError>:
+        self.resolve_from(system_location_process_inputs())
+
+    me resolve_from(inputs: SystemLocationInputs) -> Result<text, SystemLocationError>:
+        if self.resolved_once:
+            if val error_value = self.cached_error:
+                return Err(error_value)
+            return Ok(self.cached_value)
+        val result = resolve_system_path_template_from(self.source, inputs)
+        self.resolved_once = true
+        match result:
+            case Ok(value):
+                self.cached_value = value
+                Ok(value)
+            case Err(error_value):
+                self.cached_error = error_value
+                Err(error_value)

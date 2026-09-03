@@ -193,6 +193,7 @@ function proofSourceArtifact() {
     !source.includes("result.gpu_feature_status.gpu_compositing === 'enabled'") ||
     !source.includes("result.gpu_feature_status.webgl === 'enabled'") ||
     !source.includes('out.css_animation_motion_observed = animationMotionObserved') ||
+    !source.includes('out.scroll_panel_event_count = scrollEventCount') ||
     !source.includes('finalAnimationCurrentTime > initialAnimationCurrentTime') ||
     !source.includes('finalAnimationOpacity !== initialAnimationOpacity') ||
     !source.includes("result.font_frame_path = framePath") ||
@@ -436,6 +437,12 @@ const rows = {
   text_input_count: jsonIntegerTextOrBlank(proof.text_input_count),
   pointer_down_count: jsonIntegerTextOrBlank(proof.pointer_down_count),
   pointer_up_count: jsonIntegerTextOrBlank(proof.pointer_up_count),
+  scroll_panel_overflow_y: proof.scroll_panel_overflow_y,
+  scroll_panel_client_height: jsonIntegerTextOrBlank(proof.scroll_panel_client_height),
+  scroll_panel_scroll_height: jsonIntegerTextOrBlank(proof.scroll_panel_scroll_height),
+  scroll_panel_before: jsonIntegerTextOrBlank(proof.scroll_panel_before),
+  scroll_panel_after: jsonIntegerTextOrBlank(proof.scroll_panel_after),
+  scroll_panel_event_count: jsonIntegerTextOrBlank(proof.scroll_panel_event_count),
   event_sequence: eventSequenceText(proof.event_sequence),
   performance_now_available: jsonBoolTextOrBlank(proof.performance_now_available),
   performance_now_delta_ms: jsonDecimalTextOrBlank(proof.performance_now_delta_ms),
@@ -547,6 +554,15 @@ if (!boolTrue(proof.pass)) {
   !jsonIntegerAtLeast(proof.pointer_up_count, 1)
 ) {
   reason = 'event-routing-contract-missing';
+} else if (
+  proof.scroll_panel_overflow_y !== 'scroll' ||
+  !jsonIntegerAtLeast(proof.scroll_panel_client_height, 1) ||
+  !jsonIntegerAtLeast(proof.scroll_panel_scroll_height, Number(proof.scroll_panel_client_height) + 1) ||
+  !sameJsonInteger(proof.scroll_panel_before, 0) ||
+  !sameJsonInteger(proof.scroll_panel_after, 40) ||
+  !jsonIntegerAtLeast(proof.scroll_panel_event_count, 1)
+) {
+  reason = 'event-routing-scroll-panel-contract-missing';
 } else if (!sameEventSequence(proof.event_sequence)) {
   reason = 'event-routing-sequence-contract-missing';
 } else if (
