@@ -504,6 +504,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< origin/main
     fn coff_refptr_stub_becomes_gotpcrel_against_real_symbol() {
         // Windows COFF: the object crate's writer lowers a GotRelative
         // relocation into a `.refptr.SYMBOL` pointer stub inside a
@@ -689,6 +690,197 @@ mod tests {
     }
 
     #[test]
+||||||| 591aad1791e
+=======
+    fn coff_refptr_stub_becomes_gotpcrel_against_real_symbol() {
+        // Windows COFF: the object crate's writer lowers a GotRelative
+        // relocation into a `.refptr.SYMBOL` pointer stub inside a
+        // `.rdata$.refptr` section carrying one DIR64 relocation — a
+        // data-section relocation SMF cannot represent. The parser must
+        // invert that lowering: drop the stub and emit GotPcRel against the
+        // real symbol (bug: seed `compile` failed on every Windows build with
+        // "relocation source section .rdata$.refptr is not executable code").
+        use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+        use object::{
+            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
+            SymbolFlags, SymbolScope,
+        };
+
+        let mut object = WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        // mov rax, [rip+disp32]; ret
+        object.append_section_data(text, &[0x48, 0x8b, 0x05, 0, 0, 0, 0, 0xc3], 16);
+        let target = object.add_symbol(Symbol {
+            name: b"rt_print".to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Dynamic,
+            weak: false,
+            section: SymbolSection::Undefined,
+            flags: SymbolFlags::None,
+        });
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset: 3,
+                    symbol: target,
+                    addend: -4,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::GotRelative,
+                        encoding: RelocationEncoding::Generic,
+                        size: 32,
+                    },
+                },
+            )
+            .unwrap();
+
+        let bytes = object.write().unwrap();
+        let parsed = ParsedObject::parse(&bytes).expect("COFF refptr stub object must parse");
+
+        assert!(
+            !parsed.sections.iter().any(|s| s.name.starts_with(".rdata$.refptr")),
+            "refptr stub section must be dropped, got sections: {:?}",
+            parsed.sections.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !parsed.symbols.iter().any(|s| s.name.starts_with(".refptr.")),
+            "refptr stub symbol must be dropped"
+        );
+        let reloc = parsed.relocations.first().expect("code relocation must survive");
+        assert_eq!(
+            reloc.reloc_type,
+            RelocationType::GotPcRel,
+            "stub-targeting REL32 must be restored to GotPcRel"
+        );
+        assert_eq!(reloc.addend, -4);
+        assert_eq!(
+            parsed.symbols[reloc.symbol_index as usize].name, "rt_print",
+            "relocation must be redirected to the real symbol"
+        );
+    }
+
+    #[test]
+    fn coff_refptr_inversion_leaves_ordinary_relocations_untouched() {
+        // Generalizing companion to the test above: the stub-inversion pass
+        // must be SURGICAL. An object carrying two distinct `.refptr` stubs
+        // AND an ordinary PC-relative call to a defined local symbol must
+        // come back with both stubs inverted to GotPcRel and the ordinary
+        // relocation passed through unchanged (still PcRel, still pointing
+        // at the local symbol). This pins the fail-closed property the fix
+        // rests on: only sections matching the stub shape exactly are
+        // rewritten, so non-Windows objects -- which have no such sections
+        // at all -- are structurally unaffected.
+        use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
+        use object::{
+            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
+            SymbolFlags, SymbolScope,
+        };
+
+        let mut object = WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(
+            text,
+            &[
+                0x48, 0x8b, 0x05, 0, 0, 0, 0, // mov rax, [rip+d]   -> stub A
+                0x48, 0x8b, 0x0d, 0, 0, 0, 0, // mov rcx, [rip+d]   -> stub B
+                0xe8, 0, 0, 0, 0, // call rel32          -> local, ordinary
+                0xc3,
+            ],
+            16,
+        );
+
+        let local = object.add_symbol(Symbol {
+            name: b"local_helper".to_vec(),
+            value: 0,
+            size: 0,
+            kind: SymbolKind::Text,
+            scope: SymbolScope::Compilation,
+            weak: false,
+            section: SymbolSection::Section(text),
+            flags: SymbolFlags::None,
+        });
+
+        let mut add_got = |object: &mut WriteObject, name: &[u8], offset: u64| {
+            let sym = object.add_symbol(Symbol {
+                name: name.to_vec(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Dynamic,
+                weak: false,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
+            });
+            object
+                .add_relocation(
+                    text,
+                    Relocation {
+                        offset,
+                        symbol: sym,
+                        addend: -4,
+                        flags: RelocationFlags::Generic {
+                            kind: RelocationKind::GotRelative,
+                            encoding: RelocationEncoding::Generic,
+                            size: 32,
+                        },
+                    },
+                )
+                .unwrap();
+        };
+        add_got(&mut object, b"rt_alpha", 3);
+        add_got(&mut object, b"rt_beta", 10);
+
+        object
+            .add_relocation(
+                text,
+                Relocation {
+                    offset: 15,
+                    symbol: local,
+                    addend: -4,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::Relative,
+                        encoding: RelocationEncoding::Generic,
+                        size: 32,
+                    },
+                },
+            )
+            .unwrap();
+
+        let bytes = object.write().unwrap();
+        let parsed = ParsedObject::parse(&bytes).expect("mixed COFF object must parse");
+
+        assert!(
+            !parsed.sections.iter().any(|s| s.name.starts_with(".rdata$.refptr")),
+            "every refptr stub section must be dropped"
+        );
+        assert!(
+            !parsed.symbols.iter().any(|s| s.name.starts_with(".refptr.")),
+            "no refptr stub symbol may survive"
+        );
+
+        let named = |r: &SmfRelocation| parsed.symbols[r.symbol_index as usize].name.clone();
+        let mut got: Vec<(String, RelocationType)> = parsed
+            .relocations
+            .iter()
+            .map(|r| (named(r), r.reloc_type))
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(
+            got,
+            vec![
+                ("local_helper".to_string(), RelocationType::Pc32),
+                ("rt_alpha".to_string(), RelocationType::GotPcRel),
+                ("rt_beta".to_string(), RelocationType::GotPcRel),
+            ],
+            "both stubs must invert to GotPcRel while the ordinary call stays Pc32"
+        );
+    }
+
+    #[test]
+>>>>>>> origin/session/win-bootstrap-stage2-admitted-2026-09-03
     fn normalizes_macho_symbol_address_before_flattening_code_sections() {
         use object::write::{Object as WriteObject, Symbol, SymbolSection};
         use object::{Architecture, BinaryFormat, Endianness, SymbolFlags, SymbolScope};

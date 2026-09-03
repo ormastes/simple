@@ -6,6 +6,8 @@ use std.env.types.{rt_process_run}
 use std.env.variables.{env_set}
 use std.env.validation.{validate_var_name}
 
+use std.io_runtime.{read_file_text, file_write}
+
 # ============================================================================
 # Export Formats
 # ============================================================================
@@ -226,18 +228,30 @@ fn file_read_text(path: text) -> text:
 
     Internal helper.
     """
-    # Try to run cat command
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "cat " + path])
-    if code == 0:
-        stdout
-    else:
-        ""
+    # NO-SHELL (2026-09-02): was `rt_process_run("/bin/sh", ["-c", "cat " + path])`,
+    # which cannot work on a bare Windows host (no /bin/sh), broke on any path
+    # containing a space or a shell metacharacter (the path was never quoted),
+    # and returned the -1 process_run sentinel under the interpreter -- so this
+    # helper read "" for EVERY file. `rt_file_read_text` is the cross-platform
+    # native primitive and returns "" for a missing file, matching the old
+    # non-zero-exit branch exactly.
+    # NIL-GUARD (2026-09-02): rt_file_read_text returns NIL, not "", for a
+    # missing file, and this helper returns non-optional `text` -- the runner
+    # rejects that with "nil is forbidden by the non-optional return contract".
+    # Caught by no_shell_failure_still_fails_spec.spl. Rather than redeclare the
+    # extern locally as an optional (100+ files declare it non-optional, and
+    # mismatched co-compiled signatures dispatch by fallback under JIT), use
+    # io_runtime's read_file_text, which already owns this primitive and its
+    # nil-guard -- the same "reuse the owner" lesson as cwd_process.
+    read_file_text(path)
 
 fn file_write_text(path: text, content: text):
     """Write text file (simple implementation).
 
     Internal helper.
     """
-    # Use echo to write file
-    val escaped = content.replace("'", "'\\''")
-    rt_process_run("/bin/sh", ["-c", "echo '" + escaped + "' > " + path])
+    # NO-SHELL (2026-09-02): was `rt_process_run("/bin/sh", ["-c", "echo ... > path"])`.
+    # Besides needing /bin/sh, that form appended the newline `echo` adds, mangled
+    # backslashes in some shells, and could not write a path containing a space.
+    # `rt_file_write_text` writes the bytes exactly, on every platform.
+    file_write(path, content)

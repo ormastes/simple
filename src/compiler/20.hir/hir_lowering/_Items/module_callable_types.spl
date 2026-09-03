@@ -207,6 +207,29 @@ impl HirLowering:
                 lowered_elements = lowered_elements.push(
                     self.imported_surface_type(element, imported_module_name))
             return HirType(kind: HirTypeKind.Tuple(lowered_elements), span: type_.span)
+        # Pointer / Union / Function are composite shapes the MATERIALIZATION
+        # walk (`parser_type_named_dependencies`, 10.frontend/parser_types_expr.spl)
+        # binds dependencies for and this projection walk used to drop. Each
+        # dropped shape fell through to `lower_type`, which resolves in the
+        # IMPORTER's scope, and died as a hard `unresolved type: X` blamed on an
+        # innocent importer. The arms landed once and were lost with the
+        # src/compiler restore in fcbec1c3b62; restored elementwise here, next
+        # to the current name-based Array arm rather than replacing it.
+        # Ratcheted by scripts/check/check-type-walk-constructor-parity.shs.
+        if parser_type_kind_is_pointer(type_.kind):
+            val pointee = parser_type_kind_pointer_inner(type_.kind, type_)
+            return HirType(
+                kind: HirTypeKind.Ptr(
+                    self.imported_surface_type(pointee, imported_module_name),
+                    parser_type_kind_pointer_is_mutable(type_.kind)),
+                span: type_.span)
+        val union_members = parser_type_kind_union_members(type_.kind)
+        if union_members.len() > 0:
+            var projected_members: [HirType] = []
+            for member in union_members:
+                projected_members = projected_members.push(
+                    self.imported_surface_type(member, imported_module_name))
+            return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
         val array_element_name = parser_type_kind_array_element_name(type_.kind)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
@@ -216,6 +239,19 @@ impl HirLowering:
             else:
                 HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
+        if parser_type_kind_is_function(type_.kind):
+            var projected_params: [HirType] = []
+            for fn_param in parser_type_kind_function_params(type_.kind):
+                projected_params = projected_params.push(
+                    self.imported_surface_type(fn_param, imported_module_name))
+            return HirType(
+                kind: HirTypeKind.Function(
+                    projected_params,
+                    self.imported_surface_type(
+                        parser_type_kind_function_return(type_.kind, type_),
+                        imported_module_name),
+                    []),
+                span: type_.span)
         self.lower_type(type_)
 
     me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:

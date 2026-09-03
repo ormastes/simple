@@ -363,8 +363,12 @@ pub unsafe extern "C" fn rt_env_temp() -> RuntimeValue {
         .or_else(|_| std::env::var("TMP"))
         .or_else(|_| std::env::var("TEMP"))
         .unwrap_or_else(|_| {
+            // Canonical internal path form is MinGW/MSYS style, never a
+            // native `C:\...` literal: code holds `/c/Temp` and converts at
+            // the spawn / native-API boundary (see
+            // `simple_common::platform::path::to_native_arg`).
             if cfg!(windows) {
-                "C:\\Temp".to_string()
+                "/c/Temp".to_string()
             } else {
                 "/tmp".to_string()
             }

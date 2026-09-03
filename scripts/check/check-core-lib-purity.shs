@@ -86,7 +86,27 @@ scan() {
     fi
 
     # Paths are recorded relative to the tree root so the baseline is portable.
-    cat "$_w/a" "$_w/b" | sed "s|^$_root/||" | sort -u >"$_w/cur"
+    #
+    # Windows/MSYS: rg is a native Win32 binary, so it echoes the search root
+    # back in Win32 form and joins the traversed part with BACKSLASHES --
+    # `C:/Users/.../src/lib/common\compress\brotli.spl` -- while $_root is the
+    # MSYS form `/c/Users/.../simple`. Neither the separator nor the prefix
+    # matched, so every file fell through un-relativized and the ratchet saw the
+    # SAME file as both a new violation and a stale baseline entry (measured
+    # 2026-09-02: 31 new / 13 stale where 13 of the "new" were the baselined 13).
+    # Normalizing separators and stripping BOTH root spellings fixes it.
+    # On Unix `cygpath` does not exist so $_root_win == $_root, and `tr` is a
+    # no-op for every path in this tree: nothing under src/lib/common has a
+    # backslash in its name. Unix behaviour is byte-identical.
+    _root_win=$_root
+    if command -v cygpath >/dev/null 2>&1; then
+        _root_win=$(cygpath -m "$_root" 2>/dev/null) || _root_win=$_root
+        [ -n "$_root_win" ] || _root_win=$_root
+    fi
+    cat "$_w/a" "$_w/b" \
+        | tr '\\' '/' \
+        | sed -e "s|^$_root_win/||" -e "s|^$_root/||" \
+        | sort -u >"$_w/cur"
 
     if [ ! -f "$_base" ]; then
         echo "ERROR — nothing was checked (missing baseline: $_base)"

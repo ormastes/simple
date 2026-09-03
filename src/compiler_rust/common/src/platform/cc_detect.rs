@@ -3,6 +3,7 @@
 //! Consolidated logic for finding available C and C++ compilers,
 //! previously duplicated in `native_project.rs` and `native_binary.rs`.
 
+use crate::platform::path::to_native_owned;
 use crate::target::{LinkerFlavor, Target, TargetOS};
 
 const WINDOWS_GNU_C_COMPILERS: &[&str] = &["gcc", "clang"];
@@ -44,7 +45,11 @@ pub fn find_c_compiler() -> String {
 /// On Unix targets, defaults to `cc`.
 pub fn detect_c_compiler_for_target(target: &Target) -> String {
     if let Ok(cc) = std::env::var("CC") {
-        return cc;
+        // MSYS does NOT path-convert env vars for native child processes, so a
+        // `CC=/d/llvm/bin/clang-cl` arrives here verbatim and is unusable as a
+        // program path. This value goes straight to `Command::new`, so it is a
+        // spawn boundary and must be converted here. Identity on Unix.
+        return to_native_owned(cc);
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
@@ -86,7 +91,8 @@ pub fn find_cxx_compiler() -> String {
 /// linker flavor determines the ABI-compatible automatic candidates.
 pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
     if let Ok(cxx) = std::env::var("CXX") {
-        return cxx;
+        // Same spawn-boundary reasoning as `CC` above. Identity on Unix.
+        return to_native_owned(cxx);
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !target.is_host() {
