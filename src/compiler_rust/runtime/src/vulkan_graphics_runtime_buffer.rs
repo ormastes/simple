@@ -440,9 +440,14 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_array(
 /// is byte-identical to `engine2d_readback_with_identity`
 /// ((acc + px) % 2147483647, in order), so receipts see the same values.
 ///
-/// Returns the checksum on success, 0 on any failure (a failed call leaves
-/// the array unwritten; 0 is a reachable checksum value in principle, so
-/// callers verify success via pixel-count/identity checks as before).
+/// Returns the checksum on success, -1 on ANY failure. It must NOT be 0:
+/// the destination is caller-allocated and reused across frames, so the
+/// caller cannot detect failure by inspecting the array (the old tuple
+/// variant returned an empty array and callers checked its length; that
+/// signal no longer exists). A 0 sentinel would be indistinguishable from a
+/// legitimately-0 checksum, and a fail-open here silently redisplays the
+/// PREVIOUS frame's pixels while marking the host mirror valid. A real
+/// checksum is always in [0, 2^31-2], so -1 is unambiguous.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_readback_u32_checksum(
@@ -452,40 +457,46 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
     offset: i64,
 ) -> i64 {
     if pixel_count <= 0 || offset < 0 {
-        return 0;
+        return -1;
     }
     let Some(arr) =
         crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(data, HeapObjectType::Array)
     else {
-        return 0;
+        return -1;
     };
     let (len, data_ptr) = unsafe { ((*arr).len, (*arr).data) };
     let Ok(pixel_count_u64) = u64::try_from(pixel_count) else {
-        return 0;
+        return -1;
     };
     if len < pixel_count_u64 || data_ptr.is_null() {
-        return 0;
+        return -1;
     }
     let Some(byte_count) = pixel_count.checked_mul(4) else {
-        return 0;
+        return -1;
     };
     if byte_count > MAX_RAW_TRANSFER_BYTES {
-        return 0;
+        return -1;
     }
     let t_dl_start = std::time::Instant::now();
     let downloaded = {
         let state = STATE.lock();
         let Some(buf) = state.buffers.get(&handle) else {
-            return 0;
+            return -1;
         };
         if offset + byte_count > buf.size() as i64 {
-            return 0;
+            return -1;
         }
         match buf.download_range(offset as u64, byte_count as u64) {
             Ok(bytes) => bytes,
-            Err(_) => return 0,
+            Err(_) => return -1,
         }
     };
+    // A short download would leave the tail of the caller's reused buffer
+    // holding the PREVIOUS frame while zip() silently stopped early and the
+    // checksum still looked plausible. Fail closed instead.
+    if downloaded.len() as i64 != byte_count {
+        return -1;
+    }
     let t_dl = t_dl_start.elapsed().as_micros();
     let t_slot = std::time::Instant::now();
     let slots = unsafe { std::slice::from_raw_parts_mut(data_ptr, pixel_count as usize) };
@@ -509,7 +520,7 @@ pub extern "C" fn rt_vulkan_readback_u32_checksum(
     _handle: i64,
     _offset: i64,
 ) -> i64 {
-    0
+    -1
 }
 
 #[no_mangle]
