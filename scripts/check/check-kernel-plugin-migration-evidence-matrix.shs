@@ -74,6 +74,86 @@ phase1_workspace() {
     fi
 }
 
+phase2_param_evolution_probe() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 2 parameter evolution runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 2 parameter evolution runtime unusable: $runtime"
+
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase2-private.XXXXXX")
+    output_clean=$private_root/clean.out
+    output_mutant=$private_root/mutant.out
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    mkdir -p "$private_root/home" "$private_root/cache" "$private_root/build" "$private_root/tmp"
+    cat >"$private_root/base.spl" <<'EOF'
+struct DemoV1:
+    hdr: ParamHeader
+    enabled: bool
+    ext: [ParamExt]
+EOF
+    cat >"$private_root/clean.spl" <<'EOF'
+struct DemoV2:
+    hdr: ParamHeader
+    enabled: bool
+    added: text
+    ext: [ParamExt]
+EOF
+    cat >"$private_root/mutant.spl" <<'EOF'
+struct DemoV2:
+    enabled: bool
+    hdr: ParamHeader
+    ext: [ParamExt]
+EOF
+    printf 'fixture.spl|%s|%s\n' "$private_root/base.spl" "$private_root/clean.spl" >"$private_root/clean.manifest"
+    printf 'fixture.spl|%s|%s\n' "$private_root/base.spl" "$private_root/mutant.spl" >"$private_root/mutant.manifest"
+
+    run_phase2_checker() {
+        manifest=$1
+        output=$2
+        set +e
+        env HOME="$private_root/home" \
+            XDG_CACHE_HOME="$private_root/cache" \
+            TMPDIR="$private_root/tmp" \
+            SIMPLE_BUILD_DIR="$private_root/build" \
+            SIMPLE_FRONTEND_CACHE_DIR="$private_root/cache/frontend" \
+            SIMPLE_LIB="$REPO_ROOT/src" \
+            SIMPLE_NO_STUB_FALLBACK=1 \
+            "$runtime" run "$REPO_ROOT/scripts/check/check_param_object_evolution.spl" \
+            --mode=interpreter --manifest="$manifest" >"$output" 2>&1
+        checker_rc=$?
+        set -e
+        return "$checker_rc"
+    }
+
+    if ! run_phase2_checker "$private_root/clean.manifest" "$output_clean"; then
+        cat "$output_clean" >&2
+        blocked 'phase 2 valid append probe could not execute successfully'
+    fi
+    grep -Fq 'PASS — 1 checked' "$output_clean" || {
+        cat "$output_clean" >&2
+        blocked 'phase 2 valid append probe lacked typed-checker PASS receipt'
+    }
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_SENTINEL=KPM_PHASE2_TYPED_CHECKER_V1'
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_STATUS=PASS'
+
+    if run_phase2_checker "$private_root/mutant.manifest" "$output_mutant"; then
+        cat "$output_mutant" >&2
+        fail 'phase 2 reordered-field mutation was accepted by typed checker'
+    else
+        mutant_rc=$?
+    fi
+    [ "$mutant_rc" -eq 1 ] || {
+        cat "$output_mutant" >&2
+        blocked "phase 2 reordered-field probe returned infrastructure status $mutant_rc"
+    }
+    grep -Fq 'FAIL — PARAM-002 fixture.spl:DemoV2 is incompatible with DemoV1' "$output_mutant" || {
+        cat "$output_mutant" >&2
+        blocked 'phase 2 reordered-field probe did not fail at PARAM-002'
+    }
+    echo 'KPM_PHASE2_PARAM_EVOLUTION_MUTATION_RECEIPT=FAIL_PARAM_002'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
 probe_phase() {
     phase=$1
     case "$phase" in
@@ -100,6 +180,7 @@ probe_phase() {
             require_text "$seam" 'pub const ASPECT_PARAM_MCDC_MANIFEST_SHA256 = 5'
             require_text "$seam" 'hdr: ParamHeader'
             require_text "$seam" 'ext: [ParamExt]'
+            phase2_param_evolution_probe
             ;;
         3)
             seam=src/compiler/80.driver/watcher/smf_manifest.spl
