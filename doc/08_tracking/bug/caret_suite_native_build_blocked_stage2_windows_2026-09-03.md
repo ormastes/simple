@@ -18,6 +18,39 @@ simple.exe native-build src/app/slang_pack/main.spl              -o out.exe # rc
 simple.exe native-build src/app/hosted_apps/smux_client.spl      -o out.exe # rc=1
 ```
 
+## STATUS UPDATE 2026-09-03 (later the same day)
+
+Measured against the same Stage-2-admitted binary. Read this before acting on
+the root-cause list below — three of its entries are now wrong or resolved.
+
+| id | status |
+|---|---|
+| B1 | **Fixed in source**, `fa87eda863b`. Parser defect, not stdlib. The class/struct member loop recognised only `@layer_field(...)`; a member-position twin of the module-decl `@unsafe` arm was added, capturing the metadata rather than skipping it (310 annotated methods across src/std + src/lib depend on it, so a stdlib workaround does not scale). Native proof pends a self-hosted rebuild — the parser is compiled into the stage binary. |
+| B2 | **Fixed and proven**, `f556f23aca4`. One missing type in an existing import line in `src/app/io/context_ops.spl`. 5 hir-fatals before, 0 after. |
+| B3 | **Re-diagnosed — NOT a missing import.** `Id` is the type PARAMETER of `struct PostingList<Id>`; there is nothing to import. Superseded by `hir_generic_type_param_unresolved_cross_module_2026-09-03.md`, which carries a 14-line two-module repro. Deliberately not patched: the fix lands in the resolver file another session is editing for devhub. |
+| B4 | **Not an independent defect.** It was a cascade of B2's poisoning of `app.io.*`; it disappeared with the B2 fix, with no edit to `cli_util.spl`. |
+| B6 | **Fixed in source**, `55bc4cfdd0a`. Not a "bare `int` alias" problem — `int` has no alias anywhere; it was simply missing from `lower_named_kind`'s primitive arms while the seed resolves it (`"i64" \| "int"`, calls.rs:528) and this compiler's own SFFI reader already canonicalises `"int" -> "i64"`. Exact twin of the documented `float` gap. Native proof pends the same rebuild. |
+| B7 | Unchanged, owned elsewhere. Same corruption class also masks the AOT backend error — see below. |
+| B8 | Unchanged, still filed. |
+
+**The repro commands at the top of this file are misleading and should not be
+reused as written.** A bare `native-build` fails on a TWO-LINE HELLO WORLD on
+every Windows compiler binary on this host. `SIMPLE_BOOTSTRAP=1` is the single
+knob that fixes it (bisected). With the full sanctioned invocation, hello world
+builds and prints `hello`, rc=0. Every measurement in the original list was
+taken through the broken invocation. Details and the working command line:
+`native_build_requires_simple_bootstrap_env_windows_2026-09-03.md`.
+
+After the B2 fix, slang's ONLY remaining hir-fatals are 11 x
+`unresolved type: Id` (B3). The `Result` / `Option` / `Dict` / `list`
+`dep-origin-unresolved` lines in the log are advisories, not fatals.
+
+Known edge in the B1 fix, stated rather than left to be found:
+`parser_reset_pending_unsafe()` fires on the three METHOD branches of the
+member loop, so an `@unsafe` placed immediately before a FIELD would carry its
+pending annotation to the next method. Every occurrence in the tree is
+attribute-directly-before-method, so this is not reachable today.
+
 ## Root causes (distinct)
 
 - **B1 parser: `@attr(...)` in a class body is rejected.**
