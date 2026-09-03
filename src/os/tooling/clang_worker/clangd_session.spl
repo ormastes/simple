@@ -1,0 +1,54 @@
+use app.io.mod.{process_spawn_async, process_is_running, process_kill, process_wait}
+use app.lint.provider.cpp.model.{ClangdSessionMetadataV1, cpp_toolchain_fingerprint_complete_v1}
+
+pub enum ClangdLifecycleStateV1:
+    Stopped
+    Active
+    Failed
+    Closed
+
+pub struct ClangdLifecycleReceiptV1:
+    state: ClangdLifecycleStateV1
+    pid: i64
+    authoritative: bool
+    reason: text
+
+pub class ClangdProcessSessionV1:
+    command: text
+    arguments: [text]
+    metadata: ClangdSessionMetadataV1
+    pid: i64
+    state: ClangdLifecycleStateV1
+
+impl ClangdProcessSessionV1:
+    pub static fn create(command: text, arguments: [text], metadata: ClangdSessionMetadataV1) -> ClangdProcessSessionV1:
+        ClangdProcessSessionV1(command, arguments, metadata, 0, ClangdLifecycleStateV1.Stopped)
+
+    me start() -> ClangdLifecycleReceiptV1:
+        if self.state == ClangdLifecycleStateV1.Active and self.pid > 0 and process_is_running(self.pid):
+            return ClangdLifecycleReceiptV1(self.state, self.pid, self.metadata.authoritative, "")
+        if self.state == ClangdLifecycleStateV1.Closed:
+            return ClangdLifecycleReceiptV1(self.state, 0, false, "clangd session is closed")
+        if self.command == "" or not self.metadata.authoritative or not cpp_toolchain_fingerprint_complete_v1(self.metadata.toolchain):
+            self.state = ClangdLifecycleStateV1.Failed
+            return ClangdLifecycleReceiptV1(self.state, 0, false, "clangd requires an exact compile command and complete toolchain identity")
+        val pid = process_spawn_async(self.command, self.arguments)
+        if pid <= 0:
+            self.state = ClangdLifecycleStateV1.Failed
+            return ClangdLifecycleReceiptV1(self.state, 0, false, "clangd process failed to start")
+        self.pid = pid
+        self.state = ClangdLifecycleStateV1.Active
+        ClangdLifecycleReceiptV1(self.state, pid, true, "")
+
+    fn alive() -> bool:
+        self.state == ClangdLifecycleStateV1.Active and self.pid > 0 and process_is_running(self.pid)
+
+    me close() -> ClangdLifecycleReceiptV1:
+        if self.state == ClangdLifecycleStateV1.Closed:
+            return ClangdLifecycleReceiptV1(self.state, 0, false, "")
+        if self.pid > 0 and process_is_running(self.pid):
+            process_kill(self.pid)
+            process_wait(self.pid, 2000)
+        self.pid = 0
+        self.state = ClangdLifecycleStateV1.Closed
+        ClangdLifecycleReceiptV1(self.state, 0, false, "")
