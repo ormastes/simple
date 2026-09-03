@@ -6,18 +6,19 @@
 
 ## Published Lane Ledger
 
-Baseline: `wip/two-plan-optimizations-linear-20260902` at `f34abe793c6a173921eeadd637c966a21f2695e3`.
+Audit baseline: integration branch at `67532532552dabb24208b6687e2c23b9ae6947a9`,
+including KPF commits through `2157abcbe56` and the landed semantic-check lane.
 The requested start `3164fbc39376a2a543f5afa7fa92f1aca6d3d393` is an ancestor.
 Published source is not equivalent to a closed gate; runtime-blocked Simple tests remain unverified.
 
 | Lane | Published state | Next owner action |
 |---|---|---|
 | S0 | Complete for current architecture baseline | Maintain decision/status documents as contracts change |
-| S1 | Foundation published | Complete schema parsing/generation, compatibility corpus, Simple binding, and deterministic all-language regeneration |
+| S1 | C, Rust, and C++ generators plus append-compatibility/operation-slot checks published; generated Rust/C++ fixture compilation passed | Add the generated Simple binding, complete malformed/layout compatibility corpus, and prove deterministic all-language regeneration from one schema |
 | A1 | K0g common contracts published | Add remaining receipt/descriptor coverage only through schema-owned evolution |
-| A2 | Fixed slots, exact active-generation pins, generations, static registry published | Prove atomic failed-candidate rollback and O(1) counters at runtime |
-| A3 | Async runtime and strict noalloc projection published | Add/execute deadline, cancellation-race, quiescence, arena, and allocation instrumentation gates |
-| A4 | SMF native admission and bounded worker transport published | Integrate real process execution, signatures/trust, crash-loop policy, and placement parity |
+| A2 | Fixed slots, exact active-generation pins, static registry, and atomic immediate-predecessor rollback published | Execute rollback/pin/stale-handle scenarios with a compatible Simple runtime and add O(1) counters/scaling evidence |
+| A3 | Async runtime, strict noalloc projection, and native allocator-interposition mutation gate published; native gate passed | Execute Simple lifecycle scenarios and add deadline, cancellation-race, quiescence, arena, long-run, and scaling gates |
+| A4 | SMF admission plus supervised process-facade worker transport published; native child lifecycle/malformed/crash/timeout gate passed | Add signatures/trust, crash-loop budget, shared placement parity, and executable Simple transport evidence |
 | A5 | Rust raw/safe SDK published and runtime tested with Cargo | Keep aligned with the final generated ABI and compatibility matrix |
 | A6 | C/C++ examples and non-throwing RAII SDK published and runtime tested | Keep aligned with generated ABI; extend malformed/compatibility corpus |
 | A7 | Acceptance scaffolding and closure verifier published | Convert production-dependent red scenarios as modules land; preserve non-vacuity |
@@ -25,13 +26,13 @@ Published source is not equivalent to a closed gate; runtime-blocked Simple test
 | B2 | Constructor ID projection, operation-completeness tables, sealed dense tags, and critical `Dyn` rejection published | Execute focused Simple tests and integrate the closure proof with the final schema authority |
 | B3 | Partial worker fault groundwork only | Add ABI fuzz, signature/trust, ABA, unload, and crash-loop acceptance corpus |
 | C0 | Common records and bounded scheduler published | Add normalized edits/output adapters, cache/invalidation, and full planner/merge behavior |
-| C1 | Legacy Simple proof projection, shared verdict, and impossible-count underflow rejection published | Converge semantic `check`, generated rules, snapshots, and both CLI front doors |
+| C1 | Legacy proof projection plus semantic-by-default `check` on both front doors and explicit `--syntax-only` published | Execute clean/type-error/unresolved-name scenarios, then complete generated rules, snapshots, and shared CLI result projection |
 | C2 | Bounded Cargo/Clippy adapter plus typed structured-JSON parsing fix published | Add rust-analyzer live service and executable toolchain mismatch/cancellation corpus |
 | C3 | Compile-database/Clang worker contract with exact TU receipts and typed fixes published | Add real clangd/clang-tidy execution, exact toolchain admission, and cache behavior |
 | C4 | Not published | Implement portable policies and mixed-workspace conflict fixtures |
 | D0 | Editor compatibility facade published | Complete manifest projection and production worker lifecycle integration |
-| D1 | Generation-pinned tooling workspace, immutable document store, bounded diagnostic publication, stale-result rejection, and disconnect lease release published | Add protocol adapters and execute focused Simple tests with a compatible runtime |
-| D2 | Not published | Implement native/SVIM client cutover and shared diagnostics/tests/commands |
+| D1 | Generation-pinned workspace plus versioned `toolingd` document sessions, exact revision/digest checks, supersession cancellation, diagnostic publication, and disconnect cleanup published | Execute focused scenarios with a compatible runtime and add LSP/DAP/test/custom protocol adapters |
+| D2 | Native editor tooling client foundation published | Complete SVIM/Simple IDE production cutover and shared diagnostics/tests/commands conformance |
 | D3 | VS Code KPF admission/service projection and generated contribution projection published; four focused tests and TypeScript compilation passed | Integrate the production desktop client and shared conformance corpus; retain explicit degraded behavior |
 | D4-D5 | Not published | Implement browser/Wasm client and editor-neutral conformance after D1/D3 integration |
 | E1 | Deterministic MDSOC++ capsule/facet sealer, budgets, lifecycle order, receipts, and migration compatibility published | Execute Simple tests and add the large-program pilot plus upgrade/rollback proof |
