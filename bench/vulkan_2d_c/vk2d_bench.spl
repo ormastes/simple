@@ -1,0 +1,113 @@
+# Simple counterpart of bench/vulkan_2d_c/vk2d_bench.c — identical workload:
+# per frame = clear + N rect fills + submit + present + readback, F frames.
+# Measures the Engine2D vulkan lane exactly as hosts drive it.
+#
+# Run:  SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
+#       <vulkan-seed> run bench/vulkan_2d_c/vk2d_bench.spl
+
+use std.io_runtime.{time_now_unix_micros}
+use app.io.mod.{env_get}
+use gpu.engine2d.engine.{Engine2D}
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+class Vk2dRect:
+    var x: i32
+    var y: i32
+    var w: i32
+    var h: i32
+    var color: u32
+
+fn _rects(count: i32, fb_w: i32, fb_h: i32) -> [Vk2dRect]:
+    """Same xorshift64 distribution as the C bench (sign-masked for modulo)."""
+    var out: [Vk2dRect] = []
+    var rng: i64 = 11400714819323198485
+    var i = 0
+    while i < count:
+        rng = rng ^ ((rng << 13) & 0x7FFFFFFFFFFFFFFF)
+        rng = rng ^ (rng >> 7)
+        rng = rng ^ ((rng << 17) & 0x7FFFFFFFFFFFFFFF)
+        if rng < 0:
+            rng = 0 - rng
+        val w = 24 + (rng % 160).to_i32()
+        val h = 24 + ((rng >> 16) % 120).to_i32()
+        val x = ((rng >> 8) % (fb_w - w).to_i64()).to_i32()
+        val y = ((rng >> 24) % (fb_h - h).to_i64()).to_i32()
+        val color = 0xFF000000u32 | (rng & 0xFFFFFF).to_i32().to_u32()
+        out.push(Vk2dRect(x: x, y: y, w: w, h: h, color: color))
+        i = i + 1
+    out
+
+class Vk2dBench:
+    var engine: Engine2D
+    var w: i32
+    var h: i32
+
+    me run(rects: [Vk2dRect], frames: i32, readback: bool) -> text:
+        # Warmup: two full frames so JIT compilation and pipeline setup are
+        # outside the measured region.
+        var warm = 0
+        while warm < 2:
+            self.engine.clear(0xFF141414u32)
+            for r in rects:
+                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            self.engine.submit_batch()
+            self.engine.present()
+            warm = warm + 1
+        var checksum: i64 = 0
+        var draw_us: i64 = 0
+        var submit_us: i64 = 0
+        var readback_us: i64 = 0
+        val t0 = time_now_unix_micros()
+        var frame = 0
+        while frame < frames:
+            var p0 = time_now_unix_micros()
+            self.engine.clear(0xFF141414u32)
+            for r in rects:
+                self.engine.draw_rect_filled(r.x, r.y, r.w, r.h, r.color)
+            var p1 = time_now_unix_micros()
+            self.engine.submit_batch()
+            self.engine.present()
+            var p2 = time_now_unix_micros()
+            if readback:
+                val rb = self.engine.read_pixels_with_source()
+                # Fold a stride sample so the readback is real consumed work.
+                var acc: i64 = 0
+                var i: i64 = 0
+                val n = rb.pixels.len()
+                while i < n:
+                    acc = acc ^ rb.pixels[i].to_i32().to_i64()
+                    i = i + 4096
+                checksum = checksum ^ acc
+            var p3 = time_now_unix_micros()
+            draw_us = draw_us + (p1 - p0)
+            submit_us = submit_us + (p2 - p1)
+            readback_us = readback_us + (p3 - p2)
+            frame = frame + 1
+        val t1 = time_now_unix_micros()
+        val ms = (t1 - t0) / 1000
+        var fps_num: i64 = 0
+        if ms > 0:
+            fps_num = frames.to_i64() * 1000 / ms
+        "simple-vulkan-2d w={self.w} h={self.h} rects={rects.len()} frames={frames} readback={readback} ms={ms} fps~={fps_num} draw_us={draw_us} submit_us={submit_us} readback_us={readback_us} checksum={checksum}"
+
+fn main():
+    val w = _env_i32("VK2D_W", 800)
+    val h = _env_i32("VK2D_H", 600)
+    val rect_count = _env_i32("VK2D_RECTS", 64)
+    val frames = _env_i32("VK2D_FRAMES", 300)
+    val readback = _env_i32("VK2D_READBACK", 1) == 1
+
+    val engine = Engine2D.create_with_backend_fast(w, h, "vulkan")
+    if engine.backend_name() != "vulkan":
+        print "simple-vulkan-2d status=blocked reason=vulkan-device-unavailable backend={engine.backend_name()}"
+        engine.shutdown()
+        return
+    val bench = Vk2dBench(engine: engine, w: w, h: h)
+    val rects = _rects(rect_count, w, h)
+    print bench.run(rects, frames, readback)
+    engine.shutdown()

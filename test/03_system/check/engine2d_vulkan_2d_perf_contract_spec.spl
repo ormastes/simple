@@ -1,0 +1,121 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md ; research: doc/01_research/domain/2d_renderer_gpu_offload_patterns.md
+
+"""
+# Engine2D Vulkan 2D perf-vs-C contract
+
+## Overview
+
+Validates the downgrade logic of the Engine2D-vulkan-vs-C-reference comparator
+(`scripts/check/check-vulkan-2d-c-compare.shs --aggregate DIR`): the aggregate
+must FAIL when both legs measured and Simple's fps falls below the budget
+fraction of the C reference, PASS at or above budget, and report `skipped`
+(never a fake pass) when a leg could not run.
+
+**Requirements:** doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md
+**Research:** doc/01_research/local/2d_rendering_perf_dma_alignment_soa_async.md,
+doc/01_research/domain/2d_renderer_gpu_offload_patterns.md
+
+## Syntax
+
+```sh
+bin/simple test test/03_system/check/engine2d_vulkan_2d_perf_contract_spec.spl --mode=interpreter
+```
+
+## Operator Flow
+
+1. Run this spec after changing the comparator script's aggregate logic.
+2. Produce live numbers with `sh scripts/check/check-vulkan-2d-c-compare.shs`
+   (needs clang + vulkan headers + MoltenVK ICD + a vulkan-feature seed
+   binary); the aggregate lands in `build/vulkan-2d-c-compare/evidence.env`.
+3. Treat a live `compare_status=fail` as a perf regression gate; `skipped`
+   means the machine lacked a leg's toolchain — read `compare_reason`.
+
+## Acceptance
+
+- Both legs pass and ratio 39 < budget 100 → `compare_status=fail`,
+  `compare_reason=below-budget:39<100`, exit 1.
+- Both legs pass and ratio 183 >= budget 100 → `compare_status=pass`, exit 0.
+- C leg skipped → `compare_status=skipped`,
+  `compare_reason=c-leg-skipped:no-icd`, exit 0.
+
+## Test Strategy
+
+The spec does NOT launch Vulkan, clang, or the seed binary. It writes
+synthetic `c.env`/`simple.env` row files and runs the comparator in
+`--aggregate` mode, asserting on its stdout. Live measurement is the producer
+mode's job (default invocation); this spec makes the aggregate's verdict
+logic — the part a release gate consumes — executable evidence.
+
+## Completion Boundary
+
+This spec proves the comparator's downgrade/skip semantics only. It does not
+prove live throughput on any machine; that evidence is produced by the
+default (live) mode of the same script and recorded in
+doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md.
+"""
+
+# @tag: system, perf, vulkan, engine2d, evidence, nfr
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn _write_rows(dir: text, c_env: text, simple_env: text) -> text:
+    "rm -rf " + dir + " && mkdir -p " + dir +
+    " && printf '" + c_env + "' > " + dir + "/c.env" +
+    " && printf '" + simple_env + "' > " + dir + "/simple.env"
+
+fn _aggregate(dir: text) -> (text, text, i32):
+    process_run("/bin/sh", ["-c",
+        "sh scripts/check/check-vulkan-2d-c-compare.shs --aggregate " + dir])
+
+describe "Engine2D Vulkan 2D perf-vs-C comparator contract":
+
+    it "fails when both legs measured and Simple is below the fps budget":
+        # @req REQ-SSPEC-SYSTEM
+        step("fails when both legs measured and Simple is below the fps budget")
+        val dir = "build/test-vulkan-2d-c-compare-below"
+        val (_o0, _e0, _c0) = process_run("/bin/sh", ["-c",
+            _write_rows(dir,
+                "c_status=pass\\nc_reason=synthetic\\nc_fps_x1000=1089000\\n",
+                "simple_status=pass\\nsimple_reason=synthetic\\nsimple_fps_x1000=43000\\n")])
+        step("Aggregate below-budget rows")
+        val (stdout, _stderr, code) = _aggregate(dir)
+        step("Assert fail verdict with the measured ratio in the reason")
+        expect(stdout.contains("compare_status=fail")).to_equal(true)
+        expect(stdout.contains("compare_ratio_x1000=39")).to_equal(true)
+        expect(stdout.contains("compare_reason=below-budget:39<100")).to_equal(true)
+        expect(code).to_equal(1)
+
+    it "passes when Simple meets the fps budget":
+        # @req REQ-SSPEC-SYSTEM
+        step("passes when Simple meets the fps budget")
+        val dir = "build/test-vulkan-2d-c-compare-within"
+        val (_o0, _e0, _c0) = process_run("/bin/sh", ["-c",
+            _write_rows(dir,
+                "c_status=pass\\nc_reason=synthetic\\nc_fps_x1000=1089000\\n",
+                "simple_status=pass\\nsimple_reason=synthetic\\nsimple_fps_x1000=200000\\n")])
+        step("Aggregate within-budget rows")
+        val (stdout, _stderr, code) = _aggregate(dir)
+        step("Assert pass verdict")
+        expect(stdout.contains("compare_status=pass")).to_equal(true)
+        expect(stdout.contains("compare_ratio_x1000=183")).to_equal(true)
+        expect(code).to_equal(0)
+
+    it "reports skipped, never a fake pass, when a leg cannot run":
+        # @req REQ-SSPEC-SYSTEM
+        step("reports skipped, never a fake pass, when a leg cannot run")
+        val dir = "build/test-vulkan-2d-c-compare-skipped"
+        val (_o0, _e0, _c0) = process_run("/bin/sh", ["-c",
+            _write_rows(dir,
+                "c_status=skipped\\nc_reason=no-icd\\nc_fps_x1000=0\\n",
+                "simple_status=pass\\nsimple_reason=synthetic\\nsimple_fps_x1000=200000\\n")])
+        step("Aggregate with the C leg skipped")
+        val (stdout, _stderr, code) = _aggregate(dir)
+        step("Assert skipped verdict naming the missing leg")
+        expect(stdout.contains("compare_status=skipped")).to_equal(true)
+        expect(stdout.contains("compare_reason=c-leg-skipped:no-icd")).to_equal(true)
+        expect(code).to_equal(0)
