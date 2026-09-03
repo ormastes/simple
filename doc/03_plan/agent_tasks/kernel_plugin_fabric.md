@@ -1,8 +1,37 @@
 # Kernel Plugin Fabric Agent Tasks
 
-**Status:** Proposed
+**Status:** Active implementation
 **Merge owner:** KPF integration owner (highest-capability model)
 **Final reviewer:** Independent architecture/verification owner, not an implementation-lane author
+
+## Published Lane Ledger
+
+Baseline: `wip/two-plan-optimizations-linear-20260902` at `3164fbc39376a2a543f5afa7fa92f1aca6d3d393`.
+Published source is not equivalent to a closed gate; runtime-blocked Simple tests remain unverified.
+
+| Lane | Published state | Next owner action |
+|---|---|---|
+| S0 | Complete for current architecture baseline | Maintain decision/status documents as contracts change |
+| S1 | Foundation published | Complete schema parsing/generation, compatibility corpus, Simple binding, and deterministic all-language regeneration |
+| A1 | K0g common contracts published | Add remaining receipt/descriptor coverage only through schema-owned evolution |
+| A2 | Fixed slots, exact pins, generations, static registry published | Prove atomic failed-candidate rollback and O(1) counters at runtime |
+| A3 | Async runtime and strict noalloc projection published | Add/execute deadline, cancellation-race, quiescence, arena, and allocation instrumentation gates |
+| A4 | SMF native admission and bounded worker transport published | Integrate real process execution, signatures/trust, crash-loop policy, and placement parity |
+| A5 | Rust raw/safe SDK published and runtime tested with Cargo | Keep aligned with the final generated ABI and compatibility matrix |
+| A6 | C/C++ examples and non-throwing RAII SDK published and runtime tested | Keep aligned with generated ABI; extend malformed/compatibility corpus |
+| A7 | Acceptance scaffolding and closure verifier published | Convert production-dependent red scenarios as modules land; preserve non-vacuity |
+| B1 | Backend admission and retained native batch session published; native fixtures passed | Prove bootstrap, static/dynamic/worker parity, production reachability, and rollback |
+| B2 | Not published | Implement KPF operation-completeness tables, sealed dense tags, and critical `Dyn` rejection |
+| B3 | Partial worker fault groundwork only | Add ABI fuzz, signature/trust, ABA, unload, and crash-loop acceptance corpus |
+| C0 | Common records and bounded scheduler published | Add normalized edits/output adapters, cache/invalidation, and full planner/merge behavior |
+| C1 | Legacy Simple proof projection and shared verdict published | Converge semantic `check`, generated rules, snapshots, and both CLI front doors |
+| C2 | Bounded Cargo/Clippy diagnostic adapter published | Add rust-analyzer live service and executable toolchain mismatch/cancellation corpus |
+| C3 | Compile-database/Clang worker contract published | Add real clangd/clang-tidy execution, exact toolchain admission, and cache behavior |
+| C4 | Not published | Implement portable policies and mixed-workspace conflict fixtures |
+| D0 | Editor compatibility facade published | Complete manifest projection and production worker lifecycle integration |
+| D1 | Not published at baseline | Land tooling workspace/document/session kernel and protocol adapters |
+| D2-D5 | Not published | Implement native, desktop, browser clients and shared conformance corpus after D1 |
+| E1-E5 | Not published as complete lanes | Begin only after closure/runtime/product prerequisites; preserve final gates below |
 
 ## Coordination Contract
 
@@ -22,6 +51,8 @@
 | S1 schema/ABI | `src/tool/kernel_plugin_schema/**`, ABI templates, generated-file policy | frozen V1 prefix, generators, compatibility corpus | S0 | fixture generation allowed |
 
 S1 must merge before generated runtime/SDK implementation begins.
+
+The original dependency rule remains normative. Existing parallel foundation commits must be reconciled through the S1-generated schema before V1 is frozen; publication order does not waive schema ownership.
 
 ## Wave A — Core Runtime And SDKs
 
