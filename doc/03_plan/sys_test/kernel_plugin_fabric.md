@@ -44,4 +44,3 @@ This lane does not implement KPF, edit production source, generate ABI bindings,
 or claim native/worker/Wasm parity. The scenarios are operator-facing textual
 evidence; no raster capture is applicable. Generated manuals are deferred to
 the docgen owner because this lane is restricted from `doc/06_spec/**`.
-
