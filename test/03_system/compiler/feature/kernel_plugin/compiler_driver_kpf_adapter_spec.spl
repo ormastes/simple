@@ -1,0 +1,57 @@
+use std.spec.*
+use std.spec.step
+use compiler.kernel_plugin_adapter.*
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use os.smf.kernel_plugin.worker_process.KpfWorkerProcessFacadeV1
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerFrameKind, KpfWorkerFrameV1, KpfWorkerOutcome, KPF_WORKER_PROTOCOL_V1}
+
+describe "CompilerDriverV1 KPF cutover adapter":
+    it "keeps static placement behind scalar KPF requests and receipts":
+        step("run the coarse driver through static KPF placement")
+        var session = CompilerDriverKpfStaticSessionV1.create(driver_core_compile_options_default(), 7)
+        val result = session.run(CompilerDriverKpfRequestV1(1, 11))
+        expect(result.generation).to_equal(7)
+        expect(result.request_epoch).to_equal(11)
+        expect(result.status).to_equal(CompilerDriverKpfStatusV1.CompileFailed)
+        expect(result.diagnostic_count).to_be_greater_than(0)
+        expect(session.receipt().request_count).to_equal(1)
+
+    it "projects the same result contract over worker placement":
+        step("handshake, submit, and complete one worker request")
+        val process = KpfWorkerProcessFacadeV1.create(8)
+        val transport = KpfWorkerTransportV1.create(process, 7, 2, 3, 128, 4, 100)
+        var session = CompilerDriverKpfWorkerSessionV1.create(transport, 7, 2, 3, 4)
+        expect(session.handshake(1)).to_equal(KpfWorkerOutcome.Accepted)
+        val sent_handshake = process.take_sent()
+        expect(sent_handshake.0).to_equal(KpfWorkerOutcome.Accepted)
+        process.inject_from_worker(KpfWorkerFrameV1(KPF_WORKER_PROTOCOL_V1,
+            KpfWorkerFrameKind.HandshakeAccepted, 7, 3, -1, 0, 4, 0, []))
+        expect(session.transport.poll(2).outcome).to_equal(KpfWorkerOutcome.Accepted)
+        expect(session.submit(5, CompilerDriverKpfRequestV1(1, 11), 3)).to_equal(KpfWorkerOutcome.Accepted)
+        val sent_request = process.take_sent()
+        expect(sent_request.1.payload.len).to_equal(16)
+        val expected = CompilerDriverKpfResultV1(CompilerDriverKpfStatusV1.CompileFailed,
+            6, 2, 7, 11)
+        process.inject_from_worker(compiler_driver_kpf_worker_completion_v1(7, 3, 5, expected))
+        val actual = session.poll(4).unwrap()
+        expect(actual.status).to_equal(expected.status)
+        expect(actual.diagnostic_count).to_equal(expected.diagnostic_count)
+        expect(session.receipt().placement).to_equal(CompilerDriverKpfPlacementV1.Worker)
+
+    it "rejects private-object shaped or malformed wire payloads":
+        step("reject payloads that are not the fixed sixteen-byte scalar request")
+        expect(compiler_driver_kpf_decode_request_v1([1, 2, 3]).is_err()).to_be(true)
+        expect(compiler_driver_kpf_decode_result_v1([1, 2, 3]).is_err()).to_be(true)
+
+    it "proves root help and version activate zero ordinary compiler providers":
+        step("classify root informational intents before provider dispatch")
+        val help = compiler_root_provider_proof_v1(CompilerRootIntentV1.Help)
+        val version = compiler_root_provider_proof_v1(CompilerRootIntentV1.Version)
+        val compile = compiler_root_provider_proof_v1(CompilerRootIntentV1.Compile)
+        expect(help.ordinary_provider_loads).to_equal(0)
+        expect(version.ordinary_provider_loads).to_equal(0)
+        expect(help.dispatch_required).to_be(false)
+        expect(version.dispatch_required).to_be(false)
+        expect(compile.ordinary_provider_loads).to_equal(1)
+        expect(compile.dispatch_required).to_be(true)

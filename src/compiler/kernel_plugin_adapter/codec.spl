@@ -1,0 +1,48 @@
+use compiler.kernel_plugin_adapter.contract.*
+
+fn _append_u64_le(output: [u8], value: u64):
+    var shift = 0u32
+    while shift < 64:
+        output.push(((value >> shift) & 0xff) as u8)
+        shift = shift + 8
+
+fn _read_u64_le(input: [u8], offset: i64) -> u64:
+    var value = 0u64
+    var index = 0
+    while index < 8:
+        value = value | ((input[offset + index] as u64) << ((index * 8) as u32))
+        index = index + 1
+    value
+
+pub fn compiler_driver_kpf_encode_request_v1(request: CompilerDriverKpfRequestV1) -> [u8]:
+    var output: [u8] = []
+    _append_u64_le(output, request.config_handle)
+    _append_u64_le(output, request.request_epoch)
+    output
+
+pub fn compiler_driver_kpf_decode_request_v1(input: [u8]) -> Result<CompilerDriverKpfRequestV1, text>:
+    if input.len != 16: return Err("CompilerDriverV1 request must be exactly 16 bytes")
+    Ok(CompilerDriverKpfRequestV1(
+        config_handle: _read_u64_le(input, 0),
+        request_epoch: _read_u64_le(input, 8)))
+
+pub fn compiler_driver_kpf_encode_result_v1(result: CompilerDriverKpfResultV1) -> [u8]:
+    var output: [u8] = []
+    _append_u64_le(output, result.status as u64)
+    _append_u64_le(output, result.compile_status as u64)
+    _append_u64_le(output, result.diagnostic_count as u64)
+    _append_u64_le(output, result.generation as u64)
+    _append_u64_le(output, result.request_epoch)
+    output
+
+pub fn compiler_driver_kpf_decode_result_v1(input: [u8]) -> Result<CompilerDriverKpfResultV1, text>:
+    if input.len != 40: return Err("CompilerDriverV1 result must be exactly 40 bytes")
+    val raw_status = _read_u64_le(input, 0)
+    if raw_status > CompilerDriverKpfStatusV1.Closed as u64:
+        return Err("CompilerDriverV1 result status is unknown")
+    Ok(CompilerDriverKpfResultV1(
+        status: raw_status as CompilerDriverKpfStatusV1,
+        compile_status: _read_u64_le(input, 8) as i32,
+        diagnostic_count: _read_u64_le(input, 16) as u32,
+        generation: _read_u64_le(input, 24) as i64,
+        request_epoch: _read_u64_le(input, 32)))

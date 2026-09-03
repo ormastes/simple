@@ -1,0 +1,104 @@
+use compiler.kernel_plugin_adapter.contract.*
+use compiler.kernel_plugin_adapter.codec.*
+use compiler.driver.driver_provider_in_process_v1.CompilerDriverProviderInProcessV1
+use compiler.common.driver_core_types.CompileOptions
+use compiler.driver.driver_provider_contract_v1.SIMPLE_COMPILER_PROVIDER_OK
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome, KpfWorkerFrameKind, KpfWorkerFrameV1, KPF_WORKER_PROTOCOL_V1}
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+
+pub class CompilerDriverKpfStaticSessionV1:
+    provider: CompilerDriverProviderInProcessV1
+    options: CompileOptions
+    generation: i64
+    var request_count: u64
+    var closed: bool
+
+impl CompilerDriverKpfStaticSessionV1:
+    pub static fn create(options: CompileOptions, generation: i64) -> CompilerDriverKpfStaticSessionV1:
+        CompilerDriverKpfStaticSessionV1(CompilerDriverProviderInProcessV1.create(), options,
+            generation, 0, false)
+
+    me run(request: CompilerDriverKpfRequestV1) -> CompilerDriverKpfResultV1:
+        if self.closed:
+            return CompilerDriverKpfResultV1(CompilerDriverKpfStatusV1.Closed, 0, 0,
+                self.generation, request.request_epoch)
+        if request.config_handle == 0 or request.request_epoch == 0:
+            return CompilerDriverKpfResultV1(CompilerDriverKpfStatusV1.InvalidRequest, 0, 0,
+                self.generation, request.request_epoch)
+        val session = self.provider.create_session(self.options)
+        val operation = self.provider.create_request(session.handle)
+        val result = self.provider.run_request(operation.handle)
+        val summary = self.provider.inspect_result(result.handle)
+        self.provider.release_result(result.handle)
+        self.provider.release_request(operation.handle)
+        self.provider.release_session(session.handle)
+        self.request_count = self.request_count + 1
+        val status = if summary.compile_status == SIMPLE_COMPILER_PROVIDER_OK:
+            CompilerDriverKpfStatusV1.Ok
+        else:
+            CompilerDriverKpfStatusV1.CompileFailed
+        CompilerDriverKpfResultV1(status, summary.compile_status, summary.diagnostic_count,
+            self.generation, request.request_epoch)
+
+    me close(): self.closed = true
+
+    fn receipt() -> CompilerDriverKpfReceiptV1:
+        CompilerDriverKpfReceiptV1(COMPILER_DRIVER_KPF_PROVIDER_ID,
+            COMPILER_DRIVER_KPF_INTERFACE_ID, COMPILER_DRIVER_KPF_SCHEMA_DIGEST,
+            self.generation, CompilerDriverKpfPlacementV1.Static, self.request_count)
+
+pub class CompilerDriverKpfWorkerSessionV1:
+    transport: KpfWorkerTransportV1
+    generation: i64
+    session_slot: i64
+    session_epoch: i64
+    required_capabilities: u64
+    var request_count: u64
+    var closed: bool
+
+impl CompilerDriverKpfWorkerSessionV1:
+    pub static fn create(transport: KpfWorkerTransportV1, generation: i64,
+            session_slot: i64, session_epoch: i64, required_capabilities: u64) -> CompilerDriverKpfWorkerSessionV1:
+        CompilerDriverKpfWorkerSessionV1(transport, generation, session_slot, session_epoch,
+            required_capabilities, 0, false)
+
+    me handshake(now_ns: i64) -> KpfWorkerOutcome:
+        self.transport.handshake(self.required_capabilities, now_ns)
+
+    me submit(request_slot: i64, request: CompilerDriverKpfRequestV1,
+            now_ns: i64) -> KpfWorkerOutcome:
+        if self.closed: return KpfWorkerOutcome.Closed
+        if request.config_handle == 0 or request.request_epoch == 0:
+            return KpfWorkerOutcome.MalformedFrame
+        val handle = KpfRequestHandleV1(self.generation, self.session_slot,
+            request_slot, request.request_epoch as i64)
+        val outcome = self.transport.submit(handle, self.required_capabilities,
+            compiler_driver_kpf_encode_request_v1(request), now_ns)
+        if outcome == KpfWorkerOutcome.Accepted: self.request_count = self.request_count + 1
+        outcome
+
+    me poll(now_ns: i64) -> Result<CompilerDriverKpfResultV1, text>:
+        val completion = self.transport.poll(now_ns)
+        if completion.outcome != KpfWorkerOutcome.Accepted:
+            return Err("CompilerDriverV1 worker completion was not accepted")
+        compiler_driver_kpf_decode_result_v1(completion.payload)
+
+    me quiesce() -> KpfWorkerOutcome: self.transport.quiesce()
+
+    me close() -> KpfWorkerOutcome:
+        val outcome = self.transport.close()
+        if outcome == KpfWorkerOutcome.Accepted: self.closed = true
+        outcome
+
+    fn receipt() -> CompilerDriverKpfReceiptV1:
+        CompilerDriverKpfReceiptV1(COMPILER_DRIVER_KPF_PROVIDER_ID,
+            COMPILER_DRIVER_KPF_INTERFACE_ID, COMPILER_DRIVER_KPF_SCHEMA_DIGEST,
+            self.generation, CompilerDriverKpfPlacementV1.Worker, self.request_count)
+
+pub fn compiler_driver_kpf_worker_completion_v1(generation: i64, session_epoch: i64,
+        request_slot: i64, result: CompilerDriverKpfResultV1) -> KpfWorkerFrameV1:
+    val payload = compiler_driver_kpf_encode_result_v1(result)
+    KpfWorkerFrameV1(KPF_WORKER_PROTOCOL_V1, KpfWorkerFrameKind.Completion,
+        generation, session_epoch, request_slot, result.request_epoch as i64,
+        0, payload.len, payload)
