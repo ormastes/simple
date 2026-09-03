@@ -1,0 +1,60 @@
+# Backend operation payloads carried by the generic KPF worker frame.
+
+use std.common.string_core.{text_to_bytes}
+use compiler.common.backend_plugin.model.BackendPluginRequestV1
+use compiler.mir.mir_instructions.MirModule
+use compiler.mir.mir_serialization.serialize_mir_module
+use compiler.backend.backend_plugin.transport.{
+    BackendPluginBridgeEnvelopeV1, backend_plugin_request_encode_v1,
+    backend_plugin_envelope_decode_v1, backend_plugin_copy_payload_v1
+}
+
+pub const BACKEND_KPF_WORKER_MAGIC_V1: i64 = 0x3157424b
+pub const BACKEND_KPF_WORKER_VERSION_V1: i64 = 1
+pub const BACKEND_KPF_WORKER_COMPILE_MODULE_V1: i64 = 1
+pub const BACKEND_KPF_WORKER_FINALIZE_OBJECT_V1: i64 = 2
+pub const BACKEND_KPF_WORKER_HEADER_SIZE_V1: i64 = 24
+
+fn push_u32_le(out: [u8], value: i64):
+    var index = 0
+    while index < 4:
+        out.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+
+fn push_u64_le(out: [u8], value: i64):
+    var index = 0
+    while index < 8:
+        out.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+
+pub fn backend_kpf_worker_encode_compile_v1(
+        request: BackendPluginRequestV1, module: MirModule) -> [u8]:
+    val request_bytes = backend_plugin_request_encode_v1(request)
+    val mir_bytes = text_to_bytes(serialize_mir_module(module))
+    var out: [u8] = []
+    push_u32_le(out, BACKEND_KPF_WORKER_MAGIC_V1)
+    push_u32_le(out, BACKEND_KPF_WORKER_VERSION_V1)
+    push_u32_le(out, BACKEND_KPF_WORKER_COMPILE_MODULE_V1)
+    push_u32_le(out, request_bytes.len)
+    push_u64_le(out, mir_bytes.len)
+    for byte in request_bytes: out.push(byte)
+    for byte in mir_bytes: out.push(byte)
+    out
+
+pub fn backend_kpf_worker_encode_finalize_v1() -> [u8]:
+    var out: [u8] = []
+    push_u32_le(out, BACKEND_KPF_WORKER_MAGIC_V1)
+    push_u32_le(out, BACKEND_KPF_WORKER_VERSION_V1)
+    push_u32_le(out, BACKEND_KPF_WORKER_FINALIZE_OBJECT_V1)
+    push_u32_le(out, 0)
+    push_u64_le(out, 0)
+    out
+
+pub fn backend_kpf_worker_copy_result_v1(
+        payload: [u8], output: [u8]) -> Result<i64, text>:
+    val envelope = backend_plugin_envelope_decode_v1(payload)
+    backend_plugin_copy_payload_v1(envelope, output)
+
+pub fn backend_kpf_worker_decode_result_v1(
+        payload: [u8]) -> BackendPluginBridgeEnvelopeV1:
+    backend_plugin_envelope_decode_v1(payload)
