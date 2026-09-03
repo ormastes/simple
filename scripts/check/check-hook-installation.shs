@@ -177,6 +177,22 @@ if [ -f "$_cbs" ]; then
     fi
 fi
 
+# --- check 8: pre-push.local must not itself be a launcher/dispatcher.
+# scripts/hooks/pre-push CHAINS $HOOKS_DIR/pre-push.local, and the launcher
+# execs that dispatcher — so a pre-push.local that is a copy of either one is an
+# infinite hook recursion, bounded only by the OLDGUARD_DEPTH sentinel added
+# 2026-08-26 after it "spawned thousands of timeout/sh processes and hung the
+# host". It is created by install-must-check-hooks.shs mistaking an OLDER copy
+# of our own launcher for a foreign local hook; the identity marker added to the
+# launcher stops that recurring, but an ALREADY-stale file on an existing clone
+# is only found by looking. This script previously reported "PASS — hook wiring
+# intact" with exactly that file present.
+checks=$((checks + 1))
+_ppl="$(dirname "$hook")/pre-push.local"
+if [ -f "$_ppl" ] && grep -qE '^# simple-repo-managed-hook: pre-push-worktree-launcher$|exec sh "\$DISPATCHER"' "$_ppl" 2>/dev/null; then
+    fail "pre-push.local is a copy of this repo's own launcher/dispatcher, which the dispatcher chains — that is an infinite hook recursion, not a user hook." "rm -f $_ppl"
+fi
+
 if [ "$checks" -eq 0 ]; then
     printf '%s: ERROR — nothing was checked (exit 2)\n' "$name"
     exit 2
