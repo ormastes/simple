@@ -44,10 +44,15 @@ trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
 binary="$WORK_DIR/option-bool-eq-vs-literal"
 log="$WORK_DIR/option-bool-eq-vs-literal.log"
 
+# `|| true` below: a build failure must reach the "ERROR — nothing was checked"
+# verdict instead of aborting under `set -e` with no output at all. The pre-fix
+# tree fails this fixture at COMPILE time ("unsupported LLVM value conversion
+# from double to ptr", the f64 implicit-tail row), which produced a bare exit 1
+# and an empty log.
 env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
     "$SIMPLE_BINARY" native-build \
     --source test/fixtures --entry-closure --entry "$FIXTURE" \
-    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1
+    --cache-dir "$WORK_DIR/cache" --output "$binary" >"$log" 2>&1 || true
 
 if [ ! -x "$binary" ]; then
     echo "ERROR — nothing was checked (native-build did not produce a binary)"
@@ -58,7 +63,10 @@ fi
 out="$(timeout 60 "$binary" 2>>"$log")"
 
 get() {
-    printf '%s\n' "$out" | sed -n "s/.*\b$1=\([a-z-]*\).*/\1/p"
+    # Split on whitespace and anchor the whole token. A leading `\b` fails to
+    # match a key that sits at the START of a line in BSD sed, which silently
+    # returned an empty value for every row printed on a second output line.
+    printf '%s\n' "$out" | tr ' ' '\n' | sed -n "s/^$1=\([a-z-]*\)$/\1/p"
 }
 
 hit1="$(get hit1)"
@@ -68,6 +76,12 @@ miss1="$(get miss1)"
 miss2="$(get miss2)"
 miss3="$(get miss3)"
 miss4="$(get miss4)"
+itail_bool="$(get itail_bool)"
+itail_int="$(get itail_int)"
+itail_text="$(get itail_text)"
+itail_float="$(get itail_float)"
+itail_cond_nil="$(get itail_cond_nil)"
+itail_cond_some="$(get itail_cond_some)"
 
 fail=0
 check() {
@@ -92,8 +106,19 @@ check "nil == false (miss2)" "$miss2" "no-match"
 check "Some(true) == false (miss3)" "$miss3" "no-match"
 check "Some(false) == true (miss4)" "$miss4" "no-match"
 
+# itail_*: the IMPLICIT-tail-return class. Every row above returns through an
+# explicit `return`; a bare tail expression took a different lowering path and
+# was never boxed into the canonical Option handle. itail_cond_nil is the
+# over-broad-fix fence -- an `if flag: 7 else: nil` tail must NOT be boxed.
+check "imp_bool(true) == true, implicit tail (itail_bool)" "$itail_bool" "match"
+check "imp_int(5) ?? -1 == 5, implicit tail (itail_int)" "$itail_int" "match"
+check "imp_text(\"hi\") ?? .. == hi, implicit tail (itail_text)" "$itail_text" "match"
+check "imp_float(2.5) ?? -1.0 == 2.5, implicit tail (itail_float)" "$itail_float" "match"
+check "cond_tail(false) ?? -1 == -1, merged nil tail (itail_cond_nil)" "$itail_cond_nil" "match"
+check "cond_tail(true) ?? -1 == 7, merged some tail (itail_cond_some)" "$itail_cond_some" "match"
+
 if [ "$fail" -ne 0 ]; then
     echo "raw output: $out"
     exit 1
 fi
-echo "PASS — native-build Option<bool>-vs-literal equality: all 7 rows correct (hit1-3 fixed, miss1-4 unchanged)"
+echo "PASS — native-build Option<bool>-vs-literal equality: all 13 rows correct (hit1-3 fixed, miss1-4 unchanged, itail_* implicit-tail-return class fixed)"

@@ -4076,32 +4076,19 @@ int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
-/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
- * hosted runtime exposed these names while core-C only exposed the older
- * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
- * GOT slots.  Keep both spellings on the same implementation. */
-int64_t rt_text_to_lower_ascii(int64_t value) {
-    return rt_string_ascii_case(value, 1);
-}
-
-int64_t rt_text_to_upper_ascii(int64_t value) {
-    return rt_string_ascii_case(value, 0);
-}
-
-int64_t rt_text_is_ascii(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_text_is_ascii(promoted);
-        }
-        return 0;
-    }
-    for (uint64_t i = 0; i < s->len; i++) {
-        if (((uint8_t)s->data[i]) > 0x7f) return 0;
-    }
-    return 1;
-}
+/* rt_text_to_lower_ascii / rt_text_to_upper_ascii / rt_text_is_ascii are NOT
+ * defined here.  They were added to this TU by 87b2aba58e3 to close NULL-GOT
+ * slots at a time when runtime_simd_case.c was not an archive member; that TU
+ * is now compiled unconditionally into every lane that compiles this one
+ * (the seed core-C list in native_project/tools.rs, and the pure-Simple
+ * backend list in 70.backend/backend/runtime_compiler.spl), so both copies
+ * landed in the same archive.  That broke the Stage4 single-owner contract:
+ * "Stage4 archive core defines `rt_text_is_ascii` 2 times".
+ *
+ * runtime_simd_case.c is the canonical owner -- it dispatches to the SIMD
+ * kernels and caches the ASCII flag in the string's reserved field, whereas
+ * these were plain scalar fallbacks.  Deleting the duplicates here removes no
+ * ABI name from the tree; all three stay defined in runtime_simd_case.c. */
 
 int64_t rt_string_to_float(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
@@ -5405,6 +5392,32 @@ int64_t rt_string_to_int(int64_t value) {
     int64_t result = (int64_t)strtoll(buf, NULL, 10);
     if (buf != stack_buf) free(buf);
     return result;
+}
+
+/* Receiver-dispatched `.to_i64()` / `.to_int()` for the LLVM native lane when
+ * the receiver TYPE WAS ERASED.
+ *
+ * `pipeline/native_project/mangle.rs` deliberately leaves `to_i64`/`to_int`
+ * BARE in that case, on the contract that codegen routes bare string builtins
+ * through its redirect table (-> rt_string_to_int). The LLVM arm broke that
+ * contract: an unconditional integer-cast block matched `to_i64` FIRST and
+ * emitted an identity coercion, so `text.to_i64()` evaluated to the receiver's
+ * own tagged word. Measured live: the Windows MSVC Stage 2 candidate compiled
+ * `(value.to_i64() ?? 0) > 0` to `test %rsi,%rsi; setle` on the text handle,
+ * which made `--threads 1` "not a positive integer" while `--threads 0` WAS
+ * accepted. See
+ * doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md.
+ *
+ * Routing bare `to_i64` unconditionally to rt_string_to_int is NOT a fix: that
+ * returns 0 for a non-string, which would silently zero every erased NUMERIC
+ * `.to_i64()`. So dispatch on the receiver, with an IDENTITY fallback that is
+ * byte-identical to the cast block's existing behaviour for everything that is
+ * not a registry-validated string. The guard is rt_core_as_string() for the
+ * reason documented at rt_value_as_int: a bare TAG_HEAP bit test would
+ * misclassify every odd RAW i64 that pure-Simple call sites legitimately pass. */
+int64_t rt_to_int_dynamic(int64_t value) {
+    if (rt_core_as_string(value)) return rt_string_to_int(value);
+    return value;
 }
 
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
@@ -11702,6 +11715,20 @@ double rt_pow(double a, double b) { return pow(a, b); }
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
+    memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
+    return value;
+}
+
+/* Mirrors runtime_memory.c:582 byte-for-byte.  This TU carries the whole
+ * rt_ptr_* fallback family for lanes built WITHOUT
+ * -DSIMPLE_RUNTIME_MEMORY_OWNER=1 (runtime_memory.c is the owner when that
+ * macro is set, and the two are mutually exclusive by construction, so this
+ * is a fallback rather than a divergent second implementation).  read_i32 was
+ * simply omitted, leaving it the one member of the family with no core-C
+ * provider at all -- core_defined.get("rt_ptr_read_i32") was None, not 2. */
+int32_t rt_ptr_read_i32(int64_t addr, int64_t offset) {
+    if (addr <= 0 || offset < 0) abort();
+    int32_t value;
     memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
     return value;
 }

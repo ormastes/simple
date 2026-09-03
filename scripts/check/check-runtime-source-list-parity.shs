@@ -1,0 +1,438 @@
+#!/bin/sh
+# check-runtime-source-list-parity.shs
+#
+# Prevention item #2 of
+# doc/01_research/compiler/why_missing_symbols_do_not_fail_the_build_2026-09-01.md
+#
+# THE DEFECT CLASS. There are THREE independent C runtime source lists and no
+# cross-check between them:
+#
+#   seed    src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
+#           (fn build_c_runtime_library -- the core-C capsule archive)
+#   simple  src/compiler/70.backend/backend/runtime_compiler.spl
+#           (fn compile_runtime_objects -- the pure-Simple native product build)
+#   rust    src/compiler_rust/runtime/build.rs
+#           (fn compile_c_runtime_sources -- the interpreter/seed crate)
+#
+# A merge silently dropped ONE LINE from ONE list while the .c file stayed in
+# the tree (d122c1a4b78: "the file survived, so nothing looked missing"),
+# losing 18 symbols; ea30567675 did the same to runtime_contracts.c;
+# runtime_terminal.c and runtime_simd_case.c were in one list and not another
+# for months. No diff review can see this: the deletion is a single string
+# literal, and the tolerated final link (Q1.1 of the research doc) turns the
+# result into a NULL GOT slot and a SIGSEGV at first call rather than a build
+# error.
+#
+# WHAT THIS CHECKS. Pure text, no compiler, no built artifact, no bin/simple --
+# so it is wireable as a `push` row. For every owned *.c under src/runtime/
+# (CLAUDE.md Owned-Code Scope exclusions applied: vendor/**, miniaudio.h,
+# stb_image.h, stb_truetype.h) it computes a MEMBERSHIP SIGNATURE -- which of
+# the three lists compile it, counting unity `#include "*.c"` expansion -- and
+# compares the whole map against a frozen baseline. It fails in BOTH
+# directions:
+#
+#   * a .c whose membership CHANGED (a dropped list entry -- the d122c1a4b78
+#     replay -- or a newly added one that was not reviewed)
+#   * a .c present in the tree but absent from the baseline (new unlisted file)
+#   * a list entry naming a file that does not exist (STALE ROSTER)
+#   * a baseline row whose file is gone (STALE BASELINE) -- a baseline that no
+#     longer describes the tree is how a ratchet silently stops ratcheting
+#
+# The baseline IS the "explicit, commented per-lane allowlist": legitimate
+# divergence (hosted_win32.c is seed+rust only, runtime_sdl2.c is simple-only,
+# the 88 files in NO list -- test/, startup/baremetal/, scilib/, platform/ --
+# which are legitimately not in a runtime link) is recorded there as an
+# expected signature, not special-cased in code.
+#
+# Ratchet pattern follows scripts/check/check-unbacked-extern-ratchet.shs.
+# Deliberate update path: --generate-baseline, for REVIEWED updates only. A
+# FAIL naming changed members is real drift; regenerating hides it.
+#
+# VERDICT (last line of stdout):
+#   PASS  — <n> file(s) checked, ...            exit 0
+#   FAIL  — ... naming every offender           exit 1
+#   ERROR — nothing was checked (<reason>)      exit 2
+# Non-vacuity is absolute: a run that checked 0 files is ERROR, never PASS.
+#
+# Every exit status is read into a variable on the line AFTER the command,
+# never through a pipe -- a pipeline's $? is the last stage's status and has
+# produced false greens in this repo.
+
+set -u
+
+ROOT=""
+BASELINE=""
+GENERATE=0
+SELFTEST_ONLY=0
+INTERNAL=0
+
+usage() {
+    echo "usage: $0 [--root DIR] [--baseline FILE] [--generate-baseline] [--selftest]"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) ROOT="$2"; shift 2 ;;
+        --baseline) BASELINE="$2"; shift 2 ;;
+        --generate-baseline) GENERATE=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --internal-scan) INTERNAL=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+SELF="$0"
+
+if [ -z "$ROOT" ]; then
+    ROOT="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"
+fi
+[ -n "$ROOT" ] || { echo "ERROR — nothing was checked (repo root not resolvable)"; exit 2; }
+
+DEFAULT_BASELINE="$ROOT/scripts/check/runtime_source_list_parity_baseline.txt"
+[ -n "$BASELINE" ] || BASELINE="$DEFAULT_BASELINE"
+
+SEED_LIST="$ROOT/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
+SIMPLE_LIST="$ROOT/src/compiler/70.backend/backend/runtime_compiler.spl"
+RUST_LIST="$ROOT/src/compiler_rust/runtime/build.rs"
+RT="$ROOT/src/runtime"
+
+WORK="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---------------------------------------------------------------- extractors
+# Each extractor prints one path per line, relative to src/runtime/, with the
+# .c suffix. Comment lines are stripped BEFORE literals are harvested: all
+# three lists carry long prose comments that name .c files which are
+# deliberately NOT compiled (e.g. build.rs's "Do NOT add
+# startup/baremetal/runtime_log.c to this list"), and harvesting those would
+# invert the check.
+
+extract_seed() {
+    [ -f "$SEED_LIST" ] || return 0
+    awk '
+        /fn build_c_runtime_library/ { inb=1 }
+        inb && /let fingerprint = runtime_inputs_fingerprint/ { inb=0 }
+        inb { print }
+    ' "$SEED_LIST" \
+    | sed 's://.*::' \
+    | grep -o '"[A-Za-z0-9_./-]*\.c"' \
+    | tr -d '"' \
+    | sort -u
+}
+
+extract_rust() {
+    [ -f "$RUST_LIST" ] || return 0
+    awk '
+        /fn compile_c_runtime_sources/ { inb=1 }
+        inb && /let mut build = cc::Build::new\(\)/ { inb=0 }
+        inb { print }
+    ' "$RUST_LIST" \
+    | sed 's://.*::' \
+    | grep -o '"[A-Za-z0-9_./-]*\.c"' \
+    | tr -d '"' \
+    | sort -u
+}
+
+extract_simple() {
+    [ -f "$SIMPLE_LIST" ] || return 0
+    # The pure-Simple roster stores basenames WITHOUT the .c suffix, in a
+    # `var sources = [...]` array plus later `sources.push("name")` calls.
+    awk '
+        /fn compile_runtime_objects/ { inb=1 }
+        inb && /^fn / && !/compile_runtime_objects/ { inb=0 }
+        inb { print }
+    ' "$SIMPLE_LIST" \
+    | sed 's:#.*::' \
+    | grep -E 'var sources = \[|sources\.push\(|sources = sources\.push\(' \
+    | grep -o '"[A-Za-z0-9_./-]*"' \
+    | tr -d '"' \
+    | sed 's/$/.c/' \
+    | sort -u
+}
+
+# Unity expansion: a listed .c that #includes another .c compiles it too.
+# Iterated to a fixed point so a chain (a.c -> b.c -> c.c) is covered.
+expand_unity() {
+    _in="$1"
+    cp "$_in" "$WORK/_ex.cur"
+    _iter=0
+    while [ "$_iter" -lt 8 ]; do
+        cp "$WORK/_ex.cur" "$WORK/_ex.next"
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            _p="$RT/$f"
+            [ -f "$_p" ] || continue
+            _d=$(dirname "$f")
+            sed 's://.*::' "$_p" \
+              | grep -o '#[[:space:]]*include[[:space:]]*"[A-Za-z0-9_./-]*\.c"' \
+              | grep -o '"[A-Za-z0-9_./-]*\.c"' | tr -d '"' \
+              | while IFS= read -r inc; do
+                    if [ "$_d" = "." ]; then echo "$inc"; else echo "$_d/$inc"; fi
+                done >> "$WORK/_ex.next"
+        done < "$WORK/_ex.cur"
+        sort -u "$WORK/_ex.next" -o "$WORK/_ex.next"
+        if cmp -s "$WORK/_ex.cur" "$WORK/_ex.next"; then break; fi
+        mv "$WORK/_ex.next" "$WORK/_ex.cur"
+        _iter=$((_iter + 1))
+    done
+    # normalise "dir/./x.c" and "dir/../x.c"-free forms only; lists are simple
+    sed 's:/\./:/:g' "$WORK/_ex.cur" | sort -u
+}
+
+# ------------------------------------------------------------------ the scan
+scan() {
+    [ -d "$RT" ] || { echo "__ERROR__ src/runtime not found under $ROOT"; return; }
+
+    # Owned .c files. Owned-Code Scope: vendor/** excluded. (miniaudio.h,
+    # stb_image.h, stb_truetype.h are headers and never enumerated here.)
+    ( cd "$RT" && find . -name '*.c' -type f ) \
+      | sed 's:^\./::' \
+      | grep -v '^vendor/' \
+      | sort -u > "$WORK/tree.txt"
+
+    extract_seed   > "$WORK/raw.seed"
+    extract_simple > "$WORK/raw.simple"
+    extract_rust   > "$WORK/raw.rust"
+
+    # STALE ROSTER: a list entry naming a file that does not exist.
+    : > "$WORK/stale_roster.txt"
+    for lane in seed simple rust; do
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ -f "$RT/$f" ] || echo "$lane:$f" >> "$WORK/stale_roster.txt"
+        done < "$WORK/raw.$lane"
+    done
+
+    for lane in seed simple rust; do
+        grep -v '^$' "$WORK/raw.$lane" > "$WORK/exist.$lane" 2>/dev/null || true
+        : > "$WORK/keep.$lane"
+        while IFS= read -r f; do
+            [ -f "$RT/$f" ] && echo "$f" >> "$WORK/keep.$lane"
+        done < "$WORK/exist.$lane"
+        expand_unity "$WORK/keep.$lane" > "$WORK/cov.$lane"
+    done
+
+    # membership signature per owned .c
+    : > "$WORK/observed.txt"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        sig=""
+        for lane in seed simple rust; do
+            if grep -Fxq "$f" "$WORK/cov.$lane"; then
+                if [ -z "$sig" ]; then sig="$lane"; else sig="$sig,$lane"; fi
+            fi
+        done
+        [ -n "$sig" ] || sig="none"
+        echo "$f $sig" >> "$WORK/observed.txt"
+    done < "$WORK/tree.txt"
+    sort -o "$WORK/observed.txt" "$WORK/observed.txt"
+}
+
+# ------------------------------------------------------------------ selftest
+mkfixture() {
+    d="$1"
+    mkdir -p "$d/src/runtime" \
+             "$d/src/compiler_rust/compiler/src/pipeline/native_project" \
+             "$d/src/compiler_rust/runtime" \
+             "$d/src/compiler/70.backend/backend" \
+             "$d/src/runtime/vendor" "$d/scripts/check"
+    for f in a.c b.c c.c; do echo "void ${f%.c}_fn(void){}" > "$d/src/runtime/$f"; done
+    echo 'void v(void){}' > "$d/src/runtime/vendor/bad.c"
+    cat > "$d/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs" <<'EOF'
+fn build_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    let mut runtime_inputs = vec![
+        "a.c",
+        // do NOT add c.c to this list
+        "b.c",
+    ];
+    let fingerprint = runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?;
+}
+EOF
+    cat > "$d/src/compiler_rust/runtime/build.rs" <<'EOF'
+fn compile_c_runtime_sources() {
+    let mut c_sources = vec![
+        "a.c",
+    ];
+    let mut build = cc::Build::new();
+}
+EOF
+    cat > "$d/src/compiler/70.backend/backend/runtime_compiler.spl" <<'EOF'
+fn compile_runtime_objects(verbose: bool) -> Result<[text], text>:
+    var sources = ["a", "b", "c"]
+    sources
+EOF
+}
+
+selftest() {
+    tdir="$WORK/selftest"
+    mkdir -p "$tdir"
+    fails=0
+    run_case() {
+        _name="$1"; _dir="$2"; _want="$3"
+        out=$(sh "$SELF" --internal-scan --root "$_dir" --baseline "$_dir/scripts/check/bl.txt" 2>&1)
+        rc=$?
+        got="$rc"
+        if [ "$got" != "$_want" ]; then
+            echo "  selftest FAIL: $_name expected exit $_want got $got"
+            echo "    $(echo "$out" | tail -1)"
+            fails=$((fails + 1))
+        else
+            echo "  selftest ok: $_name (exit $got)"
+        fi
+    }
+
+    # fixture 1: clean tree with a matching baseline must PASS
+    f1="$tdir/clean"; mkfixture "$f1"
+    sh "$SELF" --internal-scan --root "$f1" --baseline "$f1/scripts/check/bl.txt" --generate-baseline >/dev/null 2>&1
+    genrc=$?
+    if [ "$genrc" != 0 ]; then echo "  selftest FAIL: baseline generation rc=$genrc"; fails=$((fails+1)); fi
+    run_case "clean tree PASSes" "$f1" 0
+
+    # fixture 2: the d122c1a4b78 replay -- a list entry DROPPED while the .c
+    # file stays in the tree. Must FAIL.
+    f2="$tdir/dropped"; cp -r "$f1" "$f2"
+    sed -i '/"b\.c",/d' "$f2/src/compiler_rust/compiler/src/pipeline/native_project/tools.rs"
+    run_case "dropped list entry FAILs (d122c1a4b78 replay)" "$f2" 1
+
+    # fixture 3: stale roster -- a list entry whose file no longer exists.
+    f3="$tdir/stale"; cp -r "$f1" "$f3"
+    rm "$f3/src/runtime/b.c"
+    run_case "stale roster entry FAILs" "$f3" 1
+
+    # fixture 4: a NEW unlisted .c appears in the tree. Must FAIL.
+    f4="$tdir/newfile"; cp -r "$f1" "$f4"
+    echo 'void d_fn(void){}' > "$f4/src/runtime/d.c"
+    run_case "new unlisted .c FAILs" "$f4" 1
+
+    # fixture 5: stale BASELINE -- a baselined file is gone from the tree AND
+    # from every list. Must FAIL, not silently pass.
+    f5="$tdir/stalebl"; cp -r "$f1" "$f5"
+    rm "$f5/src/runtime/c.c"
+    sed -i '/"c",/d;s/, "c"\]/]/' "$f5/src/compiler/70.backend/backend/runtime_compiler.spl"
+    run_case "stale baseline row FAILs" "$f5" 1
+
+    # fixture 6: empty tree -> 0 files checked -> ERROR, never PASS.
+    f6="$tdir/empty"; mkfixture "$f6"; rm -f "$f6"/src/runtime/*.c
+    : > "$f6/scripts/check/bl.txt"
+    run_case "empty tree ERRORs (non-vacuity)" "$f6" 2
+
+    # fixture 7: unity #include "x.c" counts as coverage.
+    f7="$tdir/unity"; mkfixture "$f7"
+    printf '#include "c.c"\nvoid a_fn(void){}\n' > "$f7/src/runtime/a.c"
+    sh "$SELF" --internal-scan --root "$f7" --baseline "$f7/scripts/check/bl.txt" --generate-baseline >/dev/null 2>&1
+    if ! grep -q '^c\.c .*seed' "$f7/scripts/check/bl.txt"; then
+        echo "  selftest FAIL: unity include not expanded into coverage"
+        fails=$((fails + 1))
+    else
+        echo "  selftest ok: unity include expanded into coverage"
+    fi
+
+    if [ "$fails" -ne 0 ]; then
+        echo "SELFTEST FAILED ($fails case(s))"
+        return 1
+    fi
+    echo "selftest: 7 fixture(s) passed"
+    return 0
+}
+
+# --selftest runs FIRST, unconditionally, and is FATAL.
+if [ "$INTERNAL" -eq 0 ]; then
+    selftest
+    st_rc=$?
+    if [ "$st_rc" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+fi
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — selftest only, 7 fixture(s) passed, 0 tree file(s) checked"
+    exit 0
+fi
+
+scan
+if grep -q '^__ERROR__' "$WORK/observed.txt" 2>/dev/null; then :; fi
+if [ ! -s "$WORK/observed.txt" ]; then
+    echo "ERROR — nothing was checked (0 owned *.c found under $RT)"
+    exit 2
+fi
+
+N=$(wc -l < "$WORK/observed.txt" | tr -d ' ')
+if [ "$N" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 owned *.c found under $RT)"
+    exit 2
+fi
+
+if [ "$GENERATE" -eq 1 ]; then
+    mkdir -p "$(dirname "$BASELINE")"
+    {
+        echo "# runtime_source_list_parity_baseline.txt"
+        echo "#"
+        echo "# Frozen membership map for scripts/check/check-runtime-source-list-parity.shs."
+        echo "# One row per owned *.c under src/runtime/ (vendor/** excluded):"
+        echo "#     <path relative to src/runtime>  <lanes that compile it>"
+        echo "# Lanes: seed   = native_project/tools.rs (core-C capsule archive)"
+        echo "#        simple = 70.backend/backend/runtime_compiler.spl (native product build)"
+        echo "#        rust   = compiler_rust/runtime/build.rs (interpreter/seed crate)"
+        echo "#        none   = compiled by NO list (test/, startup/baremetal/, scilib/,"
+        echo "#                 platform/ and friends -- legitimately not in a runtime link)"
+        echo "# Unity '#include \"x.c\"' coverage is expanded before the signature is taken."
+        echo "#"
+        echo "# This file IS the explicit per-lane allowlist: legitimate divergence"
+        echo "# (hosted_win32.c seed+rust only, runtime_sdl2.c simple-only, ...) is a row"
+        echo "# here, not a special case in code. Regenerate ONLY for reviewed changes --"
+        echo "# a FAIL naming a changed membership is real drift and regenerating hides it."
+        cat "$WORK/observed.txt"
+    } > "$BASELINE"
+    echo "PASS — $N file(s) checked, baseline written to $BASELINE"
+    exit 0
+fi
+
+if [ ! -f "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (baseline not found: $BASELINE)"
+    exit 2
+fi
+
+grep -v '^#' "$BASELINE" | grep -v '^[[:space:]]*$' | sort > "$WORK/baseline.txt"
+if [ ! -s "$WORK/baseline.txt" ]; then
+    echo "ERROR — nothing was checked (baseline has 0 rows: $BASELINE)"
+    exit 2
+fi
+
+# --- offenders, both directions
+: > "$WORK/off_changed.txt"
+: > "$WORK/off_new.txt"
+: > "$WORK/off_stalebl.txt"
+
+awk 'NR==FNR{b[$1]=$2; next} { if (!($1 in b)) print $1" ("$2")" }' \
+    "$WORK/baseline.txt" "$WORK/observed.txt" > "$WORK/off_new.txt"
+awk 'NR==FNR{b[$1]=$2; next} { if (($1 in b) && b[$1] != $2) print $1" baseline="b[$1]" now="$2 }' \
+    "$WORK/baseline.txt" "$WORK/observed.txt" > "$WORK/off_changed.txt"
+awk 'NR==FNR{o[$1]=$2; next} { if (!($1 in o)) print $1" (baselined "$2", file gone)" }' \
+    "$WORK/observed.txt" "$WORK/baseline.txt" > "$WORK/off_stalebl.txt"
+
+n_changed=$(wc -l < "$WORK/off_changed.txt" | tr -d ' ')
+n_new=$(wc -l < "$WORK/off_new.txt" | tr -d ' ')
+n_stalebl=$(wc -l < "$WORK/off_stalebl.txt" | tr -d ' ')
+n_staler=$(wc -l < "$WORK/stale_roster.txt" | tr -d ' ')
+
+total=$((n_changed + n_new + n_stalebl + n_staler))
+if [ "$total" -eq 0 ]; then
+    nseed=$(wc -l < "$WORK/cov.seed" | tr -d ' ')
+    nsimple=$(wc -l < "$WORK/cov.simple" | tr -d ' ')
+    nrust=$(wc -l < "$WORK/cov.rust" | tr -d ' ')
+    nnone=$(awk '$2=="none"' "$WORK/observed.txt" | wc -l | tr -d ' ')
+    echo "PASS — $N file(s) checked, 0 drift (seed=$nseed simple=$nsimple rust=$nrust in-no-list=$nnone)"
+    exit 0
+fi
+
+echo "OFFENDERS:"
+[ "$n_changed" -gt 0 ] && { echo "  membership changed (dropped/added list entry):"; sed 's/^/    /' "$WORK/off_changed.txt"; }
+[ "$n_new" -gt 0 ]     && { echo "  new *.c not in baseline:"; sed 's/^/    /' "$WORK/off_new.txt"; }
+[ "$n_stalebl" -gt 0 ] && { echo "  STALE BASELINE (row no longer describes the tree):"; sed 's/^/    /' "$WORK/off_stalebl.txt"; }
+[ "$n_staler" -gt 0 ]  && { echo "  STALE ROSTER (list entry with no file):"; sed 's/^/    /' "$WORK/stale_roster.txt"; }
+
+names=$( { cut -d' ' -f1 "$WORK/off_changed.txt"; cut -d' ' -f1 "$WORK/off_new.txt"; cut -d' ' -f1 "$WORK/off_stalebl.txt"; cat "$WORK/stale_roster.txt"; } | tr '\n' ' ' | sed 's/ $//')
+echo "FAIL — $N file(s) checked, $total offender(s) ($n_changed changed, $n_new new, $n_stalebl stale-baseline, $n_staler stale-roster): $names"
+exit 1

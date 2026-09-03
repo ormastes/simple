@@ -1,0 +1,63 @@
+# @gc — module uses GC runtime
+#
+# /v1/chat/completions handler — phase A6 surface over a phase-A1 engine.
+#
+# THIS ENDPOINT NEVER RETURNS GENERATED TEXT, and that is deliberate.
+# doc/05_design/ml/slang/slang_master_plan.md schedules the inference path
+# across A3 (streaming loader), A4 (paged KV cache + paged attention) and A5
+# (scheduler/worker/executor/engine). Only A1 (the weight loader) exists in
+# src/lib/gc_async_mut/slang today: there is no attention kernel, no KV cache,
+# no worker and no engine, so no forward pass can be run.
+#
+# A well-formed request for a model that IS on disk therefore gets HTTP 503
+# with a structured `model_not_runnable` error that names the missing phases
+# and flags itself as a stub. Returning canned prose here would be
+# indistinguishable from real inference to the caret client, which is the one
+# outcome this file exists to prevent.
+
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, parse_chat_request, openai_error_response}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{SlangModelEntry, discover_models, find_model}
+
+# The most advanced slang phase whose code is actually present.
+fn slang_implemented_phase() -> text:
+    "A1"
+
+# Phases the inference path needs and that are not implemented.
+fn slang_missing_inference_phases() -> [text]:
+    ["A3", "A4", "A5"]
+
+fn _missing_phases_json() -> text:
+    var joined = ""
+    var i = 0
+    val phases = slang_missing_inference_phases()
+    while i < phases.len():
+        if i > 0:
+            joined = joined + ","
+        joined = joined + "\"" + phases[i] + "\""
+        i = i + 1
+    "[" + joined + "]"
+
+# Machine-readable annex attached to the not-runnable error. `stub: true` is
+# the announcement required of any non-inferring build.
+fn _not_runnable_detail(entry: SlangModelEntry) -> text:
+    "\"slang\":{\"stub\":true,\"engine\":\"slang\",\"implemented_phase\":\"" + slang_implemented_phase() + "\",\"missing_inference_phases\":" + _missing_phases_json() + ",\"pack_root\":\"" + entry.pack_root + "\",\"tensor_count\":" + entry.tensor_count.to_text() + ",\"chunk_count\":" + entry.chunk_count.to_text() + ",\"design_doc\":\"doc/05_design/ml/slang/slang_master_plan.md\"}"
+
+fn model_not_runnable_response(entry: SlangModelEntry) -> ApiResponse:
+    val message = "model '" + entry.id + "' is present on disk and its manifest parsed (" + entry.tensor_count.to_text() + " tensors, " + entry.chunk_count.to_text() + " chunks), but slang cannot run inference: only phase " + slang_implemented_phase() + " (the weight loader) is implemented. Phases A3/A4/A5 (streaming loader, paged KV cache + paged attention, scheduler/worker/engine) are absent, so no forward pass exists. This build is an announced stub and will not fabricate a completion."
+    openai_error_response(503, message, "server_error", "model_not_runnable", _not_runnable_detail(entry))
+
+fn model_not_found_response(model: text) -> ApiResponse:
+    openai_error_response(404, "model '" + model + "' was not found under the configured slang model root", "invalid_request_error", "model_not_found", "")
+
+fn serve_chat_completions(model_root: text, body: text) -> ApiResponse:
+    match parse_chat_request(body):
+        Err(reason):
+            openai_error_response(400, reason, "invalid_request_error", "invalid_request", "")
+        Ok(request):
+            val entry = find_model(discover_models(model_root), request.model)
+            if entry == nil:
+                return model_not_found_response(request.model)
+            model_not_runnable_response(entry!)
+
+export slang_implemented_phase, slang_missing_inference_phases
+export model_not_runnable_response, model_not_found_response, serve_chat_completions

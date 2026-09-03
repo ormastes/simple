@@ -36,13 +36,34 @@ static inline int rv_size_align16(size_t size, size_t *out){
 #define RV_HEAP_SIZE  (sizeof(g_heap))
 #endif
 
+/* Exhaustion must NAME itself, at the single funnel every caller passes
+ * through. Reporting it in malloc() only was fail-open: rt_alloc/calloc and
+ * every in-TU `rv_alloc(...)` call site bypass malloc entirely, so a full arena
+ * returned NULL, the caller stored through it, and the only evidence was a
+ * store fault at an unattributable address -- which is exactly how the riscv64
+ * build-and-run row's failure read. A TU that can print defines
+ * RV_HEAP_EXHAUSTED_REPORT(); the default is a no-op, so no other includer of
+ * this header changes behaviour. The report does NOT change the return value:
+ * callers still see NULL and fail exactly as before. */
+#ifndef RV_HEAP_EXHAUSTED_REPORT
+#define RV_HEAP_EXHAUSTED_REPORT() ((void)0)
+#endif
+
+/* Optional coarse progress hook: lets a TU that can print show HOW the arena
+ * is being consumed (steady vs runaway) instead of only that it ran out.
+ * Default no-op. */
+#ifndef RV_HEAP_PROGRESS
+#define RV_HEAP_PROGRESS(off) ((void)(off))
+#endif
+
 static void *rv_alloc(size_t size){
     size_t aligned = 0;
-    if (!rv_size_align16(size, &aligned)) return 0;
-    if (g_heap_off > (size_t)RV_HEAP_SIZE) return 0;
-    if (aligned > (size_t)RV_HEAP_SIZE - g_heap_off) return 0;
+    if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (g_heap_off > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (aligned > (size_t)RV_HEAP_SIZE - g_heap_off) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     void *p = &(RV_HEAP_BASE)[g_heap_off];
     g_heap_off += aligned;
+    RV_HEAP_PROGRESS(g_heap_off);
     return p;
 }
 
@@ -68,13 +89,13 @@ static inline void *rv_realloc(void *ptr, size_t size){
 static void *rv_alloc_aligned(size_t size, size_t align){
     if (align == 0) align = 16U;
     size_t offset = g_heap_off;
-    if (offset > (size_t)RV_HEAP_SIZE) return 0;
+    if (offset > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     size_t rem = offset % align;
-    if (rem != 0 && !rv_size_add(offset, align - rem, &offset)) return 0;
+    if (rem != 0 && !rv_size_add(offset, align - rem, &offset)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     size_t aligned = 0;
-    if (!rv_size_align16(size, &aligned)) return 0;
-    if (offset > (size_t)RV_HEAP_SIZE) return 0;
-    if (aligned > (size_t)RV_HEAP_SIZE - offset) return 0;
+    if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (offset > (size_t)RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (aligned > (size_t)RV_HEAP_SIZE - offset) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
     void *p = &(RV_HEAP_BASE)[offset];
     g_heap_off = offset + aligned;
     return p;

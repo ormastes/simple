@@ -128,4 +128,52 @@ mod multiline_shapes {
             "statement if with multi-line condition regressed"
         );
     }
+
+    /// `*ptr = v` immediately after a call whose argument list spans lines.
+    /// The leading `*` was absorbed as a binary multiply continuing the
+    /// previous expression (`g(...) * p`), so the parser then wanted an
+    /// expression where the `=` was: "expected expression, found Assign".
+    /// `*p = v` ALONE always parsed, which is what hid this. Fixed by making
+    /// the `*` leading-continuation lookahead require a strictly deeper
+    /// indent, exactly like `+`/`-` in `parse_term`. See doc/08_tracking/bug/
+    /// deref_assign_after_multiline_call_parsed_as_multiply_2026-09-01.md.
+    #[test]
+    fn deref_assign_after_multiline_call_parses() {
+        assert!(
+            parses("fn f(p: rawptr<i64>, v: i64):\n    val s = g(\n        1)\n    *p = v\n"),
+            "deref assignment after a multi-line call must parse"
+        );
+        assert!(
+            parses("fn f(p: rawptr<i64>, q: rawptr<i64>, v: i64):\n    val s = g(\n        1)\n    *p = v\n    *q = v\n"),
+            "two consecutive deref assignments after a multi-line call must parse"
+        );
+        assert!(
+            parses("fn f(p: rawptr<i64>, v: i64):\n    *p = v\n"),
+            "bare deref assignment regressed"
+        );
+    }
+
+    /// The narrowing must not break real multiplicative continuations.
+    #[test]
+    fn multiplicative_continuations_still_parse() {
+        // trailing `*`
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    a *\n        b\n"),
+            "trailing-`*` continuation regressed"
+        );
+        // leading `*` on a strictly deeper line
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    val r = a\n        * b\n    r\n"),
+            "indented leading-`*` continuation regressed"
+        );
+        // `/` and `%` keep same-indent leading continuation
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    val r = a\n    / b\n    r\n"),
+            "leading-`/` continuation regressed"
+        );
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    val r = a\n    % b\n    r\n"),
+            "leading-`%` continuation regressed"
+        );
+    }
 }
