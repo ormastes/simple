@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-wrapper-platform.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+mkdir -p "$TMP/bin/release/aarch64-apple-darwin" \
+    "$TMP/bin/release/x86_64-unknown-linux-gnu" "$TMP/tool"
+cp "$ROOT/bin/release/simple" "$TMP/bin/release/simple"
+
+cat >"$TMP/tool/uname" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    -s) printf 'Darwin\n' ;;
+    -m) printf 'arm64\n' ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod +x "$TMP/tool/uname"
+
+cat >"$TMP/bin/release/aarch64-apple-darwin/simple" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+    --version) printf 'simple-selfhost darwin-arm64\n' ;;
+    test) exit 0 ;;
+    *) printf 'selected=darwin-arm64\n' ;;
+esac
+EOF
+chmod +x "$TMP/bin/release/aarch64-apple-darwin/simple"
+
+cat >"$TMP/bin/release/x86_64-unknown-linux-gnu/simple" <<'EOF'
+#!/bin/sh
+printf 'selected=wrong-linux-payload\n'
+EOF
+chmod +x "$TMP/bin/release/x86_64-unknown-linux-gnu/simple"
+
+out=$(PATH="$TMP/tool:$PATH" "$TMP/bin/release/simple" probe)
+[ "$out" = 'selected=darwin-arm64' ] || {
+    echo "FAIL: release wrapper selected wrong payload: $out" >&2
+    exit 1
+}
+
+echo 'PASS: release wrapper selects Darwin arm64 payload'
