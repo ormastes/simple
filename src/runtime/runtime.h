@@ -983,6 +983,7 @@ int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
+int64_t  rt_process_start_identity(int64_t pid);
 bool     rt_process_kill(int64_t pid);
 bool     rt_process_owned_cancel(uint64_t slot, uint64_t generation,
                                  int64_t pid, uint64_t start_identity,

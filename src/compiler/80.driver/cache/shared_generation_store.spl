@@ -15,6 +15,7 @@ extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_getpid() -> i64
 extern fn rt_time_monotonic_ns() -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_start_identity(pid: i64) -> i64
 
 val SHARED_GENERATION_SCHEMA_V1: text = "simple-shared-generation-v1"
 val SHARED_GENERATION_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
@@ -122,6 +123,44 @@ fn shared_generation_publish_bounded_v1(
     shared_generation_publish_fault_v1(
         root, expected_parent, ordinal, payload, "", max_bytes)
 
+fn shared_generation_reclaim_orphan_stages_v1(root: text) -> bool:
+    var changed = false
+    for name in dir_list(root) ?? []:
+        if name.starts_with("CURRENT.tmp."):
+            if not rt_file_delete("{root}/{name}"):
+                return false
+            changed = true
+    for name in dir_list("{root}/generations") ?? []:
+        if name.contains(".generation.tmp."):
+            if not rt_file_delete("{root}/generations/{name}"):
+                return false
+            changed = true
+    if changed:
+        return rt_file_fsync(root) and rt_file_fsync("{root}/generations")
+    true
+
+fn shared_generation_store_bytes_v1(root: text) -> i64:
+    var total: i64 = 0
+    for name in dir_list(root) ?? []:
+        val path = "{root}/{name}"
+        if rt_file_is_regular_no_follow(path):
+            val size = rt_file_size(path)
+            if size < 0:
+                return -1
+            total = total + size
+    for directory in ["generations", "leases"]:
+        val names = dir_list("{root}/{directory}") ?? []
+        if names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
+            return -1
+        for name in names:
+            val path = "{root}/{directory}/{name}"
+            if rt_file_is_regular_no_follow(path):
+                val size = rt_file_size(path)
+                if size < 0:
+                    return -1
+                total = total + size
+    total
+
 fn shared_generation_publish_fault_v1(
     root: text, expected_parent: text, ordinal: i64, payload: text,
     fault: text, max_bytes: i64 = SHARED_GENERATION_MAX_BYTES_V1
@@ -140,19 +179,19 @@ fn shared_generation_publish_fault_v1(
     if current != expected_parent:
         val _ = file_unlock(lock)
         return "parent-generation-changed"
-    var resident_bytes: i64 = 0
-    val resident_names = dir_list("{root}/generations") ?? []
-    if resident_names.len() > SHARED_GENERATION_MAX_ENTRIES_V1:
+    if not shared_generation_reclaim_orphan_stages_v1(root):
         val _ = file_unlock(lock)
-        return "generation-count-unbounded"
-    for resident_name in resident_names:
-        if resident_name.ends_with(".generation"):
-            resident_bytes = resident_bytes + rt_file_size(
-                "{root}/generations/{resident_name}")
-    if resident_bytes + encoded.len() > max_bytes:
+        return "orphan-stage-reclaim-failed"
+    val resident_bytes = shared_generation_store_bytes_v1(root)
+    if resident_bytes < 0:
+        val _ = file_unlock(lock)
+        return "store-accounting-failed"
+    val generation_path = "{root}/generations/{generation}.generation"
+    val generation_growth = if rt_file_exists(generation_path): 0 else: encoded.len()
+    if resident_bytes > max_bytes or generation_growth > max_bytes - resident_bytes or
+            generation.len() > max_bytes - resident_bytes - generation_growth:
         val _ = file_unlock(lock)
         return "publication-exceeds-bound"
-    val generation_path = "{root}/generations/{generation}.generation"
     if rt_file_exists(generation_path):
         val existing = rt_file_read_regular_no_follow_bounded(
             generation_path, SHARED_GENERATION_MAX_BYTES_V1)
@@ -302,7 +341,13 @@ fn shared_generation_reclaim_dead_leases_v1(
         if owner_pid == nil or owner_pid! <= 0:
             val _ = file_unlock(lock)
             return Err("lease-owner-identity-invalid")
-        val owner_alive = rt_process_is_running(owner_pid!)
+        val owner_start = owner_fields[2].to_i64()
+        if owner_start == nil or owner_start! <= 0:
+            val _ = file_unlock(lock)
+            return Err("lease-owner-identity-invalid")
+        val observed_start = rt_process_start_identity(owner_pid!)
+        val owner_alive = rt_process_is_running(owner_pid!) and
+            observed_start > 0 and observed_start == owner_start!
         if lease!.expires_ns <= now_ns and not owner_alive and
                 not live_owner_identities.contains(lease!.owner_identity):
             if not rt_file_delete(path):
