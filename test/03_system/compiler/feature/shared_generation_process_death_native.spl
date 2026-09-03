@@ -1,0 +1,36 @@
+use compiler.driver.cache.shared_generation_store.{
+    shared_generation_publish_v1, shared_generation_pin_current_owned_v1,
+    shared_generation_reclaim_dead_leases_v1, shared_generation_read_valid_v1
+}
+use std.io_runtime.{process_spawn_async, process_is_running, process_kill, process_wait}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn main() -> i64:
+    val root = "/tmp/simple-shared-generation-process-death"
+    val _removed = rt_dir_remove_all(root)
+    if not rt_dir_create_all(root):
+        return 70
+    if shared_generation_publish_v1(root, "", 1, "stable").len() != 64:
+        return 71
+    val pid = process_spawn_async("sleep", ["30"])
+    if pid <= 0 or not process_is_running(pid):
+        return 72
+    val owner = "pid:{pid}:probe-boot"
+    val read = shared_generation_pin_current_owned_v1(
+        root, "child-owner", owner, 100)
+    if not shared_generation_read_valid_v1(read):
+        return 73
+    if not process_kill(pid):
+        return 74
+    val _waited = process_wait(pid)
+    if process_is_running(pid):
+        return 75
+    val reclaimed = shared_generation_reclaim_dead_leases_v1(root, 101, [])
+    if reclaimed.is_err() or reclaimed.unwrap() != 1:
+        return 76
+    if rt_file_exists("{root}/leases/child-owner.lease"):
+        return 77
+    0

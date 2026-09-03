@@ -29,8 +29,13 @@ fn shared_generation_store_has_durable_publication_and_pinned_gc_contracts() {
     assert!(pointer_rename < directory_fsync);
     assert!(source.contains("pins.contains(row.1)"));
     assert!(source.contains("generation-count-unbounded"));
+    assert!(source.contains("lease-count-unbounded"));
+    assert!(source.contains("protected-generations-exceed-bound"));
+    assert!(source.contains("shared_generation_reclaim_dead_leases_v1"));
+    assert!(source.contains("file_create_excl(staged, encoded)"));
     assert!(source.contains("rows = rows.sorted()"));
     parse_and_lower(&repository, "src/compiler/80.driver/cache/shared_generation_store.spl");
     parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_publication_spec.spl");
     parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_writer_race_native.spl");
+    parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_process_death_native.spl");
 }

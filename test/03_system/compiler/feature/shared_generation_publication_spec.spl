@@ -1,13 +1,15 @@
 use std.spec.*
 use compiler.driver.cache.shared_generation_store.{
     shared_generation_publish_v1, shared_generation_publish_fault_v1,
-    shared_generation_pin_current_v1,
-    shared_generation_release_v1, shared_generation_gc_v1
+    shared_generation_pin_current_v1, shared_generation_pin_current_owned_v1,
+    shared_generation_release_v1, shared_generation_gc_v1,
+    shared_generation_reclaim_dead_leases_v1
 }
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
 
 describe "MBH-NFR-006 shared publication lifecycle":
@@ -15,19 +17,20 @@ describe "MBH-NFR-006 shared publication lifecycle":
         val root = "/tmp/simple-shared-generation-lifecycle-spec"
         val _removed = rt_dir_remove_all(root)
         expect(rt_dir_create_all(root)).to_equal(true)
-        val first = shared_generation_publish_v1(root, "", 1, "payload-one")
+        val first_payload = "payload-one-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz"
+        val second_payload = "payload-two-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz"
+        val first = shared_generation_publish_v1(root, "", 1, first_payload)
         expect(first.len()).to_equal(64)
         val reader = shared_generation_pin_current_v1(root, "reader-1")
         expect(reader.valid).to_equal(true)
-        expect(reader.payload).to_equal("payload-one")
-        val second = shared_generation_publish_v1(root, first, 2, "payload-two")
+        expect(reader.payload).to_equal(first_payload)
+        val second = shared_generation_publish_v1(root, first, 2, second_payload)
         expect(second.len()).to_equal(64)
-        val pinned_gc = shared_generation_gc_v1(root, 1, 1)
-        expect(pinned_gc.valid).to_equal(true)
-        expect(pinned_gc.retained).to_contain(first)
-        expect(pinned_gc.retained).to_contain(second)
+        val pinned_gc = shared_generation_gc_v1(root, 400, 1)
+        expect(pinned_gc.valid).to_equal(false)
+        expect(pinned_gc.reason).to_equal("protected-generations-exceed-bound")
         expect(shared_generation_release_v1(root, "reader-1")).to_equal(true)
-        val released_gc = shared_generation_gc_v1(root, 1, 1)
+        val released_gc = shared_generation_gc_v1(root, 400, 1)
         expect(released_gc.valid).to_equal(true)
         expect(released_gc.retained).to_contain(second)
         expect(released_gc.removed).to_contain(first)
@@ -69,3 +72,55 @@ describe "MBH-NFR-006 shared publication lifecycle":
                 expect(reader.payload).to_equal("stable")
             expect(shared_generation_release_v1(
                 root, "reader-{fault}")).to_equal(true)
+
+    it "reclaims only expired leases whose owners are proven dead":
+        val root = "/tmp/simple-shared-generation-owner-expiry-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "dead", "pid:10:boot-a", 100).valid).to_equal(true)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "live", "pid:11:boot-a", 100).valid).to_equal(true)
+        val reclaimed = shared_generation_reclaim_dead_leases_v1(
+            root, 101, ["pid:11:boot-a"])
+        expect(reclaimed.unwrap()).to_equal(1)
+        expect(rt_file_exists("{root}/leases/dead.lease")).to_equal(false)
+        expect(rt_file_exists("{root}/leases/live.lease")).to_equal(true)
+        expect(shared_generation_release_v1(root, "live")).to_equal(true)
+
+    it "fails closed on lease overflow and deleted current or pinned generations":
+        val root = "/tmp/simple-shared-generation-overflow-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        var index = 0
+        while index < 4097:
+            expect(rt_file_write("{root}/leases/overflow-{index}.lease",
+                "simple-shared-generation-lease-v1\ngeneration={generation}\nowner=owner-{index}\nexpires-ns=999999")).to_equal(true)
+            index = index + 1
+        val overflow = shared_generation_gc_v1(root, 1000000, 1)
+        expect(overflow.valid).to_equal(false)
+        expect(overflow.reason).to_equal("lease-count-unbounded")
+
+        val missing_root = "/tmp/simple-shared-generation-missing-current-spec"
+        val _removed_missing = rt_dir_remove_all(missing_root)
+        expect(rt_dir_create_all(missing_root)).to_equal(true)
+        val missing_generation = shared_generation_publish_v1(
+            missing_root, "", 1, "stable")
+        expect(rt_file_delete("{missing_root}/CURRENT")).to_equal(true)
+        expect(shared_generation_gc_v1(missing_root, 1000000, 1).valid).to_equal(false)
+
+        val pinned_root = "/tmp/simple-shared-generation-missing-pin-spec"
+        val _removed_pinned = rt_dir_remove_all(pinned_root)
+        expect(rt_dir_create_all(pinned_root)).to_equal(true)
+        val pinned_generation = shared_generation_publish_v1(
+            pinned_root, "", 1, "stable")
+        expect(shared_generation_pin_current_owned_v1(
+            pinned_root, "reader", "pid:12:boot-a", 999999).valid).to_equal(true)
+        expect(rt_file_delete(
+            "{pinned_root}/generations/{pinned_generation}.generation")).to_equal(true)
+        expect(shared_generation_pin_current_v1(
+            pinned_root, "reader-two").valid).to_equal(false)
