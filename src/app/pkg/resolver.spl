@@ -1,13 +1,15 @@
 # Package Manager - Dependency Resolver
 #
 # Reads package.sdn, resolves each dependency.
-# For git deps: clones/fetches to ~/.simple/packages/ cache.
+# For git deps: clones/fetches to centralized user package storage.
 # Detects version conflicts (two deps requiring incompatible versions).
 
 use app.pkg.manifest.{PackageManifest, Dependency, parse_manifest_file, parse_manifest}
 use app.pkg.version.{SemVer, VersionConstraint}
 use app.pkg.lock.{LockEntry, LockFile, parse_lock_file, write_lock_file}
 use app.io.mod.{env_get, process_run}
+use app.pkg.storage.{resolve_package_storage, resolve_package_storage_root}
+use std.common.storage_roots.{StorageReceipt}
 
 use std.io_runtime.{file_exists, read_file_text_result}
 
@@ -20,6 +22,7 @@ struct ResolvedDep:
     path: text                  # Local path (if path dep)
     cache_path: text            # Path in global cache
     source_type: text           # "git", "path", or "registry"
+    storage_receipts: [StorageReceipt]
 
 impl ResolvedDep:
     fn to_text() -> text:
@@ -41,16 +44,11 @@ impl ResolutionResult:
         self.errors.len() > 0
 
 
-# Get the global cache directory (~/.simple/packages/)
+# Compatibility facade for callers that display the package storage root.
 fn get_cache_dir() -> text:
-    val home = env_get("HOME")
-    if home == "" or home == nil:
-        # Fallback for Windows
-        val userprofile = env_get("USERPROFILE")
-        if userprofile != "" and userprofile != nil:
-            return "{userprofile}/.simple/packages"
-        return ".simple/packages"
-    "{home}/.simple/packages"
+    match resolve_package_storage_root():
+        case Ok(selection): selection.path.value
+        case Err(_): ""
 
 
 # Run a shell command and return (stdout, stderr, exit_code)
@@ -82,7 +80,8 @@ fn _dependency_manifest_version(path: text) -> Result<text, text>:
 # Clone or fetch a git repository to the cache
 fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, text>:
     val cache_key = dep.cache_key()
-    val dest = "{cache_dir}/{cache_key}"
+    val destination = resolve_package_storage(cache_key)?
+    val dest = destination.path.value
 
     if file_exists("{dest}/.git"):
         # Already cloned, fetch latest
@@ -140,7 +139,8 @@ fn git_clone_or_fetch(dep: Dependency, cache_dir: text) -> Result<ResolvedDep, t
         git_commit: commit,
         path: "",
         cache_path: dest,
-        source_type: "git"
+        source_type: "git",
+        storage_receipts: destination.receipts,
     ))
 
 
@@ -160,7 +160,8 @@ fn resolve_path_dep(dep: Dependency) -> Result<ResolvedDep, text>:
         git_commit: "",
         path: dep.path,
         cache_path: dep.path,
-        source_type: "path"
+        source_type: "path",
+        storage_receipts: [],
     ))
 
 
@@ -175,7 +176,8 @@ fn resolve_dep(dep: Dependency, cache_dir: text, lock_entry: LockEntry?) -> Resu
             if entry.git_commit != "":
                 # Check if already cached at this commit
                 val cache_key = dep.cache_key()
-                val dest = "{cache_dir}/{cache_key}"
+                val destination = resolve_package_storage(cache_key)?
+                val dest = destination.path.value
                 if file_exists("{dest}/.git"):
                     # Verify commit matches
                     val (commit_out, _, _) = run_shell("cd \"{dest}\" && git rev-parse HEAD")
@@ -188,7 +190,8 @@ fn resolve_dep(dep: Dependency, cache_dir: text, lock_entry: LockEntry?) -> Resu
                             git_commit: entry.git_commit,
                             path: "",
                             cache_path: dest,
-                            source_type: "git"
+                            source_type: "git",
+                            storage_receipts: destination.receipts,
                         ))
         return git_clone_or_fetch(dep, cache_dir)
 
@@ -220,7 +223,11 @@ fn resolve_all(manifest: PackageManifest, lock: LockFile?, include_dev: bool) ->
     var resolved: [ResolvedDep] = []
     var errors: [text] = []
 
-    # Ensure cache directory exists
+    if cache_dir == "":
+        errors.push("Package storage root resolution failed")
+        return ResolutionResult(resolved: resolved, errors: errors)
+
+    # Ensure package storage directory exists
     val (_, mkdir_err, mkdir_code) = run_shell("mkdir -p \"{cache_dir}\"")
     if mkdir_code != 0:
         errors.push("Failed to create cache directory {cache_dir}: {mkdir_err}")
