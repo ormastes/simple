@@ -35,7 +35,7 @@ Published source is not equivalent to a closed gate; runtime-blocked Simple test
 | D2 | Native editor tooling client foundation published | Complete SVIM/Simple IDE production cutover and shared diagnostics/tests/commands conformance |
 | D3 | VS Code KPF admission/service projection and generated contribution projection published; four focused tests and TypeScript compilation passed | Integrate the production desktop client and shared conformance corpus; retain explicit degraded behavior |
 | D4-D5 | Not published | Implement browser/Wasm client and editor-neutral conformance after D1/D3 integration |
-| E1 | Deterministic MDSOC++ capsule/facet sealer, budgets, lifecycle order, receipts, and migration compatibility published | Execute Simple tests and add the large-program pilot plus upgrade/rollback proof |
+| E1 | Deterministic MDSOC++ capsule/facet sealer, budgets, lifecycle order, receipts, migration compatibility, and real IDE/tooling product-generation upgrade owner published | Execute the large-program pilot and mutation-sensitive state migration/publication/drain/rollback receipt proof |
 | E2-E5 | Not published as complete lanes | Continue pilot, performance, Wasm, and public documentation only with prerequisite gates preserved |
 
 ## Coordination Contract

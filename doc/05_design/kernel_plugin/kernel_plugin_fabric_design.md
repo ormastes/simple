@@ -93,6 +93,16 @@ Extended enums represent sealed constructor families, with persistent constructo
 
 MDSOC++ capsules declare provided/required facets, authority, memory, concurrency, lifecycle, persistence schema, upgrade compatibility, failure containment, and observability. Cross-capsule commands mutate one authority, queries are read-only, events are immutable, and mutable object references never cross the boundary. ECS is optional and capsule-private.
 
+The real IDE/tooling pilot stores `{active deployment, active state, optional
+draining deployment, draining state, inflight count}` under one owner. An
+upgrade reserves three receipt slots, verifies the successor and migration,
+constructs migrated state, and only then swaps the active/draining pair. The
+receipt sequence is `StateMigrated -> Published -> Draining`, followed by zero
+or more `Draining` progress records and one `Retired` record. A rollback swaps
+the retained deployment/state back into active authority. No rollback may
+resurrect a retired generation. Invalid drain counts and insufficient receipt
+capacity leave product authority unchanged.
+
 ## Error Handling
 
 All failures are typed: malformed schema, collision, missing/ambiguous provider, version/schema mismatch, capability denial, capacity exhaustion, stale handle, cancellation, deadline, malformed output, provider crash, partial coverage, and tool failure. No error path substitutes a clean result or silently changes placement.

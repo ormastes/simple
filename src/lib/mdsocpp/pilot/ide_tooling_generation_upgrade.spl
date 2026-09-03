@@ -1,0 +1,243 @@
+use common.kernel_plugin.ids.KpfDigest256
+use std.mdsocpp.pilot.ide_tooling.*
+
+pub enum IdeToolingGenerationPhaseV1:
+    StateMigrated
+    Published
+    Draining
+    Retired
+    RolledBack
+
+pub enum IdeToolingGenerationStatusV1:
+    Accepted
+    UpgradeRejected
+    ReceiptCapacityExceeded
+    PreviousGenerationDraining
+    DrainUnavailable
+    DrainCountInvalid
+    RollbackUnavailable
+
+    fn accepted() -> bool: self == IdeToolingGenerationStatusV1.Accepted
+
+pub struct IdeToolingDocumentStateV1:
+    schema_major: u32
+    schema_minor: u32
+    revision: u64
+    open_document_count: u32
+    diagnostic_epoch: u64
+    migrated_from_generation: u64
+
+pub struct IdeToolingGenerationEventV1:
+    sequence: u64
+    transaction_id: u64
+    phase: IdeToolingGenerationPhaseV1
+    status: IdeToolingGenerationStatusV1
+    active_generation: u64
+    candidate_generation: u64
+    draining_generation: u64
+    remaining_inflight: u32
+    state_revision: u64
+    composition_digest: KpfDigest256
+
+pub class IdeToolingGenerationOwnerV1:
+    var active: IdeToolingPilotDeploymentV1
+    var active_state: IdeToolingDocumentStateV1
+    var draining: IdeToolingPilotDeploymentV1
+    var draining_state: IdeToolingDocumentStateV1
+    var has_draining: bool
+    var draining_inflight: u32
+    var sequence: u64
+    var transaction_id: u64
+    receipt_capacity: u32
+    receipts: [IdeToolingGenerationEventV1]
+
+fn empty_deployment() -> IdeToolingPilotDeploymentV1:
+    val empty_generation = ide_tooling_pilot_generation_v1(
+        0, KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0),
+        0, 1, false, 0, 0, 0, 0,
+    )
+    ide_tooling_pilot_seal_v1(empty_generation)
+
+fn migrated_state(
+    active: IdeToolingGenerationOwnerV1,
+    candidate: IdeToolingPilotGenerationV1,
+) -> IdeToolingDocumentStateV1:
+    IdeToolingDocumentStateV1(
+        schema_major: candidate.document_schema_major,
+        schema_minor: candidate.document_schema_minor,
+        revision: active.active_state.revision,
+        open_document_count: active.active_state.open_document_count,
+        diagnostic_epoch: active.active_state.diagnostic_epoch + 1,
+        migrated_from_generation: active.active.generation.policy.generation,
+    )
+
+impl IdeToolingGenerationOwnerV1:
+    pub static fn create(
+        active: IdeToolingPilotDeploymentV1,
+        state: IdeToolingDocumentStateV1,
+        receipt_capacity: u32,
+    ) -> IdeToolingGenerationOwnerV1:
+        IdeToolingGenerationOwnerV1(
+            active: active,
+            active_state: state,
+            draining: empty_deployment(),
+            draining_state: state,
+            has_draining: false,
+            draining_inflight: 0,
+            sequence: 0,
+            transaction_id: 0,
+            receipt_capacity: receipt_capacity,
+            receipts: [],
+        )
+
+    fn _event(
+        phase: IdeToolingGenerationPhaseV1,
+        status: IdeToolingGenerationStatusV1,
+        candidate_generation: u64,
+    ) -> IdeToolingGenerationEventV1:
+        IdeToolingGenerationEventV1(
+            sequence: self.sequence + 1,
+            transaction_id: self.transaction_id,
+            phase: phase,
+            status: status,
+            active_generation: self.active.generation.policy.generation,
+            candidate_generation: candidate_generation,
+            draining_generation: if self.has_draining: self.draining.generation.policy.generation else: 0,
+            remaining_inflight: self.draining_inflight,
+            state_revision: self.active_state.revision,
+            composition_digest: self.active.generation.policy.composition_digest,
+        )
+
+    me _retain(event: IdeToolingGenerationEventV1) -> IdeToolingGenerationEventV1:
+        self.sequence = event.sequence
+        self.receipts.push(event)
+        event
+
+    fn _has_capacity(count: u32) -> bool:
+        self.receipts.len().to_u32() <= self.receipt_capacity and
+            count <= self.receipt_capacity - self.receipts.len().to_u32()
+
+    me publish_upgrade(
+        candidate: IdeToolingPilotGenerationV1,
+        old_generation_inflight: u32,
+    ) -> IdeToolingGenerationEventV1:
+        self.transaction_id = self.transaction_id + 1
+        val decision = ide_tooling_pilot_try_upgrade_v1(self.active, candidate)
+        if not decision.status.accepted():
+            val event = self._event(
+                IdeToolingGenerationPhaseV1.RolledBack,
+                IdeToolingGenerationStatusV1.UpgradeRejected,
+                candidate.policy.generation,
+            )
+            if self._has_capacity(1): return self._retain(event)
+            return event
+        if self.has_draining:
+            return self._event(
+                IdeToolingGenerationPhaseV1.RolledBack,
+                IdeToolingGenerationStatusV1.PreviousGenerationDraining,
+                candidate.policy.generation,
+            )
+        if not self._has_capacity(3):
+            return self._event(
+                IdeToolingGenerationPhaseV1.RolledBack,
+                IdeToolingGenerationStatusV1.ReceiptCapacityExceeded,
+                candidate.policy.generation,
+            )
+
+        val next_state = migrated_state(self, candidate)
+        self._retain(IdeToolingGenerationEventV1(
+            sequence: self.sequence + 1,
+            transaction_id: self.transaction_id,
+            phase: IdeToolingGenerationPhaseV1.StateMigrated,
+            status: IdeToolingGenerationStatusV1.Accepted,
+            active_generation: self.active.generation.policy.generation,
+            candidate_generation: candidate.policy.generation,
+            draining_generation: 0,
+            remaining_inflight: old_generation_inflight,
+            state_revision: next_state.revision,
+            composition_digest: candidate.policy.composition_digest,
+        ))
+
+        val old_active = self.active
+        val old_state = self.active_state
+        self.active = ide_tooling_pilot_seal_v1(candidate)
+        self.active_state = next_state
+        self.draining = old_active
+        self.draining_state = old_state
+        self.has_draining = true
+        self.draining_inflight = old_generation_inflight
+        self._retain(self._event(
+            IdeToolingGenerationPhaseV1.Published,
+            IdeToolingGenerationStatusV1.Accepted,
+            candidate.policy.generation,
+        ))
+        self._retain(self._event(
+            IdeToolingGenerationPhaseV1.Draining,
+            IdeToolingGenerationStatusV1.Accepted,
+            candidate.policy.generation,
+        ))
+
+    me drain_old_generation(completed: u32) -> IdeToolingGenerationEventV1:
+        if not self.has_draining:
+            return self._event(
+                IdeToolingGenerationPhaseV1.Retired,
+                IdeToolingGenerationStatusV1.DrainUnavailable,
+                self.active.generation.policy.generation,
+            )
+        if completed > self.draining_inflight:
+            return self._event(
+                IdeToolingGenerationPhaseV1.Draining,
+                IdeToolingGenerationStatusV1.DrainCountInvalid,
+                self.active.generation.policy.generation,
+            )
+        if not self._has_capacity(1):
+            return self._event(
+                IdeToolingGenerationPhaseV1.Draining,
+                IdeToolingGenerationStatusV1.ReceiptCapacityExceeded,
+                self.active.generation.policy.generation,
+            )
+        self.draining_inflight = self.draining_inflight - completed
+        if self.draining_inflight > 0:
+            return self._retain(self._event(
+                IdeToolingGenerationPhaseV1.Draining,
+                IdeToolingGenerationStatusV1.Accepted,
+                self.active.generation.policy.generation,
+            ))
+        val retired_generation = self.draining.generation.policy.generation
+        self.has_draining = false
+        val event = self._event(
+            IdeToolingGenerationPhaseV1.Retired,
+            IdeToolingGenerationStatusV1.Accepted,
+            retired_generation,
+        )
+        val retained = self._retain(event)
+        self.draining = empty_deployment()
+        self.draining_state = self.active_state
+        retained
+
+    me rollback_published_generation() -> IdeToolingGenerationEventV1:
+        if not self.has_draining:
+            return self._event(
+                IdeToolingGenerationPhaseV1.RolledBack,
+                IdeToolingGenerationStatusV1.RollbackUnavailable,
+                self.active.generation.policy.generation,
+            )
+        if not self._has_capacity(1):
+            return self._event(
+                IdeToolingGenerationPhaseV1.RolledBack,
+                IdeToolingGenerationStatusV1.ReceiptCapacityExceeded,
+                self.active.generation.policy.generation,
+            )
+        val failed_generation = self.active.generation.policy.generation
+        self.active = self.draining
+        self.active_state = self.draining_state
+        self.has_draining = false
+        self.draining_inflight = 0
+        val retained = self._retain(self._event(
+            IdeToolingGenerationPhaseV1.RolledBack,
+            IdeToolingGenerationStatusV1.Accepted,
+            failed_generation,
+        ))
+        self.draining = empty_deployment()
+        self.draining_state = self.active_state
+        retained

@@ -66,6 +66,18 @@ The bounded substrate uses generational slot maps, fixed request/completion/even
 - **IDE:** existing editor extension API becomes a compatibility facade. VS Code and SVIM/Simple IDE consume the same versioned document snapshots, diagnostics, fixes, tests, and commands.
 - **MDSOC++:** a product sealer binds feature and layer facets, validates authority/memory/concurrency, and emits startup, upgrade, rollback, and proof artifacts.
 
+### MDSOC++ product-generation authority
+
+The IDE/tooling pilot uses one mutable product-generation owner. It prepares and
+migrates candidate state before publication, then publishes the new active
+generation and the old draining generation in one non-yielding owner method.
+Readers therefore observe either the old pair or the new pair, never a mixed
+composition/state binding. The old deployment and its exact state snapshot stay
+retained while requests remain pinned. Drain completion retires that snapshot;
+rollback is legal only before retirement and restores the retained deployment
+and state together. Every accepted transition has a bounded retained receipt,
+and insufficient receipt capacity rejects before publication.
+
 ## Safety And Failure Policy
 
 - Configuration and SCI decoding are inert.
