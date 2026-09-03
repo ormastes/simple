@@ -31,20 +31,46 @@ bootstrap_planner_v2_verify "$planner_admission" "$root" || exit 64
 
 platform=$(bootstrap_stage3_host_platform)
 stage3="$output/stage3/$platform"
-stage2="$output/stage2/$platform/simple"
-admitted="$stage3/stage2-admitted/simple"
+# Windows artifact naming.  bootstrap-from-scratch.sh already derives these
+# (exe_suffix at :870/:877, archive_prefix/archive_suffix at :871/:872 and
+# :902-906) and every Stage-2 artifact on disk is named accordingly:
+#   simple.exe, simple.exe.inputs.sha256, simple_native_all.lib,
+#   simple_compiler_backfill.lib
+# This script hardcoded the POSIX names, so on Windows its very first
+# fail-closed input check aborted with (measured 2026-09-03, MSVC lane):
+#   ERROR - nothing was checked (required Stage-2 input missing or is a
+#   symlink: .../stage2-runtime-authority/simple.inputs.sha256)
+# i.e. Stage 3 resume had never been runnable on Windows at all.  The stage2
+# transcript confirms the convention is a full path INCLUDING the suffix:
+# `-o /d/.../build/bootstrap/stage2/x86_64-pc-windows-msvc/simple.exe`.
+#
+# CROSS-PLATFORM IMPACT: none.  A non-Windows $platform (e.g.
+# x86_64-unknown-linux-gnu) matches no case arm, so the suffix stays empty and
+# the prefix/suffix stay lib/.a -- every variable below expands to the exact
+# string it had before.
+bootstrap_stage3_exe=''
+bootstrap_stage3_arpre=lib
+bootstrap_stage3_arsuf=.a
+case "$platform" in
+    *-windows-*) bootstrap_stage3_exe=.exe ;;
+esac
+case "$platform" in
+    *-windows-msvc) bootstrap_stage3_arpre=''; bootstrap_stage3_arsuf=.lib ;;
+esac
+stage2="$output/stage2/$platform/simple$bootstrap_stage3_exe"
+admitted="$stage3/stage2-admitted/simple$bootstrap_stage3_exe"
 stage2_admission="$stage3/stage2-admitted/admission.env"
 runtime="$stage3/stage2-runtime-authority"
-seed="$runtime/simple"
+seed="$runtime/simple$bootstrap_stage3_exe"
 stamp="$seed.inputs.sha256"
-native_all="$runtime/libsimple_native_all.a"
-backfill="$runtime/libsimple_compiler_backfill.a"
+native_all="$runtime/${bootstrap_stage3_arpre}simple_native_all${bootstrap_stage3_arsuf}"
+backfill="$runtime/${bootstrap_stage3_arpre}simple_compiler_backfill${bootstrap_stage3_arsuf}"
 stage2_sanity="$stage3/stage2-sanity.env"
 stage2_receiver="$stage3/stage2-receiver.env"
 stage2_receiver_log="$stage3/stage2-receiver.log"
 stage2_transcript="$stage3/stage2-command.transcript"
 stage2_log="$output/logs/$platform/stage2-native-build.log"
-candidate="$stage3/simple"
+candidate="$stage3/simple$bootstrap_stage3_exe"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
