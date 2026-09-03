@@ -1,4 +1,7 @@
 use compiler.driver.driver_build.incremental.{FileFingerprint, native_build_compiler_identity}
+use compiler.common.driver_compile_options.{
+    CompileOptions, compileoptions_normalize_mir_optimization
+}
 use std.common.crypto.sha256.{sha256_text}
 use std.io.{file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
@@ -17,6 +20,38 @@ extern fn rt_exit(code: i64)
 val NATIVE_NOOP_SCHEMA_V1: text = "simple-native-noop-admission-v1"
 val NATIVE_NOOP_MAX_RECEIPT_BYTES_V1: i64 = 64 * 1024 * 1024
 val NATIVE_NOOP_MAX_INPUTS_V1: i64 = 1000000
+
+fn native_noop_normalized_invocation_v1(
+    raw: CompileOptions, output_path: text
+) -> text:
+    val options = compileoptions_normalize_mir_optimization(raw)
+    val aspect = options.aspect_params
+    var inputs = "{options.input_files.len()};"
+    for input in options.input_files:
+        inputs = inputs + "{input.len()}:{input}"
+    var families = "{options.allowed_families.len()};"
+    for family in options.allowed_families.sorted():
+        families = families + "{family.len()}:{family}"
+    sha256_text([
+        options.mode.to_text(), inputs, output_path, options.output_format.to_text(),
+        options.optimize.to_text(), (options.opt_level ?? -1).to_text(),
+        options.release.to_text(), options.debug_info.to_text(),
+        options.verbose.to_text(), options.log_level.to_text(), options.profile,
+        options.no_borrow_check.to_text(), options.backend, options.native_target,
+        options.backend_plugin_path, options.interpreter_mode, options.gc_off.to_text(),
+        options.smf_output_mode, options.low_memory.to_text(), options.debug_trace_level,
+        options.coverage_enabled.to_text(), options.mcdc_mode_text,
+        options.mcdc_owner_bytes.to_text(), options.mcdc_global_bytes.to_text(),
+        families, options.build_mode, options.cli_mode_text,
+        options.bootstrap_input_count.to_text(), options.bootstrap_input_0,
+        options.bootstrap_input_1, options.bootstrap_input_2, options.bootstrap_input_3,
+        options.bootstrap_input_4, options.bootstrap_input_5, options.riscv_gen2_target,
+        aspect.hdr.schema_name, aspect.hdr.schema_major.to_text(),
+        aspect.hdr.schema_minor.to_text(), aspect.hdr.present.to_text(),
+        aspect.log_calls.to_text(), aspect.log_assignments.to_text(),
+        aspect.compile_log_level.to_text(), aspect.runtime_log_level.to_text(),
+        aspect.mcdc_mode, aspect.mcdc_manifest_sha256,
+    ].join("|"))
 
 struct NativeNoopRequestV1:
     root: text
@@ -77,6 +112,18 @@ fn native_noop_request_v1(
 fn native_noop_generation_path_v1(request: NativeNoopRequestV1, generation: text) -> text:
     "{request.root}/{request.identity}/generations/{generation}.receipt"
 
+fn native_noop_generation_authenticated_v1(content: text, generation: text) -> bool:
+    val lines = content.split("\n")
+    if lines.len() < 9 or lines[0] != NATIVE_NOOP_SCHEMA_V1 or
+            lines[1] != "generation={generation}" or
+            not lines[2].starts_with("content-digest=") or
+            not lines[4].starts_with("parent="):
+        return false
+    val body = lines.slice(3).join("\n")
+    val digest = lines[2].substring(15)
+    sha256_text(body) == digest and sha256_text(
+        "{NATIVE_NOOP_SCHEMA_V1}|{lines[4].substring(7)}|{digest}") == generation
+
 fn native_noop_encode_v1(
     request: NativeNoopRequestV1, parent: text, generation: text,
     source_paths: [text], output_fingerprint: text
@@ -117,6 +164,8 @@ fn native_noop_admit_v1(request: NativeNoopRequestV1) -> NativeNoopAdmissionV1:
         NATIVE_NOOP_MAX_RECEIPT_BYTES_V1)
     if receipt == nil:
         return NativeNoopAdmissionV1(false, "generation-missing", current!, 0)
+    if not native_noop_generation_authenticated_v1(receipt!, current!):
+        return NativeNoopAdmissionV1(false, "generation-authentication-failed", current!, 0)
     val lines = receipt!.split("\n")
     if lines.len() < 9 or lines[0] != NATIVE_NOOP_SCHEMA_V1 or
             lines[1] != "generation={current!}" or
@@ -163,6 +212,19 @@ fn native_noop_crash_v1(fault: text, point: text):
     if fault == point:
         rt_exit(86)
 
+fn native_noop_exclusive_stage_v1(
+    base: text, content: text, seed: text
+) -> text:
+    var attempt: i64 = 0
+    while attempt < 8:
+        val nonce = sha256_text(
+            "{rt_getpid()}|{rt_time_monotonic_ns()}|{seed}|{attempt}")
+        val candidate = "{base}.tmp.{nonce}"
+        if file_create_excl(candidate, content):
+            return candidate
+        attempt = attempt + 1
+    ""
+
 fn native_noop_publish_fault_v1(
     request: NativeNoopRequestV1, source_paths: [text], fault: text
 ) -> text:
@@ -176,6 +238,14 @@ fn native_noop_publish_fault_v1(
     if lock < 0:
         return "publication-lock-unavailable"
     val parent = rt_file_read_regular_no_follow_bounded("{root}/CURRENT", 128) ?? ""
+    if parent != "":
+        val parent_content = rt_file_read_regular_no_follow_bounded(
+            native_noop_generation_path_v1(request, parent),
+            NATIVE_NOOP_MAX_RECEIPT_BYTES_V1)
+        if parent_content == nil or
+                not native_noop_generation_authenticated_v1(parent_content!, parent):
+            val _ = file_unlock(lock)
+            return "parent-generation-invalid"
     val sources = native_noop_sorted_unique_v1(source_paths)
     var body_rows: [text] = [
         "request={request.identity}", "parent={parent}",
@@ -197,10 +267,17 @@ fn native_noop_publish_fault_v1(
         val _ = file_unlock(lock)
         return "receipt-invalid"
     val generation_path = native_noop_generation_path_v1(request, generation)
-    if not rt_file_exists(generation_path):
-        val nonce = sha256_text("{rt_getpid()}|{rt_time_monotonic_ns()}|{generation}")
-        val staged = "{generation_path}.tmp.{nonce}"
-        if not file_create_excl(staged, encoded):
+    if rt_file_exists(generation_path):
+        val existing = rt_file_read_regular_no_follow_bounded(
+            generation_path, NATIVE_NOOP_MAX_RECEIPT_BYTES_V1)
+        if existing == nil or existing! != encoded or
+                not native_noop_generation_authenticated_v1(existing!, generation):
+            val _ = file_unlock(lock)
+            return "immutable-generation-conflict"
+    else:
+        val staged = native_noop_exclusive_stage_v1(
+            generation_path, encoded, generation)
+        if staged == "":
             val _ = file_unlock(lock)
             return "exclusive-stage-conflict"
         native_noop_crash_v1(fault, "generation-write")
@@ -209,14 +286,17 @@ fn native_noop_publish_fault_v1(
             val _ = file_unlock(lock)
             return "generation-publication-failed"
         native_noop_crash_v1(fault, "generation-rename")
-        if not rt_file_rename(staged, generation_path) or not rt_file_fsync("{root}/generations"):
+        if not rt_file_rename(staged, generation_path):
             rt_file_delete(staged)
             val _ = file_unlock(lock)
             return "generation-publication-failed"
-    val pointer_nonce = sha256_text(
-        "pointer|{rt_getpid()}|{rt_time_monotonic_ns()}|{generation}")
-    val pointer_stage = "{root}/CURRENT.tmp.{pointer_nonce}"
-    if not file_create_excl(pointer_stage, generation):
+        native_noop_crash_v1(fault, "generation-renamed-before-dir-fsync")
+        if not rt_file_fsync("{root}/generations"):
+            val _ = file_unlock(lock)
+            return "generation-publication-failed"
+    val pointer_stage = native_noop_exclusive_stage_v1(
+        "{root}/CURRENT", generation, "pointer|{generation}")
+    if pointer_stage == "":
         val _ = file_unlock(lock)
         return "exclusive-pointer-stage-conflict"
     native_noop_crash_v1(fault, "pointer-write")
@@ -225,8 +305,12 @@ fn native_noop_publish_fault_v1(
         val _ = file_unlock(lock)
         return "pointer-publication-failed"
     native_noop_crash_v1(fault, "pointer-rename")
-    if not rt_file_rename(pointer_stage, "{root}/CURRENT") or not rt_file_fsync(root):
+    if not rt_file_rename(pointer_stage, "{root}/CURRENT"):
         rt_file_delete(pointer_stage)
+        val _ = file_unlock(lock)
+        return "pointer-publication-failed"
+    native_noop_crash_v1(fault, "pointer-renamed-before-dir-fsync")
+    if not rt_file_fsync(root):
         val _ = file_unlock(lock)
         return "pointer-publication-failed"
     val _ = file_unlock(lock)
@@ -247,9 +331,16 @@ fn native_noop_admission_input_count_v1(admission: NativeNoopAdmissionV1) -> i64
 fn native_noop_request_output_v1(request: NativeNoopRequestV1) -> text:
     request.output_path
 
+fn native_noop_request_generation_path_v1(
+    request: NativeNoopRequestV1, generation: text
+) -> text:
+    native_noop_generation_path_v1(request, generation)
+
 export NativeNoopRequestV1, NativeNoopAdmissionV1
 export native_noop_request_v1, native_noop_admit_v1, native_noop_publish_v1
 export native_noop_publish_fault_v1
 export native_noop_admission_hit_v1, native_noop_admission_generation_v1
 export native_noop_admission_reason_v1, native_noop_admission_input_count_v1
 export native_noop_request_output_v1
+export native_noop_request_generation_path_v1
+export native_noop_normalized_invocation_v1
