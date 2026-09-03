@@ -81,6 +81,17 @@ pub struct KpfPinnedUnloadEvidenceV1:
     collected_status: KpfSyncStatus
     pin_release_status: KpfSyncStatus
 
+pub struct KpfLifecycleMatrixEvidenceV1:
+    failed_identity_status: KpfSyncStatus
+    failed_capacity_status: KpfSyncStatus
+    active_after_failures: KpfGenerationHandle
+    second_pin_status: KpfSyncStatus
+    collect_active_status: KpfSyncStatus
+    rollback_status: KpfSyncStatus
+    collect_rolled_back_candidate_status: KpfSyncStatus
+    collect_again_status: KpfSyncStatus
+    stale_pin_release_status: KpfSyncStatus
+
 pub fn kpf_pinned_unload_evidence_v1() -> KpfPinnedUnloadEvidenceV1:
     val table = KpfGenerationTable.create(2, 1)
     val first = table.publish(
@@ -99,6 +110,43 @@ pub fn kpf_pinned_unload_evidence_v1() -> KpfPinnedUnloadEvidenceV1:
         denied_status: denied,
         collected_status: collected,
         pin_release_status: released)
+
+pub fn kpf_lifecycle_matrix_evidence_v1() -> KpfLifecycleMatrixEvidenceV1:
+    val table = KpfGenerationTable.create(2, 1)
+    val first = table.publish(
+        KpfId128(hi: 121, lo: 122),
+        KpfDigest256(w0: 123, w1: 124, w2: 125, w3: 126),
+        1)
+    val pin = table.pin(first.current)
+    val second_pin = table.pin(first.current)
+    val invalid = table.publish(
+        KpfId128(hi: 0, lo: 0),
+        KpfDigest256(w0: 131, w1: 132, w2: 133, w3: 134),
+        2)
+    val second = table.publish(
+        KpfId128(hi: 141, lo: 142),
+        KpfDigest256(w0: 143, w1: 144, w2: 145, w3: 146),
+        2)
+    val capacity = table.publish(
+        KpfId128(hi: 151, lo: 152),
+        KpfDigest256(w0: 153, w1: 154, w2: 155, w3: 156),
+        3)
+    val collect_active = table.collect(second.current)
+    table.release_pin(pin.handle)
+    val rollback = table.rollback(first.current)
+    val collect_candidate = table.collect(second.current)
+    val collect_again = table.collect(second.current)
+    val stale_release = table.release_pin(pin.handle)
+    KpfLifecycleMatrixEvidenceV1(
+        failed_identity_status: invalid.status,
+        failed_capacity_status: capacity.status,
+        active_after_failures: capacity.previous,
+        second_pin_status: second_pin.status,
+        collect_active_status: collect_active,
+        rollback_status: rollback.status,
+        collect_rolled_back_candidate_status: collect_candidate,
+        collect_again_status: collect_again,
+        stale_pin_release_status: stale_release)
 
 pub fn kpf_overwrite_terminal_mutation_detected_v1() -> bool:
     val arbiter = KpfTerminalArbiterV1.create()
@@ -138,3 +186,10 @@ pub fn kpf_failed_candidate_gate_mutant_exposed_v1() -> bool:
         2)
     mutated.status == KpfSyncStatus.Ok and
         (mutated.current.index != first.current.index or mutated.current.epoch != first.current.epoch)
+
+pub fn kpf_lifecycle_matrix_mutant_exposed_v1() -> bool:
+    val evidence = kpf_lifecycle_matrix_evidence_v1()
+    val mutated_unload_accepts_active = evidence.collect_active_status == KpfSyncStatus.Ok
+    val mutated_reuses_stale_pin = evidence.stale_pin_release_status == KpfSyncStatus.Ok
+    not mutated_unload_accepts_active and not mutated_reuses_stale_pin and
+        evidence.collect_again_status == KpfSyncStatus.StaleHandle
