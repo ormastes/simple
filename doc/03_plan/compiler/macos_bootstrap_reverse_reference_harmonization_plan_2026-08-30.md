@@ -38,6 +38,11 @@ implemented, but its one mutation run exposed a case-sensitive document check.
 That check is corrected but not rerun, and real arm64/x86_64 baseline/sample
 receipts remain absent.
 
+**2026-09-03 independent HEAD audit:** the portable
+`MacosBootstrapReceiptV1` schema and mutation-sensitive admission tests now
+exist. Collector integration and native M0/M4/M5 evidence remain incomplete;
+see `doc/09_report/compiler/macos_bootstrap_plan_independent_head_audit_2026-09-03.md`.
+
 **Source plan:** `simple_compiler_performance_kernel_plugin_merged_plan_2026-08-30.md`
 exists on unintegrated commit `7d4aac717e5`; this plan audits that immutable
 version against authoritative source revision `92d86bac0c8`.
