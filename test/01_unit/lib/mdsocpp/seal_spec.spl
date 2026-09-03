@@ -1,0 +1,85 @@
+# Purpose: mutation-sensitive evidence for deterministic MDSOC++ composition sealing.
+# @req REQ-KPF-MDSOCPP-SEAL
+# @cover src/lib/mdsocpp 90%
+
+use std.spec
+use std.spec.step
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use common.kernel_plugin.contracts.*
+use std.mdsocpp.*
+
+fn id(value: u64) -> KpfId128: KpfId128(hi: 0, lo: value)
+fn memory(bytes: u64) -> KpfMemoryContractV1:
+    KpfMemoryContractV1(memory_class: KPF_MEMORY_NOGC_BOUNDED, initialization_bytes: 0, persistent_bytes_per_instance: bytes, bytes_per_session: 0, bytes_per_inflight_request: 0, input_alignment: 8, output_alignment: 8, maximum_sessions: 1, maximum_inflight_per_session: 1, maximum_batch_items: 1, may_allocate_after_activation: 0, reserved0: 0)
+fn concurrency(calls: u32) -> KpfConcurrencyContractV1:
+    KpfConcurrencyContractV1(mode: KPF_CONCURRENCY_SNAPSHOT_READ_PARALLEL, reentrancy: KPF_REENTRANCY_FORBIDDEN, maximum_concurrent_calls: calls, deterministic_completion: 1, reserved0: 0)
+fn capsule(capsule_id: u64, offers: [u64], requires: [u64]) -> CapsuleDescriptorV1:
+    var provided: [MdsocppFacetOfferV1] = []
+    var needed: [MdsocppFacetRequirementV1] = []
+    var index = 0
+    while index < offers.len():
+        provided.push(MdsocppFacetOfferV1(facet_id: id(offers[index])))
+        index = index + 1
+    index = 0
+    while index < requires.len():
+        needed.push(MdsocppFacetRequirementV1(facet_id: id(requires[index]), optional: false))
+        index = index + 1
+    CapsuleDescriptorV1(capsule_id: id(capsule_id), closure: MdsocppClosure.Static, provided_facets: provided, required_facets: needed, required_capability_bits: 1, memory: memory(10), concurrency: concurrency(2), uses_ecs: false, state_migrations: [])
+fn policy() -> MdsocppSealPolicyV1:
+    MdsocppSealPolicyV1(profile: MdsocppProfile.Userland, critical: true, granted_capability_bits: 3, memory_budget_bytes: 100, maximum_concurrent_calls: 4, generation: 7, composition_digest: KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 4))
+
+describe "MDSOC++ deterministic seal":
+    it "orders dependencies before consumers and reverses shutdown":
+        step("Seal an intentionally unsorted graph")
+        val result = mdsocpp_seal_v1([capsule(30, [], [20]), capsule(20, [20], [10]), capsule(10, [10], [])], policy())
+        assert_true(result.status.accepted())
+        assert_equal(result.receipt.generation, 7u64)
+        assert_equal(result.receipt.capsule_count, 3u32)
+        assert_equal(result.receipt.binding_count, 2u32)
+        assert_equal(result.receipt.total_memory_bytes, 30u64)
+        assert_equal(result.receipt.startup_slots, [2u32, 1u32, 0u32])
+        assert_equal(result.receipt.shutdown_slots, [0u32, 1u32, 2u32])
+
+    it "uses persistent identity as deterministic tie breaker":
+        step("Mutation guard: input ordering must not decide independent startup order")
+        val result = mdsocpp_seal_v1([capsule(30, [], []), capsule(10, [], []), capsule(20, [], [])], policy())
+        assert_equal(result.receipt.startup_slots, [1u32, 2u32, 0u32])
+
+describe "MDSOC++ fail-closed graph and policy":
+    it "rejects missing facets, duplicate providers, and cycles":
+        step("Mutation guard: every required facet must resolve exactly once")
+        assert_equal(mdsocpp_seal_v1([capsule(1, [], [9])], policy()).status, MdsocppSealStatus.MissingFacet)
+        assert_equal(mdsocpp_seal_v1([capsule(1, [9], []), capsule(2, [9], [])], policy()).status, MdsocppSealStatus.DuplicateFacet)
+        assert_equal(mdsocpp_seal_v1([capsule(1, [1], [2]), capsule(2, [2], [1])], policy()).status, MdsocppSealStatus.DependencyCycle)
+
+    it "rejects denied capabilities, memory, concurrency, and Dyn critical capsules":
+        step("Mutation guard: removing any policy gate admits an invalid composition")
+        var value = capsule(1, [], [])
+        value.required_capability_bits = 4
+        assert_equal(mdsocpp_seal_v1([value], policy()).status, MdsocppSealStatus.CapabilityDenied)
+        value = capsule(1, [], [])
+        value.memory.persistent_bytes_per_instance = 101
+        assert_equal(mdsocpp_seal_v1([value], policy()).status, MdsocppSealStatus.MemoryBudgetExceeded)
+        value = capsule(1, [], [])
+        value.concurrency.maximum_concurrent_calls = 5
+        assert_equal(mdsocpp_seal_v1([value], policy()).status, MdsocppSealStatus.ConcurrencyRejected)
+        value = capsule(1, [], [])
+        value.closure = MdsocppClosure.Dyn
+        assert_equal(mdsocpp_seal_v1([value], policy()).status, MdsocppSealStatus.DynamicCriticalRejected)
+        var mission = policy()
+        mission.critical = false
+        mission.profile = MdsocppProfile.MissionCritical
+        assert_equal(mdsocpp_seal_v1([value], mission).status, MdsocppSealStatus.DynamicCriticalRejected)
+
+    it "keeps ECS private to userland and validates state migrations":
+        step("Reject ECS in kernel and reject a custom migration without an operation")
+        var value = capsule(1, [], [])
+        value.uses_ecs = true
+        var restricted = policy()
+        restricted.profile = MdsocppProfile.Kernel
+        assert_equal(mdsocpp_seal_v1([value], restricted).status, MdsocppSealStatus.EcsProfileRejected)
+        value = capsule(1, [], [])
+        value.state_migrations = [MdsocppStateMigrationV1(state_schema_id: id(5), from_major: 1, from_minor: 0, to_major: 2, to_minor: 0, kind: MdsocppMigrationKind.Custom, migration_operation_id: id(0))]
+        assert_equal(mdsocpp_seal_v1([value], policy()).status, MdsocppSealStatus.MigrationIncompatible)
+        value.state_migrations = [MdsocppStateMigrationV1(state_schema_id: id(5), from_major: 1, from_minor: 0, to_major: 2, to_minor: 0, kind: MdsocppMigrationKind.Custom, migration_operation_id: id(99))]
+        assert_true(mdsocpp_seal_v1([value], policy()).status.accepted())
