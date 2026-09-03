@@ -8,16 +8,21 @@ use compiler.driver.action_graph.coordinator.{
 }
 use compiler.driver.action_graph.persisted_graph.{PersistedBuildGraphV1}
 use compiler.driver.action_graph.demand_compile_integration.{
-    demand_compile_begin_v1, demand_compile_complete_scc_outputs_v1
+    DemandCompileExecutionV1, demand_compile_begin_v1, demand_compile_complete_action_v1,
+    demand_compile_complete_scc_outputs_v1
 }
-use compiler.driver.action_graph.scc_compile_outputs.{SccCompileOutputsV1}
+use compiler.driver.action_graph.scc_compile_outputs.{
+    SccCompileOutputsV1, SccModuleCompileOutputV1
+}
 use compiler.driver.backend.demand_backend_plan.{
     DemandBackendIdentityV1, ForegroundBackendBudgetV1,
     PrecompiledPlatformIdentityV1
 }
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
 use compiler.driver.cache.package_index_route.{PackageIndexRouteV1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
 use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
+use std.common.crypto.sha256.{sha256_text}
 
 fn action(action_id: text, dependencies: [text], memory: i64) -> BuildActionV1:
     BuildActionV1(
@@ -29,7 +34,89 @@ fn coordinator(actions: [BuildActionV1], max_running: i64, memory: i64) -> Build
         PersistedBuildGraphV1("generation-1", "", "snapshot-1", actions),
         [BuildPoolBudgetV1(BuildActionPoolV1.semantic, max_running, memory)])
 
+fn demand_execution(source_path: text) -> DemandCompileExecutionV1:
+    demand_compile_begin_v1(
+        PackageIndexRouteV1(true, "ok", [source_path], [], [], []),
+        DemandBackendIdentityV1(
+            sha256_text("revision"), sha256_text("tree"),
+            sha256_text("inventory"), sha256_text("semantic"),
+            "host", sha256_text("variant"),
+            PrecompiledPlatformIdentityV1(
+                sha256_text("runtime-action"), sha256_text("runtime-abi"),
+                sha256_text("std-action"), sha256_text("std-abi"))),
+        ForegroundBackendBudgetV1(1, 64, 1000, false),
+        true, false, false, 7)
+
+fn publication_authority() -> PackageArchiveAuthorityV1:
+    PackageArchiveAuthorityV1(
+        sha256_text("producer"), "generation", sha256_text("variant"),
+        sha256_text("revision"), sha256_text("tree"), sha256_text("inventory"))
+
+fn publication_admission() -> MirAdmissionV1:
+    MirAdmissionV1(
+        1, sha256_text("revision"), sha256_text("tree"),
+        sha256_text("inventory"), sha256_text("closure"),
+        sha256_text("dependencies"), 0)
+
+fn publication_outputs(source_path: text) -> SccCompileOutputsV1:
+    val action_content = "compiled-action"
+    val interface_content = "compiled-interface"
+    val package_image = "compiled-package-image"
+    val baseline_digest = sha256_text("baseline")
+    val entry = PackageModuleIndexEntryV1(
+        "pkg", "pkg.main", source_path, sha256_text("source"),
+        sha256_text(interface_content), sha256_text("export"),
+        sha256_text("abi"), sha256_text("initializer"),
+        sha256_text("provider"), sha256_text(action_content),
+        sha256_text("manifest"), "scc", [], [])
+    SccCompileOutputsV1("scc", ["pkg.main"], [SccModuleCompileOutputV1(
+        entry, package_image, sha256_text(package_image),
+        interface_content, sha256_text(interface_content),
+        action_content, sha256_text(action_content), [],
+        sha256_text("dependency-receipt"), sha256_text("read-set"),
+        sha256_text("dependencies"), "baseline", baseline_digest, [],
+        "source:{source_path}", true, "/tmp/pkg-main.o", "")])
+
+fn link_elapsed(execution: DemandCompileExecutionV1) -> i64:
+    for phase in execution.counters.phases:
+        if phase.phase == "link":
+            return phase.elapsed_ns
+    -1
+
 describe "Demand compile owner-result completion":
+    it "should publish successfully before recording the link counter":
+        val source_path = "snapshot/pkg/main.spl"
+        val execution = demand_execution(source_path)
+        val completed = demand_compile_complete_action_v1(
+            execution, "source:{source_path}", "source-owner",
+            true, false, "object", [], 32)
+        expect(completed.accepted).to_equal(true)
+        expect(link_elapsed(completed.execution)).to_equal(0)
+        val published = demand_compile_complete_scc_outputs_v1(
+            completed.execution, "/tmp/simple-demand-scc-owner-success-v1",
+            publication_authority(), publication_admission(),
+            publication_outputs(source_path), "baseline", sha256_text("baseline"))
+        expect(published.accepted).to_equal(true)
+        expect(published.reason).to_equal("ok")
+        expect(published.execution.coordinator == nil).to_equal(false)
+        expect(link_elapsed(published.execution) >= 0).to_equal(true)
+
+    it "should return the owner and leave counters unchanged after publication failure":
+        val source_path = "snapshot/pkg/failure.spl"
+        val execution = demand_execution(source_path)
+        val completed = demand_compile_complete_action_v1(
+            execution, "source:{source_path}", "source-owner",
+            true, false, "object", [], 32)
+        val before_link = link_elapsed(completed.execution)
+        val rejected = demand_compile_complete_scc_outputs_v1(
+            completed.execution, "/dev/null/unwritable-cache",
+            publication_authority(), publication_admission(),
+            publication_outputs(source_path), "baseline", sha256_text("baseline"))
+        expect(rejected.accepted).to_equal(false)
+        expect(rejected.reason).to_equal("publication-rejected")
+        expect(rejected.execution.coordinator == nil).to_equal(false)
+        expect(link_elapsed(rejected.execution)).to_equal(before_link)
+
     it "should return the execution owner when SCC publication is rejected":
         step("Create a valid demand execution owner")
         val execution = demand_compile_begin_v1(
