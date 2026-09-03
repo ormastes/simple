@@ -5767,15 +5767,26 @@ pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeVal
         return rt_array_new(0);
     }
 
-    let result = rt_array_new(count as u64);
+    // Uninitialized, NOT alloc_zeroed: every slot is overwritten by the fill
+    // below, so zeroing first is a second full pass over the buffer. That is
+    // free for small arrays and very much not for large ones — a
+    // `[0u32; 7680*4320]` framebuffer is 265 MB of RuntimeValue slots
+    // (537 MB at 8192x8192), and the redundant pass was measured at ~150 ms
+    // and ~282 ms respectively.
+    let result = rt_array_new_uninit(count as u64);
     if result.is_nil() {
         return result;
     }
 
     let arr = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, result);
     unsafe {
+        // Fill BEFORE publishing `len`. With an uninitialized buffer a GC scan
+        // that observed len = count would walk arbitrary words as tagged
+        // values; with the old alloc_zeroed they were harmlessly nil. Ordering
+        // is what keeps this safe, so do not hoist the length store.
+        let data = (*arr).data;
+        std::slice::from_raw_parts_mut(data, count as usize).fill(value);
         (*arr).len = count as u64;
-        (*arr).as_mut_slice().fill(value);
     }
     result
 }
