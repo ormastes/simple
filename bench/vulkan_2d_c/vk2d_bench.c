@@ -354,6 +354,19 @@ int main(int argc, char** argv) {
     }
     u64 t1 = now_ns();
 
+    // Raw framebuffer dump for the byte-for-byte comparator. Written AFTER
+    // the frame loop, so it is the same pixels the checksum folded.
+    const char* dump_path = getenv("VK2D_DUMP_FB");
+    if (dump_path && do_readback) {
+        FILE* df = fopen(dump_path, "wb");
+        if (df) {
+            fwrite(fb_pixels, 1, fb_size, df);
+            fclose(df);
+            fprintf(stderr, "dump: wrote %llu bytes to %s\n",
+                (unsigned long long)fb_size, dump_path);
+        }
+    }
+
     if (getenv("VK2D_DEBUG")) {
         // Correctness probe: center + corner pixels must be non-zero after
         // the clear, and at least one rect-colored pixel must exist.
