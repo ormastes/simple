@@ -232,12 +232,27 @@ stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
+# The link-compat shim is host-conditional: bootstrap-from-scratch.sh points
+# LIBRARY_PATH at build/bootstrap/stage3/<platform>/link-compat and records the
+# shim digest whenever it builds one, and the empty/"absent" pair when it does
+# not. Both values are part of the Stage-2 build-args vector the admission
+# receipt commits to, so they must be READ BACK from the transcript exactly like
+# the backend/threads/progress values above. They were hardcoded here as "" and
+# "absent", which silently assumed a no-shim host: on any host that DOES build
+# the shim, the reconstructed vector hashed differently from the recorded one
+# and Stage 3 resume could never start -- and it failed as a bare `return 1`
+# under `set -eu`, printing nothing at all.
+stage2_library_path=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" LIBRARY_PATH) || exit 1
+stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
 if [ -n "$stage2_compile_stack_mib" ]; then
   stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
+  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
@@ -249,7 +264,8 @@ if [ -n "$stage2_compile_stack_mib" ]; then
   --runtime-path "$runtime" -o "$stage2")
 else
   stage2_args=$(bootstrap_stage3_args_sha256 \
-  "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
+  "RUST_LOG=error" "LIBRARY_PATH=$stage2_library_path" \
+  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" "SIMPLE_BINARY=$seed" \
