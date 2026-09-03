@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+storage_roots_init
+
+source_file="$root/src/compiler/00.common/dynamic_identity/kpf_closure.spl"
+checker="$root/scripts/check/check-kpf-extended-enum-sealer.shs"
+scratch="$SIMPLE_WORKTREE_STORAGE_ROOT/test/compiler/kpf-extended-enum-sealer-mutation-$$"
+backup="$scratch/kpf_closure.spl"
+mkdir -p "$scratch"
+cp "$source_file" "$backup"
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+
+sh "$checker" "$backup" >/dev/null
+
+sed 's/if not provides(claim.provided_operations, claim.required_operations\[i\]):/if false and not provides(claim.provided_operations, claim.required_operations[i]):/' \
+    "$backup" >"$scratch/missing-operation.spl"
+if sh "$checker" "$scratch/missing-operation.spl" >/dev/null 2>&1; then
+    echo "missing-operation mutation survived" >&2
+    exit 1
+fi
+
+sed 's/if critical:/if false and critical:/' "$backup" >"$scratch/dyn-critical.spl"
+if sh "$checker" "$scratch/dyn-critical.spl" >/dev/null 2>&1; then
+    echo "critical Dyn-admission mutation survived" >&2
+    exit 1
+fi
+
+echo "PASS KPF extended-enum sealer mutations 2/2 rejected"
