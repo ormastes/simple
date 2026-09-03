@@ -144,8 +144,28 @@ scan_wiring() {
     if [ -s "$_wd/guards" ] && [ -s "$_wd/searchdirs" ]; then
         # xargs -d is not portable; searchdirs are repo-relative and space-free.
         # shellcheck disable=SC2046
-        $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
-            2>/dev/null > "$_wd/reffiles" || :
+        # Prefer ripgrep for this one scan. `grep -F -f` with ~1,500 patterns
+        # is fine on GNU grep (Aho-Corasick) and pathological on the BSD grep
+        # that ships as /usr/bin/grep on macOS. Measured 2026-09-03 on this
+        # tree, identical inputs (1,539 patterns, 943 matching files):
+        #     /usr/bin/grep -r -I -l -F -f   >47 min, still running when killed
+        #     rg -F -f -l --no-ignore --hidden   0.17 s
+        # That is not a micro-optimisation: check-guard-wiring is a BLOCKING
+        # push-tier gate, so on a mac every `git push` sat in this one grep for
+        # an hour or more and looked hung. Output equivalence was verified
+        # before switching — byte-identical file lists from both tools over
+        # config/, bin/, tools/ and .github/. --no-ignore --hidden are required
+        # (.github is a dot-directory and rg honours .gitignore by default);
+        # rg skips binaries like -I and lists names like -l.
+        if command -v rg >/dev/null 2>&1; then
+            # shellcheck disable=SC2046
+            rg -F -f "$_wd/guards" -l --no-ignore --hidden $(cat "$_wd/searchdirs") \
+                2>/dev/null > "$_wd/reffiles" || :
+        else
+            # shellcheck disable=SC2046
+            $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
+                2>/dev/null > "$_wd/reffiles" || :
+        fi
         while IFS= read -r _f; do
             # Drop human-facing report/help-text prose lines before matching.
             # A handful of aggregate guards (e.g. check-metal-generated-2d-
