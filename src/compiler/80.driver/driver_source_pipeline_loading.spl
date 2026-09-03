@@ -48,7 +48,8 @@ use compiler.driver.action_graph.demand_compile_integration.{
     demand_compile_source_open_v1, demand_source_action_id_v1
 }
 use compiler.driver.action_graph.artifact_service_bridge.{
-    demand_artifact_claim_v1, demand_artifact_commit_v1,
+    DemandArtifactClaimTransferV1, DemandArtifactCommitTransferV1,
+    demand_artifact_claim_owned_v1, demand_artifact_commit_owned_v1,
     demand_artifact_route_v1
 }
 use compiler.driver.action_graph.build_action_v1.{BuildActionResultV1}
@@ -407,15 +408,24 @@ impl CompilerDriver:
                 var artifact_route = self.ctx.demand_artifact_route!
                 artifact_route.execution = self.ctx.demand_compile_execution!
                 val action_id = demand_archive_action_id_v1(admission.package_identity)
-                val claim = demand_artifact_claim_v1(
-                    &mut artifact_route, action_id,
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
                     "driver-archive-owner:{action_id}", 512 * 1024 * 1024)
-                if not claim.valid or not demand_artifact_commit_v1(
-                        &mut artifact_route, BuildActionResultV1(
-                            action_id,
-                            rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
-                            true, false, admission.load.receipt!.archive_digest,
-                            admission.load.receipt!.archive_digest, [], 0)):
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.add_error(
+                        "demand archive action commit failed: {admission.package_identity}")
+                    _ = route_capability_scope_close_all_v1(&capability_scope)
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                        true, false, admission.load.receipt!.archive_digest,
+                        admission.load.receipt!.archive_digest, [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
                     self.ctx.add_error(
                         "demand archive action commit failed: {admission.package_identity}")
                     _ = route_capability_scope_close_all_v1(&capability_scope)
@@ -508,16 +518,24 @@ impl CompilerDriver:
                 var artifact_route = self.ctx.demand_artifact_route!
                 artifact_route.execution = self.ctx.demand_compile_execution!
                 val action_id = demand_source_action_id_v1(input_path)
-                val claim = demand_artifact_claim_v1(
-                    &mut artifact_route, action_id,
+                val claimed = demand_artifact_claim_owned_v1(
+                    artifact_route, action_id,
                     "driver-source-owner:{action_id}", 512 * 1024 * 1024)
-                if not claim.valid or not demand_artifact_commit_v1(
-                        &mut artifact_route, BuildActionResultV1(
-                            action_id,
-                            rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
-                            loaded.len() > 0, false,
-                            if loaded.len() > 0: input_path else: "",
-                            "", [], 0)):
+                artifact_route = claimed.route
+                if not claimed.claim.valid:
+                    self.ctx.add_error(
+                        "demand frozen-source action commit failed: {input_path}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
+                val artifact_commit = demand_artifact_commit_owned_v1(
+                    artifact_route, BuildActionResultV1(
+                        action_id,
+                        rt_env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+                        loaded.len() > 0, false,
+                        if loaded.len() > 0: input_path else: "",
+                        "", [], 0))
+                artifact_route = artifact_commit.route
+                if not artifact_commit.accepted:
                     self.ctx.add_error(
                         "demand frozen-source action commit failed: {input_path}")
                     driver_entry_scan_cache_release()
