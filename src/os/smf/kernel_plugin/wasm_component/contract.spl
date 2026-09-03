@@ -1,0 +1,62 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal, kpf_digest256_equal, kpf_id128_is_zero, kpf_digest256_is_zero}
+
+pub enum KpfWasmComponentOutcome:
+    Accepted
+    Empty
+    WouldBlock
+    MalformedComponent
+    ComponentDigestMismatch
+    InterfaceMismatch
+    SchemaMismatch
+    CapabilityDenied
+    AmbientAuthorityDenied
+    StaleHandle
+    Cancelled
+    Quiescing
+    Closed
+
+pub struct KpfWasmComponentManifestV1:
+    component_id: KpfId128
+    component_digest: KpfDigest256
+    interface_id: KpfId128
+    schema_digest: KpfDigest256
+    required_capability_bits: u64
+    imported_capability_bits: u64
+    requests_ambient_filesystem: bool
+    requests_ambient_network: bool
+    requests_ambient_process: bool
+
+pub struct KpfWasmComponentAdmissionV1:
+    outcome: KpfWasmComponentOutcome
+    granted_capability_bits: u64
+
+pub fn kpf_wasm_component_admit_v1(manifest: KpfWasmComponentManifestV1,
+        expected_component_id: KpfId128, expected_component_digest: KpfDigest256,
+        expected_interface_id: KpfId128, expected_schema_digest: KpfDigest256,
+        granted_capability_bits: u64) -> KpfWasmComponentAdmissionV1:
+    if kpf_id128_is_zero(manifest.component_id) or
+            kpf_digest256_is_zero(manifest.component_digest) or
+            kpf_id128_is_zero(manifest.interface_id) or
+            kpf_digest256_is_zero(manifest.schema_digest):
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.MalformedComponent,
+            granted_capability_bits: 0)
+    if not kpf_id128_equal(manifest.component_id, expected_component_id) or
+            not kpf_digest256_equal(manifest.component_digest, expected_component_digest):
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.ComponentDigestMismatch,
+            granted_capability_bits: 0)
+    if not kpf_id128_equal(manifest.interface_id, expected_interface_id):
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.InterfaceMismatch,
+            granted_capability_bits: 0)
+    if not kpf_digest256_equal(manifest.schema_digest, expected_schema_digest):
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.SchemaMismatch,
+            granted_capability_bits: 0)
+    if manifest.requests_ambient_filesystem or manifest.requests_ambient_network or
+            manifest.requests_ambient_process:
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.AmbientAuthorityDenied,
+            granted_capability_bits: 0)
+    val requested = manifest.required_capability_bits | manifest.imported_capability_bits
+    if (granted_capability_bits & requested) != requested:
+        return KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.CapabilityDenied,
+            granted_capability_bits: 0)
+    KpfWasmComponentAdmissionV1(outcome: KpfWasmComponentOutcome.Accepted,
+        granted_capability_bits: granted_capability_bits)
