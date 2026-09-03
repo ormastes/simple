@@ -2164,6 +2164,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_copy_to_buffer",
     "rt_vulkan_copy_to_buffer_raw",
     "rt_vulkan_copy_to_buffer_array",
+    "rt_vulkan_copy_u32_slots",
     "rt_vulkan_create_compute_pipeline",
     "rt_vulkan_create_compute_pipeline_raw",
     "rt_vulkan_create_descriptor_set",
