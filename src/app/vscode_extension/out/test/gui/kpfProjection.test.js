@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const assert = __importStar(require("assert"));
 const kpf_1 = require("../../kpf");
+const canonicalToolingConformance_1 = require("../support/canonicalToolingConformance");
 function admission(providerId = 'simple.language') {
     return {
         providerId,
@@ -46,6 +47,21 @@ function admission(providerId = 'simple.language') {
     };
 }
 suite('KPF VS Code projection', () => {
+    test('desktop adapter consumes the canonical receipt and snapshot corpus', async () => {
+        const corpus = await (0, canonicalToolingConformance_1.loadCanonicalToolingConformanceV1)();
+        const accepted = [];
+        const session = new kpf_1.KpfToolingSession((batch) => accepted.push(batch.canonicalResultId));
+        session.admit(admission());
+        session.openSnapshot({ uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest });
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest },
+            canonicalResultId: corpus.canonical_result_id,
+            diagnostics: [{ message: 'broken' }],
+            semanticCoverageComplete: corpus.semantic_coverage_complete,
+        }), true);
+        assert.deepStrictEqual(accepted, [corpus.canonical_result_id]);
+        assert.strictEqual(session.getStatus().semanticClean, false);
+    });
     test('degraded results never claim semantic clean', () => {
         const published = [];
         const session = new kpf_1.KpfToolingSession((batch) => published.push(batch));

@@ -39,7 +39,33 @@ const vscode = __importStar(require("vscode"));
 const simpleAnalysisIndex_1 = require("../../analysis/simpleAnalysisIndex");
 const simpleLspCapabilityReceipt_1 = require("../../lsp/simpleLspCapabilityReceipt");
 const simpleLspServerResolver_1 = require("../../services/simpleLspServerResolver");
+const kpf_1 = require("../../kpf");
+const canonicalToolingConformance_1 = require("../support/canonicalToolingConformance");
 suite('browser and WASM canonical parity', () => {
+    test('browser/WASM adapter consumes the canonical receipt and snapshot corpus', async () => {
+        const corpus = await (0, canonicalToolingConformance_1.loadCanonicalToolingConformanceV1)();
+        const receipt = (0, simpleLspCapabilityReceipt_1.authoritativeLspReceipt)(corpus.browser_source);
+        const accepted = [];
+        const session = new kpf_1.KpfToolingSession((batch) => accepted.push(batch.canonicalResultId));
+        session.admit({
+            providerId: 'simple.language',
+            generation: 'generation-7',
+            placement: 'wasm',
+            capabilities: [{ id: 'ide.language-session', major: 1 }],
+            schemaDigest: 'sha256:language-v1',
+            admitted: true,
+        });
+        session.openSnapshot({ uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest });
+        assert.strictEqual(receipt.authority, corpus.authority);
+        assert.strictEqual(receipt.coverage, corpus.coverage);
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest },
+            canonicalResultId: corpus.canonical_result_id,
+            diagnostics: [{ message: 'broken' }],
+            semanticCoverageComplete: corpus.semantic_coverage_complete,
+        }), true);
+        assert.deepStrictEqual(accepted, [corpus.canonical_result_id]);
+    });
     test('uses one selector for file, untitled, and virtual workspaces', () => {
         assert.deepStrictEqual((0, simpleLspServerResolver_1.createSimpleLspDocumentSelector)(), [
             { scheme: 'file', language: 'simple' },

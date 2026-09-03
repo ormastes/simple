@@ -8,6 +8,7 @@ import {
     KpfWorkerSession,
     projectContributionCommands,
 } from '../../kpf';
+import { loadCanonicalToolingConformanceV1 } from '../support/canonicalToolingConformance';
 
 function admission(providerId = 'simple.language'): KpfAdmissionMetadata {
     return {
@@ -21,6 +22,23 @@ function admission(providerId = 'simple.language'): KpfAdmissionMetadata {
 }
 
 suite('KPF VS Code projection', () => {
+    test('desktop adapter consumes the canonical receipt and snapshot corpus', async () => {
+        const corpus = await loadCanonicalToolingConformanceV1();
+        const accepted: string[] = [];
+        const session = new KpfToolingSession((batch) => accepted.push(batch.canonicalResultId));
+        session.admit(admission());
+        session.openSnapshot({ uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest });
+
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: corpus.uri, version: corpus.revision, digest: corpus.content_digest },
+            canonicalResultId: corpus.canonical_result_id,
+            diagnostics: [{ message: 'broken' }],
+            semanticCoverageComplete: corpus.semantic_coverage_complete,
+        }), true);
+        assert.deepStrictEqual(accepted, [corpus.canonical_result_id]);
+        assert.strictEqual(session.getStatus().semanticClean, false);
+    });
+
     test('degraded results never claim semantic clean', () => {
         const published: unknown[] = [];
         const session = new KpfToolingSession((batch) => published.push(batch));

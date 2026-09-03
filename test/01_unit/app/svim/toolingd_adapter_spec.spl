@@ -5,6 +5,8 @@ use std.common.lint_kernel.output.*
 use std.tooling_kernel.ToolingDocumentSnapshotV1
 use app.svim.*
 use app.toolingd.protocol_adapters.*
+use std.tooling_kernel.conformance_corpus.tooling_ide_conformance_decode_v1
+use std.io_runtime.file_read
 
 fn id(value: u64) -> KpfId128:
     KpfId128(hi: 0, lo: value)
@@ -26,6 +28,23 @@ fn output(revision: u64) -> NormalizedLintOutputV1:
     NormalizedLintOutputV1(result: lint_run_result(coverage, 1, 1, 0, false, false), diagnostics: [normalized])
 
 describe "SVIM toolingd cutover":
+    it "consumes the same canonical receipt and snapshot corpus as VS Code clients":
+        val content = file_read("src/app/vscode_extension/test-fixtures/canonical-tooling-conformance-v1.sdn") ?? ""
+        val corpus = tooling_ide_conformance_decode_v1(content).unwrap()
+        var session = SvimSession.new()
+        val buffer = session.open_text("main.spl", "canonical")
+        var adapter = SvimToolingdAdapterV1.create(2, 4, 8)
+        expect(corpus.language).to_equal("simple")
+        expect(corpus.native_source).to_equal("native")
+        expect(corpus.authority).to_equal("authoritative")
+        expect(corpus.coverage).to_equal("semantic")
+        expect(corpus.semantic_coverage_complete).to_equal(true)
+        expect(adapter.open_snapshot(buffer, snapshot(corpus.revision.to_u64(), 20), 1).status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(adapter.begin_analysis(buffer).status).to_equal(ToolingEdgeStatusV1.Ok)
+        val published = adapter.publish_diagnostics(session, buffer, output(corpus.revision.to_u64()))
+        expect(published.status).to_equal(ToolingEdgeStatusV1.Ok)
+        expect(published.canonical_result_id).to_equal(corpus.canonical_result_id)
+
     it "keeps buffer text authoritative while routing diagnostics and code actions":
         var session = SvimSession.new()
         val opened_buffer = session.open_text("main.spl", "original")

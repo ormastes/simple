@@ -1,12 +1,15 @@
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { prepareVscodeTestStorage } from './vscode-test-storage.mjs';
 
 const command = process.platform === 'win32' ? 'vscode-test.cmd' : 'vscode-test';
 const args = process.argv.slice(2);
+const testStorage = prepareVscodeTestStorage(process.env, process.cwd());
 const child = spawn(command, args, {
     detached: process.platform !== 'win32',
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: testStorage.environment,
 });
 const testProcessMarker = `${process.cwd()}/.vscode-test`;
 
@@ -53,6 +56,7 @@ function finish(code) {
         return;
     }
     settled = true;
+    testStorage.cleanup();
     if (lingerTimer) {
         clearTimeout(lingerTimer);
     }
