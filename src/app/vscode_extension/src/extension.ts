@@ -26,6 +26,7 @@ import { SimpleTestController } from './testing/testController';
 import { EditorMarkerManager } from './testing/editorMarkers';
 import { TestWorkspacePanel } from './testing/testWorkspacePanel';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
+import { KpfProductionCutover } from './kpf';
 
 const SIMPLE_SELECTOR: vscode.DocumentSelector = [
     { scheme: 'file', language: 'simple' },
@@ -65,7 +66,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             foldingProvider,
         ],
     }));
-    services.markDegraded('lsp', 'Compatibility surface ready; bootstrapping configured client', 'fallback');
+    const kpfCutover = new KpfProductionCutover({
+        languageId: 'simple',
+        isWorkspaceTrusted: () => vscode.workspace.isTrusted,
+        resolvePlacement: () => lspSurface.configuration.mode === 'wasm' ? 'wasm' : 'native-process',
+        bootstrap: (resolveFrom) => lspSurface.bootstrapClient(resolveFrom),
+        restart: () => lspSurface.restartClient(),
+        onAuthorityChanged: (authority, reason) => {
+            if (authority === 'toolingd-lsp') {
+                const source = lspSurface.configuration.mode === 'wasm' ? 'wasm' : 'native';
+                services.markReady('lsp', reason, source);
+            } else {
+                services.markDegraded('lsp', reason, 'fallback');
+            }
+        },
+    });
     let currentOutlineDocument = vscode.window.activeTextEditor?.document;
     const updateOutline = (document?: vscode.TextDocument) => {
         currentOutlineDocument = document;
@@ -122,6 +137,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 updateOutline(event.document);
             }
         }),
+        vscode.workspace.onDidOpenTextDocument((document) => {
+            const pending = kpfCutover.observeLanguage(document.languageId, document.uri.fsPath);
+            void pending?.then((result) => {
+                if (!result.ok) {
+                    services.markDegraded('lsp', result.message, 'fallback', result.detail);
+                }
+            });
+        }),
+        vscode.workspace.onDidGrantWorkspaceTrust(() => {
+            void kpfCutover.workspaceTrustGranted();
+        }),
     );
     updateOutline(vscode.window.activeTextEditor?.document);
 
@@ -131,7 +157,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 lspSurface.showOutputChannel();
             }),
             vscode.commands.registerCommand('simple.lsp.restart', async () => {
-                const result = await lspSurface.restartClient();
+                const result = await kpfCutover.restart();
                 if (!result.ok) {
                     void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
                 }
@@ -356,7 +382,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 'Restart LSP',
             ).then(async (selection) => {
                 if (selection === 'Restart LSP') {
-                    const result = await lspSurface.restartClient();
+                    const result = await kpfCutover.restart();
                     if (!result.ok) {
                         void vscode.window.showWarningMessage(`Simple LSP: ${result.message}`);
                     }
@@ -365,11 +391,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }),
     );
 
-    void lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath).then((result) => {
-        if (!result.ok) {
-            services.markDegraded('lsp', result.message, 'fallback', result.detail);
+    for (const document of vscode.workspace.textDocuments) {
+        const pending = kpfCutover.observeLanguage(document.languageId, document.uri.fsPath);
+        if (pending) {
+            void pending.then((result) => {
+                if (!result.ok) {
+                    services.markDegraded('lsp', result.message, 'fallback', result.detail);
+                }
+            });
+            break;
         }
-    });
+    }
 }
 
 export async function deactivate(): Promise<void> {

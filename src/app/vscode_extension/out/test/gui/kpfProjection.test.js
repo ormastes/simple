@@ -103,5 +103,64 @@ suite('KPF VS Code projection', () => {
         assert.strictEqual(withoutLanguage.some((entry) => entry.command === 'simple.lsp.restart'), false);
         assert.strictEqual(withLanguage.some((entry) => entry.command === 'simple.lsp.restart'), true);
     });
+    test('starts tooling only after the selected language is observed', async () => {
+        const starts = [];
+        const cutover = new kpf_1.KpfProductionCutover({
+            languageId: 'simple',
+            isWorkspaceTrusted: () => true,
+            resolvePlacement: () => 'native-process',
+            bootstrap: async (resolveFrom) => {
+                starts.push(resolveFrom);
+                return { ok: true, message: 'ready' };
+            },
+            restart: async () => ({ ok: true, message: 'restarted' }),
+        });
+        assert.strictEqual(cutover.observeLanguage('rust', '/workspace/lib.rs'), undefined);
+        await cutover.observeLanguage('simple', '/workspace/main.spl');
+        await cutover.observeLanguage('simple', '/workspace/other.spl');
+        assert.deepStrictEqual(starts, ['/workspace/main.spl']);
+        assert.strictEqual(cutover.semanticAuthority(), 'toolingd-lsp');
+    });
+    test('trust-gates process placement while retaining explicit syntax fallback', async () => {
+        let trusted = false;
+        let starts = 0;
+        const authorities = [];
+        const cutover = new kpf_1.KpfProductionCutover({
+            languageId: 'simple',
+            isWorkspaceTrusted: () => trusted,
+            resolvePlacement: () => 'worker-process',
+            bootstrap: async () => {
+                starts += 1;
+                return { ok: true, message: 'ready' };
+            },
+            restart: async () => ({ ok: true, message: 'restarted' }),
+            onAuthorityChanged: (authority) => authorities.push(authority),
+        });
+        const blocked = await cutover.observeLanguage('simple', '/workspace/main.spl');
+        assert.strictEqual(blocked?.ok, false);
+        assert.strictEqual(starts, 0);
+        assert.strictEqual(cutover.semanticAuthority(), 'syntax-only-fallback');
+        trusted = true;
+        await cutover.workspaceTrustGranted();
+        assert.strictEqual(starts, 1);
+        assert.strictEqual(cutover.semanticAuthority(), 'toolingd-lsp');
+        assert.deepStrictEqual(authorities, ['syntax-only-fallback', 'syntax-only-fallback', 'toolingd-lsp']);
+    });
+    test('allows sandboxed wasm tooling without workspace trust', async () => {
+        let starts = 0;
+        const cutover = new kpf_1.KpfProductionCutover({
+            languageId: 'simple',
+            isWorkspaceTrusted: () => false,
+            resolvePlacement: () => 'wasm',
+            bootstrap: async () => {
+                starts += 1;
+                return { ok: true, message: 'ready' };
+            },
+            restart: async () => ({ ok: true, message: 'restarted' }),
+        });
+        await cutover.observeLanguage('simple', 'file:///main.spl');
+        assert.strictEqual(starts, 1);
+        assert.strictEqual(cutover.semanticAuthority(), 'toolingd-lsp');
+    });
 });
 //# sourceMappingURL=kpfProjection.test.js.map
