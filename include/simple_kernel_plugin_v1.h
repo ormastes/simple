@@ -13,6 +13,32 @@ extern "C" {
 
 typedef int32_t simple_kpf_status_v1;
 
+typedef struct simple_kpf_abi_layout_vector_v1 {
+    const char *name;
+    uint64_t available_size;
+    uint64_t struct_size;
+    uint64_t payload_offset;
+    uint64_t payload_length;
+    uint64_t required_alignment;
+    uint64_t reserved0;
+    uint32_t expected_valid;
+    uint32_t reserved1;
+} simple_kpf_abi_layout_vector_v1;
+
+static inline int simple_kpf_validate_abi_layout_vector_v1(
+    const simple_kpf_abi_layout_vector_v1 *vector) {
+    if (vector == NULL || vector->struct_size < UINT64_C(32) ||
+        vector->struct_size > vector->available_size || vector->reserved0 != 0 ||
+        vector->reserved1 != 0 || vector->required_alignment == 0 ||
+        (vector->required_alignment & (vector->required_alignment - 1)) != 0 ||
+        vector->payload_offset < vector->struct_size ||
+        vector->payload_offset > vector->available_size ||
+        (vector->payload_offset % vector->required_alignment) != 0) {
+        return 0;
+    }
+    return vector->payload_length <= vector->available_size - vector->payload_offset;
+}
+
 enum {
     SIMPLE_KPF_STATUS_OK = 0,
     SIMPLE_KPF_STATUS_PENDING = 1,
@@ -135,6 +161,22 @@ typedef struct simple_kpf_operation_table_v1 {
 typedef simple_kpf_status_v1 (*simple_kpf_plugin_entry_fn_v1)(
     const simple_kpf_interface_query_v1 *query,
     simple_kpf_interface_answer_v1 *answer);
+
+#define SIMPLE_KPF_ABI_LAYOUT_PREFIX_SIZE_V1 UINT64_C(32)
+#ifdef SIMPLE_KPF_INCLUDE_ABI_TEST_VECTORS
+#define SIMPLE_KPF_ABI_LAYOUT_VECTOR_COUNT_V1 UINT32_C(9)
+static const simple_kpf_abi_layout_vector_v1 SIMPLE_KPF_ABI_LAYOUT_VECTORS_V1[] = {
+    {"valid_exact", UINT64_C(48), UINT64_C(32), UINT64_C(32), UINT64_C(16), UINT64_C(8), UINT64_C(0), UINT32_C(1), UINT32_C(0)},
+    {"valid_append_only_tail", UINT64_C(56), UINT64_C(40), UINT64_C(40), UINT64_C(16), UINT64_C(8), UINT64_C(0), UINT32_C(1), UINT32_C(0)},
+    {"truncated_prefix", UINT64_C(48), UINT64_C(31), UINT64_C(32), UINT64_C(16), UINT64_C(8), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+    {"declared_oversize", UINT64_C(48), UINT64_C(56), UINT64_C(56), UINT64_C(0), UINT64_C(8), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+    {"reserved_nonzero", UINT64_C(48), UINT64_C(32), UINT64_C(32), UINT64_C(16), UINT64_C(8), UINT64_C(1), UINT32_C(0), UINT32_C(0)},
+    {"offset_before_header", UINT64_C(48), UINT64_C(32), UINT64_C(24), UINT64_C(16), UINT64_C(8), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+    {"offset_length_overflow", UINT64_C(48), UINT64_C(32), UINT64_C(40), UINT64_C(16), UINT64_C(8), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+    {"misaligned_offset", UINT64_C(48), UINT64_C(32), UINT64_C(36), UINT64_C(8), UINT64_C(8), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+    {"invalid_alignment", UINT64_C(48), UINT64_C(32), UINT64_C(32), UINT64_C(16), UINT64_C(3), UINT64_C(0), UINT32_C(0), UINT32_C(0)},
+};
+#endif
 
 #ifdef __cplusplus
 }

@@ -41,8 +41,10 @@ REQ-KPF-008 worker-wire follow-up (2026-09-03): the canonical schema compiler
 now generates a package-specific fixed worker-envelope projection containing
 the schema digest, dense interface/operation slots, required-operation policy,
 and overflow-safe frame bounds checks. Focused generator and generated-fixture
-tests pass. The broader four-language malformed native-layout corpus remains a
-separate open gate.
+tests pass. The shared four-language malformed native-layout corpus now covers
+truncated and oversized descriptors, reserved fields, overflow-safe offsets,
+alignment failures, append-compatible tails, and a mutation guard. Broader
+worker and product qualification remain separate gates.
 The selected LLVM+Cranelift, ABI v1, `simple.sdn`, and atomic APK-only policy
 set is structurally complete: defaults and admission bind those choices and
 reject alternate policy inputs. Runtime/native rows remain blocked. The Stage3

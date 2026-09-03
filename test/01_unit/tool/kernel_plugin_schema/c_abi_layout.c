@@ -1,3 +1,4 @@
+#define SIMPLE_KPF_INCLUDE_ABI_TEST_VECTORS 1
 #include "simple_kernel_plugin_v1.h"
 
 #include <stddef.h>
@@ -52,5 +53,17 @@ static simple_kpf_status_v1 query_stub(
 
 int main(void) {
     simple_kpf_plugin_entry_fn_v1 entry = query_stub;
-    return entry == NULL;
+    uint32_t index;
+    if (entry == NULL || SIMPLE_KPF_ABI_LAYOUT_VECTOR_COUNT_V1 != 9) {
+        return 1;
+    }
+    for (index = 0; index < SIMPLE_KPF_ABI_LAYOUT_VECTOR_COUNT_V1; ++index) {
+        const simple_kpf_abi_layout_vector_v1 *vector =
+            &SIMPLE_KPF_ABI_LAYOUT_VECTORS_V1[index];
+        if (simple_kpf_validate_abi_layout_vector_v1(vector) !=
+            (int)vector->expected_valid) {
+            return 2;
+        }
+    }
+    return 0;
 }

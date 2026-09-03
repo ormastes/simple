@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-kpf-abi-mutation.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+fixture="$build_dir/example_echo.rs"
+sed 's/name: "truncated_prefix"\([^}]*\)expected_valid: false/name: "truncated_prefix"\1expected_valid: true/' \
+    "$repo_root/test/fixtures/kernel_plugin_schema/generated/example_echo.rs" >"$fixture"
+
+cat >"$build_dir/mutation.rs" <<EOF
+#![allow(dead_code)]
+#[path = "$fixture"]
+mod generated;
+
+fn main() {
+    for vector in generated::KPF_ABI_LAYOUT_VECTORS_V1 {
+        assert_eq!(generated::kpf_validate_abi_layout_vector_v1(&vector), vector.expected_valid);
+    }
+}
+EOF
+
+rustc --edition=2021 --deny warnings "$build_dir/mutation.rs" -o "$build_dir/mutation"
+if "$build_dir/mutation" >/dev/null 2>&1; then
+    echo "FAIL: malformed ABI expectation mutation survived"
+    exit 1
+fi
+
+echo "KPF_ABI_LAYOUT_MUTATION: PASS"
