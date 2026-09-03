@@ -5,7 +5,7 @@
 # Run:  SIMPLE_LIB=src VK_ICD_FILENAMES=.../MoltenVK_icd.json \
 #       <vulkan-seed> run bench/vulkan_2d_c/vk2d_bench.spl
 
-use std.io_runtime.{time_now_unix_micros}
+use std.io_runtime.{time_now_unix_micros, read_file}
 use app.io.mod.{env_get}
 use gpu.engine2d.engine.{Engine2D}
 
@@ -21,6 +21,43 @@ class Vk2dRect:
     var w: i32
     var h: i32
     var color: u32
+
+# Parse one hex byte-quad ("FFF34DAD") into a u32 colour.
+fn _hex_u32(h: text) -> u32:
+    val digits = "0123456789ABCDEF"
+    var v: i64 = 0
+    var i = 0
+    while i < h.len():
+        val c = h.substring(i, i + 1).upper()
+        val d = digits.index_of(c)
+        if d < 0:
+            return 0u32
+        v = v * 16 + d.to_i64()
+        i = i + 1
+    v.to_i32().to_u32()
+
+# Load the SHARED scene table. This is the one workload definition; the C leg
+# loads the same file. Re-deriving the set per language is exactly how the two
+# legs silently diverged before (i64 sign-masking vs u64 wraparound), so a
+# missing table is a hard failure, never a silent fallback to a generated set
+# that would not match C.
+fn _rects_from_table(path: text, count: i32) -> [Vk2dRect]:
+    var out: [Vk2dRect] = []
+    val body = read_file(path)
+    for line in body.split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        if out.len().to_i32() >= count:
+            continue
+        val f = t.split(" ")
+        if f.len() != 6 or f[0] != "rect":
+            continue
+        out.push(Vk2dRect(
+            x: (f[1].to_int() ?? 0).to_i32(), y: (f[2].to_int() ?? 0).to_i32(),
+            w: (f[3].to_int() ?? 0).to_i32(), h: (f[4].to_int() ?? 0).to_i32(),
+            color: _hex_u32(f[5])))
+    out
 
 fn _rects(count: i32, fb_w: i32, fb_h: i32) -> [Vk2dRect]:
     """Same xorshift64 distribution as the C bench (sign-masked for modulo)."""
@@ -186,6 +223,23 @@ fn main():
         engine.shutdown()
         return
     val bench = Vk2dBench(engine: engine, w: w, h: h)
-    val rects = _rects(rect_count, w, h)
+    # Prefer the SHARED table so this leg renders exactly what C renders.
+    # VK2D_SCENES="" opts back into the legacy generated set, which does NOT
+    # match C and is therefore only valid for throughput, never for a pixel
+    # comparison.
+    var scenes_path = env_get("VK2D_SCENES").trim()
+    if scenes_path == "":
+        scenes_path = "bench/vulkan_2d_c/scenes.txt"
+    var rects = _rects(rect_count, w, h)
+    var scene_source = "generated-unmatched"
+    if scenes_path != "":
+        val from_table = _rects_from_table(scenes_path, rect_count)
+        if from_table.len() > 0:
+            rects = from_table
+            scene_source = "table"
+        else:
+            print "simple-vulkan-2d status=blocked reason=scene-table-unreadable path={scenes_path}"
+            return
+    print "scene_source={scene_source} rects={rects.len()}"
     print bench.run(rects, frames, readback)
     engine.shutdown()

@@ -51,7 +51,7 @@ static u64 now_ns(void) {
 int main(int argc, char** argv) {
     const i32 fb_w = argc > 1 ? atoi(argv[1]) : 800;
     const i32 fb_h = argc > 2 ? atoi(argv[2]) : 600;
-    const i32 num_rects = argc > 3 ? atoi(argv[3]) : 64;
+    i32 num_rects = argc > 3 ? atoi(argv[3]) : 64;
     const i32 num_frames = argc > 4 ? atoi(argv[4]) : 300;
     const b32 do_readback = argc > 5 ? atoi(argv[5]) : 1;
 
@@ -259,6 +259,39 @@ int main(int argc, char** argv) {
         rects[i].color = 0xFF000000u | (u32)(rng & 0x00FFFFFFu);
         rects[i].fb_w = fb_w;
         rects[i].fb_h = fb_h;
+    }
+
+    // Shared scene table: when scenes.txt is present it REPLACES the generated
+    // set, so both legs render a bit-identical workload. Generating the set
+    // independently in each language is exactly how the two sides silently
+    // diverged (i64 sign-masking vs u64 wraparound), so the table is committed
+    // literal data, not a re-derivation.
+    const char* scene_path = getenv("VK2D_SCENES");
+    if (!scene_path) scene_path = "scenes.txt";
+    FILE* sf = fopen(scene_path, "r");
+    if (sf) {
+        char line[256];
+        i32 k = 0;
+        while (k < num_rects && fgets(line, sizeof(line), sf)) {
+            if (line[0] == '#' || line[0] == '\n') continue;
+            i32 x, y, w, h; unsigned int col;
+            if (sscanf(line, "rect %d %d %d %d %X", &x, &y, &w, &h, &col) == 5) {
+                rects[k].x = x; rects[k].y = y; rects[k].w = w; rects[k].h = h;
+                rects[k].color = (u32)col;
+                rects[k].fb_w = fb_w; rects[k].fb_h = fb_h;
+                k++;
+            }
+        }
+        fclose(sf);
+        if (k > 0) num_rects = k;
+        fprintf(stderr, "scenes: loaded %d rect(s) from %s\n", k, scene_path);
+    }
+
+    if (getenv("VK2D_DUMP_RECTS")) {
+        for (i32 i = 0; i < num_rects; i++)
+            printf("rect %d %d %d %d %08X\n",
+                rects[i].x, rects[i].y, rects[i].w, rects[i].h, rects[i].color);
+        return 0;
     }
 
     const u32 clear_color = 0xFF141414u;
