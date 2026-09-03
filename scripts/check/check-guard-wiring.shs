@@ -58,6 +58,17 @@ set -u
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
+# Extract every fixed-string pattern occurrence from stdin. Same reason as the
+# recursive scan below: this runs once per matched file (943 of them on this
+# tree) with ~1,500 -F patterns, and BSD grep is pathological at that. Verified
+# byte-identical output against `/usr/bin/grep -o -F -f` over 25 real guard
+# scripts before switching.
+if command -v rg >/dev/null 2>&1; then
+    _fixed_strings_only() { rg -o -F -f "$1" --no-line-number --no-filename 2>/dev/null; }
+else
+    _fixed_strings_only() { $GREP -o -F -f "$1" 2>/dev/null; }
+fi
+
 # A tree this size always has hundreds of guards. Anything near zero means the
 # enumerator broke, not that the tree got clean. Raise as the tree grows; never
 # lower it to make a run pass.
@@ -181,7 +192,7 @@ scan_wiring() {
             # which never start with that shape.
             $GREP -v -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*_(report_note|note|report)="' \
                 "$_f" 2>/dev/null |
-                $GREP -o -F -f "$_wd/guards" 2>/dev/null | sort -u |
+                _fixed_strings_only "$_wd/guards" |sort -u |
                 while IFS= read -r _b; do
                     printf '%s\t%s\n' "$_f" "$_b"
                 done
@@ -278,6 +289,22 @@ scan_installed_hooks() {
         if [ "$_b" = pre-push ] && [ -x "$_h" ] &&
            [ "$_launcher_tracked" -eq 1 ] && [ -f "$_launcher" ] &&
            cmp -s "$_launcher" "$_h"; then
+            continue
+        fi
+
+        # Same exception, same terms, for the repo-managed pre-commit added
+        # 2026-09-03 (scripts/hooks/pre-commit-root-guard). Linked worktrees
+        # share one hooks directory, which is exactly why a symlink into any
+        # single worktree is not usable and the launcher is copied instead; a
+        # managed pre-commit has the identical constraint. Content identity,
+        # tracked provenance, basename and executability are all still
+        # load-bearing — a one-byte drift is still invalid — so this widens the
+        # rule by exactly one named, tracked file and grandfathers nothing.
+        if [ "$_b" = pre-commit ] && [ -x "$_h" ] &&
+           git -C "$_root_phys" ls-files --error-unmatch \
+               scripts/hooks/pre-commit-root-guard >/dev/null 2>&1 &&
+           [ -f "$_root_phys/scripts/hooks/pre-commit-root-guard" ] &&
+           cmp -s "$_root_phys/scripts/hooks/pre-commit-root-guard" "$_h"; then
             continue
         fi
 
