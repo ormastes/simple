@@ -3,8 +3,9 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.KpfToolingSession = void 0;
 const types_1 = require("./types");
 class KpfToolingSession {
-    constructor(publishDiagnostics) {
+    constructor(publishDiagnostics, cancelSnapshot = () => undefined) {
         this.publishDiagnostics = publishDiagnostics;
+        this.cancelSnapshot = cancelSnapshot;
         this.snapshots = new Map();
         this.status = {
             state: 'Unavailable',
@@ -40,9 +41,31 @@ class KpfToolingSession {
         if (current && snapshot.version <= current.version) {
             throw new Error(`Snapshot version must advance for ${snapshot.uri}`);
         }
+        if (current) {
+            this.cancelSnapshot(current);
+        }
         this.snapshots.set(snapshot.uri, snapshot);
     }
+    closeSnapshot(uri) {
+        const current = this.snapshots.get(uri);
+        if (!current) {
+            return false;
+        }
+        this.cancelSnapshot(current);
+        this.snapshots.delete(uri);
+        return true;
+    }
+    disconnect(reason = 'Tooling connection closed') {
+        for (const snapshot of this.snapshots.values()) {
+            this.cancelSnapshot(snapshot);
+        }
+        this.snapshots.clear();
+        this.markUnavailable(reason);
+    }
     acceptDiagnostics(batch) {
+        if (!batch.canonicalResultId.startsWith('kpf-result-v1:')) {
+            return false;
+        }
         const current = this.snapshots.get(batch.snapshot.uri);
         if (!current || current.version !== batch.snapshot.version || current.digest !== batch.snapshot.digest) {
             return false;

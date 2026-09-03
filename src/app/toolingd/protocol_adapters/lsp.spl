@@ -1,5 +1,5 @@
 use std.common.kernel_plugin.ids.{KpfDigest256, kpf_digest256_equal}
-use std.common.lint_kernel.output.{NormalizedLintOutputV1, lint_output_to_lsp}
+use std.common.lint_kernel.output.{NormalizedLintOutputV1, lint_output_canonical_result_id, lint_output_to_lsp}
 use std.tooling_kernel.ToolingDocumentSnapshotV1
 use app.toolingd.*
 use app.toolingd.protocol_adapters.model.*
@@ -61,11 +61,27 @@ pub class ToolingLspEdgeV1:
                 self.active[index] = false
         tooling_edge_status(self.daemon.cancel(ticket))
 
+    me close_document(document: ToolingDocumentSessionHandleV1) -> ToolingEdgeStatusV1:
+        for index in 0..self.capacity:
+            val existing = self.documents[index]
+            if self.active[index] and existing.slot == document.slot and existing.epoch == document.epoch:
+                self.daemon.cancel(self.tickets[index])
+                self.active[index] = false
+        tooling_edge_status(self.daemon.close_document(document))
+
+    me disconnect(connection: ToolingConnectionHandleV1) -> ToolingEdgeStatusV1:
+        for index in 0..self.capacity:
+            val document = self.documents[index]
+            if self.active[index] and document.connection.slot == connection.slot and document.connection.epoch == connection.epoch:
+                self.daemon.cancel(self.tickets[index])
+                self.active[index] = false
+        tooling_edge_status(self.daemon.disconnect(connection))
+
     me publish(ticket: ToolingAnalysisTicketV1, output: NormalizedLintOutputV1) -> ToolingLspPublishResultV1:
         val published = self.daemon.publish_diagnostics(ToolingPublishDiagnosticsV1(ticket: ticket, diagnostics: [for item in output.diagnostics: item.diagnostic]))
         if published.status != ToolingDaemonStatusV1.Ok:
-            return ToolingLspPublishResultV1(status: tooling_edge_status(published.status), response_json: "")
+            return ToolingLspPublishResultV1(status: tooling_edge_status(published.status), canonical_result_id: "", response_json: "")
         for index in 0..self.capacity:
             if self.active[index] and self.tickets[index].slot == ticket.slot and self.tickets[index].epoch == ticket.epoch:
                 self.active[index] = false
-        ToolingLspPublishResultV1(status: ToolingEdgeStatusV1.Ok, response_json: lint_output_to_lsp(output))
+        ToolingLspPublishResultV1(status: ToolingEdgeStatusV1.Ok, canonical_result_id: lint_output_canonical_result_id(output), response_json: lint_output_to_lsp(output))

@@ -24,6 +24,7 @@ export interface KpfSnapshot {
 
 export interface KpfDiagnosticBatch<T> {
     readonly snapshot: KpfSnapshot;
+    readonly canonicalResultId: string;
     readonly diagnostics: readonly T[];
     readonly semanticCoverageComplete: boolean;
 }

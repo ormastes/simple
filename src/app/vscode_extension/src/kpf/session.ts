@@ -7,6 +7,7 @@ import {
 } from './types';
 
 export type DiagnosticPublisher<T> = (batch: KpfDiagnosticBatch<T>) => void;
+export type SnapshotCancellation = (snapshot: KpfSnapshot) => void;
 
 export class KpfToolingSession<T> {
     private readonly snapshots = new Map<string, KpfSnapshot>();
@@ -16,7 +17,10 @@ export class KpfToolingSession<T> {
         reason: 'No admitted language provider',
     };
 
-    public constructor(private readonly publishDiagnostics: DiagnosticPublisher<T>) {}
+    public constructor(
+        private readonly publishDiagnostics: DiagnosticPublisher<T>,
+        private readonly cancelSnapshot: SnapshotCancellation = () => undefined,
+    ) {}
 
     public admit(metadata: KpfAdmissionMetadata): void {
         validateAdmission(metadata);
@@ -49,10 +53,34 @@ export class KpfToolingSession<T> {
         if (current && snapshot.version <= current.version) {
             throw new Error(`Snapshot version must advance for ${snapshot.uri}`);
         }
+        if (current) {
+            this.cancelSnapshot(current);
+        }
         this.snapshots.set(snapshot.uri, snapshot);
     }
 
+    public closeSnapshot(uri: string): boolean {
+        const current = this.snapshots.get(uri);
+        if (!current) {
+            return false;
+        }
+        this.cancelSnapshot(current);
+        this.snapshots.delete(uri);
+        return true;
+    }
+
+    public disconnect(reason = 'Tooling connection closed'): void {
+        for (const snapshot of this.snapshots.values()) {
+            this.cancelSnapshot(snapshot);
+        }
+        this.snapshots.clear();
+        this.markUnavailable(reason);
+    }
+
     public acceptDiagnostics(batch: KpfDiagnosticBatch<T>): boolean {
+        if (!batch.canonicalResultId.startsWith('kpf-result-v1:')) {
+            return false;
+        }
         const current = this.snapshots.get(batch.snapshot.uri);
         if (!current || current.version !== batch.snapshot.version || current.digest !== batch.snapshot.digest) {
             return false;

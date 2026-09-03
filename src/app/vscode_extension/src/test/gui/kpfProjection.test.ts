@@ -30,6 +30,7 @@ suite('KPF VS Code projection', () => {
 
         assert.strictEqual(session.acceptDiagnostics({
             snapshot: { uri: 'file:///main.spl', version: 1, digest: 'one' },
+            canonicalResultId: 'kpf-result-v1:partial:11:12',
             diagnostics: [],
             semanticCoverageComplete: false,
         }), true);
@@ -51,6 +52,51 @@ suite('KPF VS Code projection', () => {
 
         assert.strictEqual(session.acceptDiagnostics({
             snapshot: { uri: 'file:///main.spl', version: 1, digest: 'one' },
+            canonicalResultId: 'kpf-result-v1:complete-clean:11:12',
+            diagnostics: [],
+            semanticCoverageComplete: true,
+        }), false);
+        assert.strictEqual(publishCount, 0);
+        assert.strictEqual(session.getStatus().semanticClean, false);
+    });
+
+    test('preserves canonical result identity and cleans snapshots on disconnect', () => {
+        const cancelled: string[] = [];
+        const accepted: string[] = [];
+        const session = new KpfToolingSession(
+            (batch) => accepted.push(batch.canonicalResultId),
+            (snapshot) => cancelled.push(`${snapshot.uri}@${snapshot.version}`),
+        );
+        session.admit(admission());
+        session.openSnapshot({ uri: 'file:///main.spl', version: 1, digest: 'one' });
+        session.openSnapshot({ uri: 'file:///main.spl', version: 2, digest: 'two' });
+        const canonicalResultId = 'kpf-result-v1:complete-clean:11:12:13:14:21:22:23:24:1:1:0';
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: 'file:///main.spl', version: 2, digest: 'two' },
+            canonicalResultId,
+            diagnostics: [],
+            semanticCoverageComplete: true,
+        }), true);
+        session.disconnect('client disconnected');
+        assert.deepStrictEqual(accepted, [canonicalResultId]);
+        assert.deepStrictEqual(cancelled, ['file:///main.spl@1', 'file:///main.spl@2']);
+        assert.strictEqual(session.getStatus().state, 'Unavailable');
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: 'file:///main.spl', version: 2, digest: 'two' },
+            canonicalResultId,
+            diagnostics: [],
+            semanticCoverageComplete: true,
+        }), false);
+    });
+
+    test('rejects a mutated noncanonical result identity', () => {
+        let publishCount = 0;
+        const session = new KpfToolingSession(() => { publishCount += 1; });
+        session.admit(admission());
+        session.openSnapshot({ uri: 'file:///main.spl', version: 1, digest: 'one' });
+        assert.strictEqual(session.acceptDiagnostics({
+            snapshot: { uri: 'file:///main.spl', version: 1, digest: 'one' },
+            canonicalResultId: 'mutated-result',
             diagnostics: [],
             semanticCoverageComplete: true,
         }), false);
