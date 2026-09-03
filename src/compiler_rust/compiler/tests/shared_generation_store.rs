@@ -10,7 +10,6 @@ fn parse_and_lower(repository: &PathBuf, relative: &str) {
     hir::lower_with_context_and_project_hint(&ast, &path, Some(repository))
         .expect("project-aware lowering");
 }
-
 #[test]
 fn shared_generation_store_has_durable_publication_and_pinned_gc_contracts() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -35,9 +34,11 @@ fn shared_generation_store_has_durable_publication_and_pinned_gc_contracts() {
     assert!(source.contains("shared_generation_exclusive_stage_v1"));
     assert!(source.contains("file_create_excl(path, content)"));
     assert!(source.contains("rows = rows.sorted()"));
+    assert!(source.contains("rt_process_start_identity(owner_pid!)"));
+    assert!(source.contains("shared_generation_reclaim_orphan_stages_v1"));
+    assert!(source.contains("shared_generation_store_bytes_v1"));
     parse_and_lower(&repository, "src/compiler/80.driver/cache/shared_generation_store.spl");
     parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_publication_spec.spl");
     parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_writer_race_native.spl");
     parse_and_lower(&repository, "test/03_system/compiler/feature/shared_generation_process_death_native.spl");
 }
-

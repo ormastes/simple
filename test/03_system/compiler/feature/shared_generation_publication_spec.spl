@@ -12,6 +12,8 @@ extern fn rt_file_write(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_start_identity(pid: i64) -> i64
 
 describe "MBH-NFR-006 shared publication lifecycle":
     it "pins a reader across publication and deterministic bounded GC":
@@ -93,6 +95,26 @@ describe "MBH-NFR-006 shared publication lifecycle":
         expect(rt_file_exists("{root}/leases/live.lease")).to_equal(true)
         expect(shared_generation_release_v1(root, "live")).to_equal(true)
 
+    it "rejects PID reuse by comparing process start identity":
+        val root = "/tmp/simple-shared-generation-pid-reuse-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val generation = shared_generation_publish_v1(root, "", 1, "stable")
+        expect(generation.len()).to_equal(64)
+        val pid = rt_getpid()
+        val start = rt_process_start_identity(pid)
+        expect(start > 0).to_equal(true)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "reused", "pid:{pid}:{start + 1}", 1).valid).to_equal(true)
+        expect(shared_generation_reclaim_dead_leases_v1(
+            root, 2, []).unwrap()).to_equal(1)
+        expect(rt_file_exists("{root}/leases/reused.lease")).to_equal(false)
+        expect(shared_generation_pin_current_owned_v1(
+            root, "same-process", "pid:{pid}:{start}", 1).valid).to_equal(true)
+        expect(shared_generation_reclaim_dead_leases_v1(
+            root, 2, []).unwrap()).to_equal(0)
+        expect(shared_generation_release_v1(root, "same-process")).to_equal(true)
+
     it "fails closed on lease overflow and deleted current or pinned generations":
         print("MBH-NFR006-BEGIN:overflow-current-pin")
         val root = "/tmp/simple-shared-generation-overflow-spec"
@@ -138,3 +160,22 @@ describe "MBH-NFR-006 shared publication lifecycle":
             "publication-exceeds-bound")
         expect(rt_file_exists("{root}/CURRENT")).to_equal(false)
         print("MBH-NFR006-PASS:prepublication-bound")
+
+    it "reclaims crash staging and counts every regular store file":
+        val root = "/tmp/simple-shared-generation-complete-accounting-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all("{root}/generations")).to_equal(true)
+        expect(rt_dir_create_all("{root}/leases")).to_equal(true)
+        expect(rt_file_write(
+            "{root}/generations/old.generation.tmp.crashed",
+            "crash-orphan-that-must-not-charge-the-next-publication")).to_equal(true)
+        val generation = shared_generation_publish_bounded_v1(
+            root, "", 1, "small", 512)
+        expect(generation.len()).to_equal(64)
+        expect(rt_file_exists(
+            "{root}/generations/old.generation.tmp.crashed")).to_equal(false)
+        expect(rt_file_write("{root}/unclassified-store-bytes",
+            "this-file-must-count-against-the-host-wide-bound")).to_equal(true)
+        expect(shared_generation_publish_bounded_v1(
+            root, generation, 2, "next", 64)).to_equal(
+            "publication-exceeds-bound")
