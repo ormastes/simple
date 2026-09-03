@@ -54,9 +54,14 @@ during HIR lowering of `src/app/devhub/errors.spl`.
 `src/app/devhub/errors.spl:44 ItfError.exit_code()` is written exactly this way
 (deliberately, with a comment explaining why the `match` form was avoided).
 Five examples in `test/01_unit/app/devhub/itf_config_spec.spl` fail with
-`semantic: variable 'kind' not found`, and every devhub command that maps an
-`ItfError` to a process exit code is affected — auth failures cannot return 4
-and cancellations cannot return 2.
+`semantic: variable ``kind`` not found`.
+
+Scope check (done, 2026-09-03): the live CLI paths that emit exit code 4 do
+NOT go through this method — `src/app/devhub/cmd_wiki.spl` uses a bare
+`return 4` at 6 sites, which is why `devhub wiki list` still exits 4 on this
+box. Impact is therefore limited to callers that actually invoke
+`ItfError.exit_code()`, plus any future code written in this idiom — not to
+every devhub exit path.
 
 ## Workaround
 
