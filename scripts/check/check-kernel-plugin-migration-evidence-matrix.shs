@@ -298,6 +298,77 @@ phase4_lint_table_positive_probe() {
     trap - EXIT HUP INT TERM
 }
 
+phase6_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 6 ABI-v1 APK/SFFI native runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 6 ABI-v1 APK/SFFI native runtime unusable: $runtime"
+    printf '%s\n' "$runtime"
+}
+
+phase6_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root"
+    find "$REPO_ROOT/src" -type l -print | while IFS= read -r link_path; do
+        resolved=$(realpath "$link_path") || blocked 'phase 6 workspace contains an unresolved source link'
+        case "$resolved" in "$REPO_ROOT"/*) ;; *) blocked 'phase 6 workspace source link escapes the repository' ;; esac
+    done
+    cp -RL "$REPO_ROOT/src" "$workspace_root/src" || blocked 'phase 6 private source tree could not be created'
+    mkdir -p "$workspace_root/test/01_unit/lib/aspect_pack" "$workspace_root/test/01_unit/lib/sffi" \
+        "$workspace_root/test/fixtures/sffi"
+    cp "$REPO_ROOT/test/01_unit/lib/aspect_pack/negotiate_spec.spl" \
+        "$workspace_root/test/01_unit/lib/aspect_pack/negotiate_spec.spl"
+    cp "$REPO_ROOT/test/01_unit/lib/sffi/dynamic_versioned_negotiate_spec.spl" \
+        "$workspace_root/test/01_unit/lib/sffi/dynamic_versioned_negotiate_spec.spl"
+    cp "$REPO_ROOT/test/fixtures/sffi/plugin_entry_v1_fixture.c" \
+        "$workspace_root/test/fixtures/sffi/plugin_entry_v1_fixture.c"
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 6 private workspace contains symlinks'
+    fi
+}
+
+phase6_spec_probe() {
+    probe_root=$1
+    spec=$2
+    output=$3
+    private_state=$4
+    runtime=$(phase6_runtime)
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    set +e
+    (cd "$probe_root" && env HOME="$private_state/home" XDG_CACHE_HOME="$private_state/cache" \
+        TMPDIR="$private_state/tmp" SIMPLE_BUILD_DIR="$private_state/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 "$runtime" test "$spec" --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase6_behavior_positive_probe() {
+    phase6_runtime >/dev/null
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase6-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase6_workspace "$private_root/workspace"
+    if ! phase6_spec_probe "$private_root/workspace" test/01_unit/lib/aspect_pack/negotiate_spec.spl \
+            "$private_root/apk.out" "$private_root/apk-state"; then
+        cat "$private_root/apk.out" >&2
+        blocked 'phase 6 APK ABI-v1 negotiation probe could not execute successfully'
+    fi
+    grep -Fq 'KPM_PHASE6_APK_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST' "$private_root/apk.out" || {
+        cat "$private_root/apk.out" >&2; blocked 'phase 6 APK probe lacked exact digest-refusal PASS receipt'; }
+    if ! phase6_spec_probe "$private_root/workspace" test/01_unit/lib/sffi/dynamic_versioned_negotiate_spec.spl \
+            "$private_root/sffi.out" "$private_root/sffi-state"; then
+        cat "$private_root/sffi.out" >&2
+        blocked 'phase 6 SFFI ABI-v1 native loading probe could not execute successfully'
+    fi
+    grep -Fq 'KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=abi-v1-refusal state=PASS expected=PLUG-E-ABI publication=denied' "$private_root/sffi.out" || {
+        cat "$private_root/sffi.out" >&2; blocked 'phase 6 SFFI probe lacked exact ABI-v1 refusal PASS receipt'; }
+    echo 'KPM_PHASE6_APK_NEGOTIATION_STATUS=PASS'
+    echo 'KPM_PHASE6_SFFI_LOADING_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
 probe_phase() {
     phase=$1
     case "$phase" in
@@ -355,6 +426,7 @@ probe_phase() {
             require_text "$seam" 'if host_iface.major != answer.implements.major:'
             require_text "$seam" 'answer.implements.abi_digest != host_iface.abi_digest and'
             require_text "$seam" 'return NegotiateVerdict.DigestUnaccepted(answer.implements.abi_digest)'
+            phase6_behavior_positive_probe
             ;;
         7)
             seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
@@ -510,6 +582,32 @@ selftest() {
             echo 'KPM_PHASE4_COPIED_PROVIDER_SENTINEL=KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT_V1'
             echo 'KPM_PHASE4_LINT_TABLE_STATUS=FAIL'
             echo 'KPM_PHASE4_COPIED_PROVIDER_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 6 ]; then
+            rm -rf "$tmp/root"
+            phase6_workspace "$tmp/root"
+            sed 's/answer.implements.abi_digest != host_iface.abi_digest and/answer.implements.abi_digest == host_iface.abi_digest and/' \
+                "$REPO_ROOT/src/lib/common/plugin/negotiation.spl" > "$tmp/root/src/lib/common/plugin/negotiation.spl"
+            if phase6_spec_probe "$tmp/root" test/01_unit/lib/aspect_pack/negotiate_spec.spl \
+                    "$tmp/phase6-apk.out" "$tmp/phase6-apk-state"; then
+                fail 'phase 6 digest-acceptance mutation was accepted by APK behavior probe'
+            fi
+            grep -Fq 'KPM_PHASE6_APK_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST' "$tmp/phase6-apk.out" || {
+                cat "$tmp/phase6-apk.out" >&2; blocked 'phase 6 APK mutant lacked exact assertion-local FAIL receipt'; }
+            echo 'KPM_PHASE6_APK_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+
+            cp "$REPO_ROOT/src/lib/common/plugin/negotiation.spl" "$tmp/root/src/lib/common/plugin/negotiation.spl"
+            sed 's/if not verdict.accepted():/if false:/' \
+                "$REPO_ROOT/src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl" > \
+                "$tmp/root/src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl"
+            if phase6_spec_probe "$tmp/root" test/01_unit/lib/sffi/dynamic_versioned_negotiate_spec.spl \
+                    "$tmp/phase6-sffi.out" "$tmp/phase6-sffi-state"; then
+                fail 'phase 6 negotiation-bypass mutation was accepted by SFFI loading probe'
+            fi
+            grep -Fq 'KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=abi-v1-refusal state=FAIL expected=PLUG-E-ABI actual=handle-published' "$tmp/phase6-sffi.out" || {
+                cat "$tmp/phase6-sffi.out" >&2; blocked 'phase 6 SFFI mutant lacked exact assertion-local FAIL receipt'; }
+            echo 'KPM_PHASE6_SFFI_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
             current=$((current + 1))
             continue
         else
