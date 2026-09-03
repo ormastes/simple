@@ -1,0 +1,69 @@
+# Normative resolution targets for the 2D + GPU lane.
+#
+# User directive, 2026-09-03: Simple is optimized for 8K first. Lower
+# resolutions (800x600 .. 4K) and resolutions ABOVE these targets must keep
+# working correctly, but wherever a default value, tuning constant, threshold,
+# buffer size, chunking strategy or allocation heuristic has to be chosen, it is
+# chosen so the two primary targets below are well served BY THE DEFAULT.
+#
+# A constant sized for a small framebuffer is a defect under this policy even
+# where it is not yet the measured bottleneck. No hard upper bound on resolution
+# may be introduced.
+#
+# Requirement: doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md (NFR-2DP-004)
+# Audit:       doc/08_tracking/bug/engine2d_8k_default_sizing_inventory_2026-09-03.md
+
+schema: simple/graphics/resolution_targets/v1
+
+primary_targets:
+  - id: screen_8k
+    width: 7680
+    height: 4320
+    pixels: 33177600
+    framebuffer_bytes: 132710400      # 4 B/px
+    note: "8K screen. The default target for windowed and full-screen surfaces."
+  - id: square_8k
+    width: 8192
+    height: 8192
+    pixels: 67108864
+    framebuffer_bytes: 268435456      # 4 B/px
+    note: "Square 8K. The default target for offscreen/compute surfaces and textures."
+
+# Every perf-affecting change to this lane reports numbers at each rung, so a
+# change that wins at 8K while regressing 800x600 is visible rather than
+# silently accepted.
+sweep_ladder:
+  - {width: 800,  height: 600}
+  - {width: 1920, height: 1080}
+  - {width: 3840, height: 2160}
+  - {width: 7680, height: 4320}
+  - {width: 8192, height: 8192}
+
+# Vulkan REQUIRED-LIMITS floor. A constant or dispatch shape in this lane is
+# checked against these, not against what the current Apple/MoltenVK device
+# happens to allow — a value that only works because Metal's limits are generous
+# is a latent correctness bug on a conformant desktop device.
+vulkan_required_limits_floor:
+  max_storage_buffer_range: 134217728       # 128 MiB. square_8k is 2.0x this.
+  max_compute_work_group_count_per_dim: 65535
+  note: "square_8k exceeds max_storage_buffer_range at the floor; a 1-D linearized full-surface dispatch exceeds max_compute_work_group_count_per_dim from ~4K upward. Neither limit is queried anywhere in the runtime today."
+
+# Derived sizing figures, so a cap can be checked against a number rather than
+# against intuition.
+derived:
+  # A full-surface compute dispatch linearized to 1-D with a 256-wide local size.
+  # Compare against max_compute_work_group_count_per_dim above.
+  dispatch_groups_1d_256:
+    screen_8k: 129600
+    square_8k: 262144
+  # The same dispatch as 2-D 16x16 groups, which is the shape the rect/blit/image
+  # paths already use and the shape every full-surface path should use.
+  dispatch_groups_2d_16:
+    screen_8k: {x: 480, y: 270}
+    square_8k: {x: 512, y: 512}
+  # Rows in one full-surface readback. A strided-transfer row cap must admit
+  # several of these, not one or two, or incremental damage readback degrades to
+  # a full-frame transfer at 8K.
+  rows_per_full_surface:
+    screen_8k: 4320
+    square_8k: 8192
