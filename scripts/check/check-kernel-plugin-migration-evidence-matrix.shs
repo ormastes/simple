@@ -373,6 +373,80 @@ phase5_backend_dispatch_positive_probe() {
     trap - EXIT HUP INT TERM
 }
 
+phase6_runtime() {
+    runtime=${KPM_SIMPLE_BINARY:-$REPO_ROOT/bin/release/simple}
+    [ -x "$runtime" ] || blocked "phase 6 acceptance runtime unavailable: $runtime"
+    "$runtime" --version >/dev/null 2>&1 || blocked "phase 6 acceptance runtime unusable: $runtime"
+    printf '%s\n' "$runtime"
+}
+
+phase6_workspace() {
+    workspace_root=$1
+    mkdir -p "$workspace_root/test/03_system/compiler/feature" "$workspace_root/test/fixtures/sffi"
+    cp -RL "$REPO_ROOT/src" "$workspace_root/src" ||
+        blocked 'phase 6 private source copy could not be created'
+    cp "$REPO_ROOT/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl" \
+        "$workspace_root/test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl"
+    cp "$REPO_ROOT/test/fixtures/sffi/plugin_entry_v1_fixture.c" \
+        "$workspace_root/test/fixtures/sffi/plugin_entry_v1_fixture.c"
+    [ ! -f "$REPO_ROOT/targets.sdn" ] || cp "$REPO_ROOT/targets.sdn" "$workspace_root/targets.sdn"
+    if find "$workspace_root" -type l -print -quit | grep -q .; then
+        blocked 'phase 6 private workspace contains symlinks'
+    fi
+}
+
+phase6_acceptance_probe() {
+    probe_root=$1
+    output=$2
+    private_state=$3
+    runtime=$(phase6_runtime)
+    mkdir -p "$private_state/home" "$private_state/cache" "$private_state/build" "$private_state/tmp"
+    set +e
+    (cd "$probe_root" && env \
+        HOME="$private_state/home" \
+        XDG_CACHE_HOME="$private_state/cache" \
+        TMPDIR="$private_state/tmp" \
+        SIMPLE_BUILD_DIR="$private_state/build" \
+        SIMPLE_FRONTEND_CACHE_DIR="$private_state/cache/frontend" \
+        SIMPLE_LIB="$probe_root/src" \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        "$runtime" test test/03_system/compiler/feature/kernel_plugin_phase6_acceptance_spec.spl \
+        --mode=interpreter) >"$output" 2>&1
+    probe_rc=$?
+    set -e
+    return "$probe_rc"
+}
+
+phase6_require_receipts() {
+    output=$1
+    state=$2
+    for boundary in NEGOTIATION APK SFFI; do
+        grep -Fq "KPM_PHASE6_${boundary}_ASSERTION_RECEIPT case=digest-refusal state=$state expected=PLUG-E-DIGEST" "$output" || return 1
+    done
+}
+
+phase6_acceptance_positive_probe() {
+    private_root=$(mktemp -d "${TMPDIR:-/tmp}/kpm-phase6-positive.XXXXXX")
+    trap 'rm -rf "$private_root"' EXIT HUP INT TERM
+    phase6_workspace "$private_root/workspace"
+    if ! phase6_acceptance_probe "$private_root/workspace" "$private_root/output" "$private_root/state"; then
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged acceptance probe could not execute successfully'
+    fi
+    phase6_require_receipts "$private_root/output" BEGIN || {
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged probe did not enter every refusal assertion'
+    }
+    phase6_require_receipts "$private_root/output" PASS || {
+        cat "$private_root/output" >&2
+        blocked 'phase 6 unchanged probe lacked exact negotiation/APK/SFFI PASS receipts'
+    }
+    echo 'KPM_PHASE6_ACCEPTANCE_SENTINEL=KPM_PHASE6_NEGOTIATION_APK_SFFI_V1'
+    echo 'KPM_PHASE6_ACCEPTANCE_STATUS=PASS'
+    rm -rf "$private_root"
+    trap - EXIT HUP INT TERM
+}
+
 probe_phase() {
     phase=$1
     case "$phase" in
@@ -431,6 +505,7 @@ probe_phase() {
             require_text "$seam" 'if host_iface.major != answer.implements.major:'
             require_text "$seam" 'answer.implements.abi_digest != host_iface.abi_digest and'
             require_text "$seam" 'return NegotiateVerdict.DigestUnaccepted(answer.implements.abi_digest)'
+            phase6_acceptance_positive_probe
             ;;
         7)
             seam=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
@@ -618,6 +693,38 @@ selftest() {
             echo 'KPM_PHASE5_BACKEND_DISPATCH_SENTINEL=KPM_PHASE5_POLICY_DISPATCH_RECEIPT_V1'
             echo 'KPM_PHASE5_BACKEND_DISPATCH_STATUS=FAIL'
             echo 'KPM_PHASE5_POLICY_DISPATCH_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+            current=$((current + 1))
+            continue
+        elif [ "$current" -eq 6 ]; then
+            rm -rf "$tmp/root"
+            phase6_workspace "$tmp/root"
+            sed 's/answer.implements.abi_digest != host_iface.abi_digest and/false and/' \
+                "$REPO_ROOT/$seam" >"$tmp/root/$seam"
+            cmp -s "$REPO_ROOT/$seam" "$tmp/root/$seam" && fail 'phase 6 digest-refusal mutation did not change negotiation implementation'
+            if phase6_acceptance_probe "$tmp/root" "$tmp/phase6-runtime-output.txt" "$tmp/phase6-state"; then
+                fail 'phase 6 digest-refusal mutation was accepted by end-to-end acceptance probe'
+            else
+                mutant_rc=$?
+            fi
+            [ "$mutant_rc" -eq 1 ] || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked "phase 6 digest-refusal mutant returned infrastructure status $mutant_rc"
+            }
+            phase6_require_receipts "$tmp/phase6-runtime-output.txt" BEGIN || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant did not enter all negotiation/APK/SFFI refusal assertions'
+            }
+            phase6_require_receipts "$tmp/phase6-runtime-output.txt" FAIL || {
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant lacked exact negotiation/APK/SFFI assertion-failure receipts'
+            }
+            if phase6_require_receipts "$tmp/phase6-runtime-output.txt" PASS; then
+                cat "$tmp/phase6-runtime-output.txt" >&2
+                blocked 'phase 6 mutant emitted contradictory complete PASS evidence'
+            fi
+            echo 'KPM_PHASE6_ACCEPTANCE_SENTINEL=KPM_PHASE6_NEGOTIATION_APK_SFFI_V1'
+            echo 'KPM_PHASE6_ACCEPTANCE_STATUS=FAIL'
+            echo 'KPM_PHASE6_DIGEST_MUTATION_RECEIPT=FAIL_AT_ALL_BOUNDARIES'
             current=$((current + 1))
             continue
         else
