@@ -2873,29 +2873,17 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
           stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
-          stage2_parent_sanity_tmp="${stage2_parent_sanity}.tmp.$$"
-          stage2_parent_provenance_tmp="${stage2_parent_provenance}.tmp.$$"
-          {
-            echo 'schema=simple-bootstrap-stage2-parent-sanity-v1'
-            echo 'stage2-sanity: pass'
-            echo "candidate_sha256=${stage2_origin_sha_before}"
-            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
-            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
-          } >"${stage2_parent_sanity_tmp}"
-          {
-            echo 'schema=simple-bootstrap-stage2-parent-provenance-v1'
-            echo 'stage2-provenance: pure-simple'
-            echo 'authority=explicit-full-bootstrap-stage2-trust-root'
-            echo "candidate_sha256=${stage2_origin_sha_before}"
-            echo "admission_receipt_path=${stage2_admission_receipt_absolute}"
-            echo "source_snapshot_sha256=$(bootstrap_stage3_hash_file "${stage3_source_before}")"
-            echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
-            echo "tool_authority_sha256=$(bootstrap_stage3_hash_file "${tool_authority_before}")"
-            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
-          } >"${stage2_parent_provenance_tmp}"
-          chmod 400 "${stage2_parent_sanity_tmp}" "${stage2_parent_provenance_tmp}"
-          mv -f "${stage2_parent_sanity_tmp}" "${stage2_parent_sanity}"
-          mv -f "${stage2_parent_provenance_tmp}" "${stage2_parent_provenance}"
+          sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
+            "$(absolute_path "${stage2_bin}")" \
+            "${stage2_admission_receipt_absolute}" \
+            "$(absolute_path "${stage3_source_before}")" \
+            "$(absolute_path "${runtime_admitted_snapshot}")" \
+            "$(absolute_path "${tool_authority_before}")" \
+            "$(absolute_path "${stage2_parent_sanity}")" \
+            "$(absolute_path "${stage2_parent_provenance}")" || {
+            echo "error: could not publish producer-bound Stage 2 parent receipts" >&2
+            exit 1
+          }
         fi
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
