@@ -1,0 +1,151 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal}
+
+pub enum LintVerdict:
+    CompleteClean
+    CompleteWithFindings
+    Partial
+    NotAnalyzed
+    Cancelled
+    Failed
+
+pub struct ArtifactKeyV1:
+    workspace_id: KpfId128
+    language_id: KpfId128
+    path_id: KpfId128
+    target_id: KpfId128
+    configuration_digest: KpfDigest256
+
+pub struct SourceSpanV1:
+    artifact: ArtifactKeyV1
+    revision: u64
+    start_byte: u64
+    end_byte: u64
+
+pub struct DiagnosticV1:
+    rule_id: KpfId128
+    provider_id: KpfId128
+    severity: u32
+    category: u32
+    primary_span: SourceSpanV1
+    message_id: KpfId128
+    fix_digest: KpfDigest256
+
+pub struct RuleDescriptorV1:
+    rule_id: KpfId128
+    provider_id: KpfId128
+    language_id: KpfId128
+    required_phase_bits: u64
+    required_fact_bits: u64
+    default_severity: u32
+    determinism_class: u32
+    batch_granularity: u32
+
+pub struct AnalysisCoverageV1:
+    requested_unit_count: u32
+    admitted_unit_count: u32
+    completed_unit_count: u32
+    partial_unit_count: u32
+    not_analyzed_unit_count: u32
+    requested_rule_count: u32
+    completed_rule_count: u32
+    skipped_rule_count: u32
+    requested_phase_bits: u64
+    completed_phase_bits: u64
+    provider_receipt_digest: KpfDigest256
+    input_revision_digest: KpfDigest256
+
+pub struct LintRunResultV1:
+    verdict: LintVerdict
+    coverage: AnalysisCoverageV1
+    diagnostic_count: u32
+    error_count: u32
+    warning_count: u32
+    cancelled: bool
+    infrastructure_failed: bool
+
+pub fn lint_coverage_complete(coverage: AnalysisCoverageV1) -> bool:
+    if coverage.requested_unit_count == 0 or coverage.requested_rule_count == 0 or coverage.requested_phase_bits == 0:
+        return false
+    if coverage.admitted_unit_count != coverage.requested_unit_count:
+        return false
+    if coverage.completed_unit_count != coverage.requested_unit_count:
+        return false
+    if coverage.partial_unit_count != 0 or coverage.not_analyzed_unit_count != 0:
+        return false
+    if coverage.completed_rule_count != coverage.requested_rule_count or coverage.skipped_rule_count != 0:
+        return false
+    (coverage.completed_phase_bits & coverage.requested_phase_bits) == coverage.requested_phase_bits
+
+pub fn lint_run_result(coverage: AnalysisCoverageV1, diagnostic_count: u32, error_count: u32, warning_count: u32, cancelled: bool, infrastructure_failed: bool) -> LintRunResultV1:
+    var verdict = LintVerdict.Partial
+    if infrastructure_failed:
+        verdict = LintVerdict.Failed
+    elif cancelled:
+        verdict = LintVerdict.Cancelled
+    elif coverage.completed_unit_count == 0 and (coverage.not_analyzed_unit_count > 0 or coverage.requested_unit_count > 0):
+        verdict = LintVerdict.NotAnalyzed
+    elif lint_coverage_complete(coverage):
+        if diagnostic_count == 0:
+            verdict = LintVerdict.CompleteClean
+        else:
+            verdict = LintVerdict.CompleteWithFindings
+    LintRunResultV1(
+        verdict: verdict,
+        coverage: coverage,
+        diagnostic_count: diagnostic_count,
+        error_count: error_count,
+        warning_count: warning_count,
+        cancelled: cancelled,
+        infrastructure_failed: infrastructure_failed
+    )
+
+fn _id_less(left: KpfId128, right: KpfId128) -> bool:
+    left.hi < right.hi or (left.hi == right.hi and left.lo < right.lo)
+
+fn _artifact_less(left: ArtifactKeyV1, right: ArtifactKeyV1) -> bool:
+    if not kpf_id128_equal(left.workspace_id, right.workspace_id):
+        return _id_less(left.workspace_id, right.workspace_id)
+    if not kpf_id128_equal(left.path_id, right.path_id):
+        return _id_less(left.path_id, right.path_id)
+    if not kpf_id128_equal(left.target_id, right.target_id):
+        return _id_less(left.target_id, right.target_id)
+    _id_less(left.language_id, right.language_id)
+
+fn _diagnostic_less(left: DiagnosticV1, right: DiagnosticV1) -> bool:
+    if _artifact_less(left.primary_span.artifact, right.primary_span.artifact):
+        return true
+    if _artifact_less(right.primary_span.artifact, left.primary_span.artifact):
+        return false
+    if left.primary_span.revision != right.primary_span.revision:
+        return left.primary_span.revision < right.primary_span.revision
+    if left.primary_span.start_byte != right.primary_span.start_byte:
+        return left.primary_span.start_byte < right.primary_span.start_byte
+    if left.primary_span.end_byte != right.primary_span.end_byte:
+        return left.primary_span.end_byte < right.primary_span.end_byte
+    if not kpf_id128_equal(left.rule_id, right.rule_id):
+        return _id_less(left.rule_id, right.rule_id)
+    if not kpf_id128_equal(left.provider_id, right.provider_id):
+        return _id_less(left.provider_id, right.provider_id)
+    _id_less(left.message_id, right.message_id)
+
+fn _diagnostic_equal(left: DiagnosticV1, right: DiagnosticV1) -> bool:
+    not _diagnostic_less(left, right) and not _diagnostic_less(right, left) and left.fix_digest.w0 == right.fix_digest.w0 and left.fix_digest.w1 == right.fix_digest.w1 and left.fix_digest.w2 == right.fix_digest.w2 and left.fix_digest.w3 == right.fix_digest.w3
+
+pub fn lint_sort_and_deduplicate(diagnostics: [DiagnosticV1]) -> [DiagnosticV1]:
+    var sorted: [DiagnosticV1] = []
+    for diagnostic in diagnostics:
+        var inserted = false
+        var next: [DiagnosticV1] = []
+        for existing in sorted:
+            if not inserted and _diagnostic_less(diagnostic, existing):
+                next.push(diagnostic)
+                inserted = true
+            next.push(existing)
+        if not inserted:
+            next.push(diagnostic)
+        sorted = next
+    var unique: [DiagnosticV1] = []
+    for diagnostic in sorted:
+        if unique.len() == 0 or not _diagnostic_equal(unique[unique.len() - 1], diagnostic):
+            unique.push(diagnostic)
+    unique
