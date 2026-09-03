@@ -38,6 +38,7 @@ const child_process_1 = require("child_process");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
+const storageRoots_1 = require("./storageRoots");
 exports.CLI_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const CLI_OUTPUT_TRUNCATION_NOTICE = '\n[output truncated]';
 function collectSearchRoots(fileOrDir) {
@@ -69,8 +70,9 @@ function appendLimited(current, chunk) {
     return `${current}${chunk.slice(0, available)}${CLI_OUTPUT_TRUNCATION_NOTICE}`;
 }
 class SimpleCliService {
-    constructor(services) {
+    constructor(services, context) {
         this.services = services;
+        this.context = context;
     }
     resolveSimpleCommand(resolveFrom) {
         const cliConfig = vscode.workspace.getConfiguration('simple.cli');
@@ -110,9 +112,17 @@ class SimpleCliService {
             message: `${command} ${args.join(' ')}`,
         });
         return await new Promise((resolve, reject) => {
+            const cwd = options?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const roots = (0, storageRoots_1.resolveVsCodeStorageRoots)(this.context, cwd);
+            if (!roots) {
+                const error = new Error('Centralized Simple storage roots are unavailable');
+                this.services.markDegraded('cli', error.message, 'native');
+                reject(error);
+                return;
+            }
             const child = (0, child_process_1.spawn)(command, args, {
-                cwd: options?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-                env: process.env,
+                cwd,
+                env: (0, storageRoots_1.projectSimpleToolEnvironment)(roots),
                 shell: false,
             });
             let stdout = '';

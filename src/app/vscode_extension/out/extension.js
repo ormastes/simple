@@ -127,7 +127,7 @@ async function activate(context) {
             math_1.MathSyncPanel.show();
         }
     };
-    const cli = new simpleCliService_1.SimpleCliService(services);
+    const cli = new simpleCliService_1.SimpleCliService(services, context);
     const codeLensProvider = new testCodeLensProvider_1.TestCodeLensProvider();
     const testController = new testController_1.SimpleTestController(cli, services);
     const runCliTestCommand = async (args, resolveFrom) => {
