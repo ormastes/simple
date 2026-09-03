@@ -38,6 +38,7 @@ check_tree() {
 
   echo 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=BEGIN'
   echo 'KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=BEGIN'
+  echo 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=BEGIN'
 
   for file in "$factory" "$registry" "$codegen" "$plugin_registry" \
       "$plugin_ports" "$interpreter_port" "$cli" "$combined" "$compatibility" \
@@ -125,9 +126,20 @@ check_tree() {
   require "$receipt" 'selected_composition_sha256=$selected_sha256'
   require "$receipt" 'SIMPLE_K1_COMPOSITION_SHA256_BEFORE'
 
+  forbidden_import=$(find "$root/src/compiler" \
+      -path "$root/src/compiler/70.backend/backend" -prune -o \
+      -type f -name '*.spl' -exec grep -El \
+      '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+plugins\.backend_' {} + | head -1 || true)
+  if [ -n "$forbidden_import" ]; then
+    relative_import=${forbidden_import#"$root/"}
+    echo "KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=FAIL reason=plugin-import path=$relative_import" >&2
+    fail "kernel/compiler source imports a backend plugin: $relative_import"
+  fi
+
   rm -f "$create_specific"
   trap - EXIT HUP INT TERM
   echo "KPM_PHASE5_BACKEND_RELOCATION_RECEIPT case=canonical-map state=PASS count=$relocation_count"
+  echo 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=PASS'
   echo 'KPM_PHASE5_POLICY_DISPATCH_RECEIPT case=llvm-cranelift state=PASS'
   echo "PASS — Phase 5 backends are relocated, composition-selected, policy-bound, and table-routed"
 }
@@ -213,6 +225,17 @@ selftest() {
   fi
   mv "$fixture/$closure.clean" "$fixture/$closure"
 
+  mkdir -p "$fixture/src/compiler/80.driver"
+  printf '\nuse plugins.backend_wasm.*\n' >"$fixture/src/compiler/80.driver/forbidden_plugin.spl"
+  import_output=$fixture/import-mutant.out
+  if PHASE5_DISPATCH_ROOT="$fixture" "$0" >"$import_output" 2>&1; then
+    fail "selftest admitted compiler-to-plugin import"
+  fi
+  grep -Fq 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_RECEIPT case=kernel-source state=FAIL reason=plugin-import path=src/compiler/80.driver/forbidden_plugin.spl' "$import_output" ||
+    fail "selftest compiler-import mutant lacked exact failure receipt"
+  rm -f "$fixture/src/compiler/80.driver/forbidden_plugin.spl"
+  echo 'KPM_PHASE5_COMPILER_PLUGIN_IMPORT_MUTATION_RECEIPT=FAIL_AT_EXACT_ASSERTION'
+
   cp "$fixture/$compatibility" "$fixture/$compatibility.clean"
   printf '\nuse compiler.driver.driver_bootstrap.*\n' >>"$fixture/$compatibility"
   if PHASE5_DISPATCH_ROOT="$fixture" "$0" >/dev/null 2>&1; then
@@ -220,7 +243,7 @@ selftest() {
   fi
   mv "$fixture/$compatibility.clean" "$fixture/$compatibility"
 
-  echo "PASS — Phase 5 dispatch checker rejected 8/8 relocation and dispatch mutations"
+  echo "PASS — Phase 5 dispatch checker rejected 9/9 relocation, boundary, and dispatch mutations"
 }
 
 factory=src/compiler/70.backend/backend/backend_factory_full.spl
