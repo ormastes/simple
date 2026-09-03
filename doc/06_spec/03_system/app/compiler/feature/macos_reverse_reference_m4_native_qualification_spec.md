@@ -6,6 +6,7 @@
 
 ## Scenarios
 - should run the production qualification checker's mutation-red self-test.
+- should prove an actual unchanged native-build schedules zero compiler work.
 - should reject an unavailable architecture rather than synthesize PASS.
 - should reject prebuilt tool substitution before native qualification.
 - should reject supplied provider archives and synthetic provider receipts.
@@ -15,6 +16,9 @@
 
 ## Manual Steps
 - Execute the production M4 checker over all eight fixtures.
+- Run the production native-build twice against one isolated identity and
+  require the second invocation's real parser, HIR, MIR, codegen, and linker
+  scheduler counters all to equal zero.
 - Invoke the production checker with an invalid architecture mutation.
 - Pass a helper path where M4 must build producer-bound tools itself.
 - Pass a provider archive where M4 must build and trace a live archive itself.
@@ -34,7 +38,7 @@
   `BLOCKED` because no admitted baseline/measurement pair exists.
 
 ## Freshness
-- Requirement IDs and scenario names mirror the executable source as of 2026-09-02.
+- Requirement IDs and scenario names mirror the executable source as of 2026-09-03.
 - The executable contains no `pass_todo` or tautological `expect(true).to_equal(true)` evidence.
 - Runtime execution was not available in this audit because the admitted self-hosted `bin/simple` lacks `test`; no runtime PASS is claimed.
 - Authenticated Phase3 and native M4 artifacts remain `BLOCKED` until produced

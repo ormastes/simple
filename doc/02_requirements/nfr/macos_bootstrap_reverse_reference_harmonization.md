@@ -10,7 +10,12 @@ Decision source: user-final-performance-authority-2026-09-02
   nondeterministic fields.
 - **MBH-NFR-002 — Incremental no-op.** A valid warm no-op shall parse, lower,
   and emit zero modules where producer-neutral caches apply, and shall not link
-  when the ordered link-input receipt is unchanged.
+  when the ordered link-input receipt is unchanged. Admission shall happen
+  before parser/HIR/MIR/codegen/link scheduling, bind the canonical complete
+  build request and requested-input identity, and recursively authenticate the
+  complete immutable receipt ancestry. Missing, corrupt, cyclic, or excessive
+  ancestry, stale invocations, and unrecoverable generation collisions fail
+  closed.
 - **MBH-NFR-003 — Bounded residency.** Evidence shall record wall time, CPU,
   peak/retained RSS, cache counts, and critical path. Each architecture shall
   supply an admitted baseline receipt bound to that architecture, its baseline

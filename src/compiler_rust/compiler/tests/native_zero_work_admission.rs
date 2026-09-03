@@ -1,0 +1,92 @@
+use simple_compiler::hir;
+use simple_parser::Parser;
+use std::fs;
+use std::path::PathBuf;
+
+fn parse_and_lower(repository: &PathBuf, relative: &str) {
+    let path = repository.join(relative);
+    let source = fs::read_to_string(&path).expect("read source");
+    let ast = Parser::new(&source).parse().expect("parse source");
+    hir::lower_with_context_and_project_hint(&ast, &path, Some(repository))
+        .expect("project-aware lowering");
+}
+
+fn parse_only(repository: &PathBuf, relative: &str) {
+    let path = repository.join(relative);
+    let source = fs::read_to_string(&path).expect("read source");
+    Parser::new(&source).parse().expect("parse source");
+}
+
+#[test]
+fn native_zero_work_admission_precedes_every_compiler_phase() {
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let orchestration_path = repository.join("src/compiler/80.driver/driver_orchestration.spl");
+    let orchestration = fs::read_to_string(orchestration_path).expect("read orchestration");
+    let admission = orchestration.find("native_noop_admit_v1(native_noop_request)")
+        .expect("preflight admission");
+    for phase in [
+        "log_phase(\"compile:start\")",
+        "self.load_sources_impl()",
+        "self.parse_all_committing_impl()",
+        "self.lower_to_mir()",
+    ] {
+        let scheduled = orchestration.find(phase).expect("scheduled phase");
+        assert!(admission < scheduled, "admission must precede {phase}");
+    }
+    assert!(orchestration.contains("compiler_work_counters_zero_v1(work)"));
+    assert!(orchestration.contains("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT"));
+    assert!(orchestration.contains("native_noop_publish_built_v1"));
+    assert!(orchestration.contains("file_copy(native_noop_request_output_v1(native_noop_request), delivery_output)"));
+    let native_build = fs::read_to_string(repository.join(
+        "src/app/io/_CliCompile/compile_targets.spl")).expect("read native-build wrapper");
+    let final_output_export = native_build.find(
+        "env_set(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\", output)")
+        .expect("canonical final-output transport");
+    let driver_start = native_build[final_output_export..].find(
+        "compiler_driver_run_compile(driver)").expect("driver invocation");
+    let final_output_restore = native_build[final_output_export..].find(
+        "env_set(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\", old_native_noop_final_output)")
+        .expect("final-output restoration");
+    assert!(driver_start < final_output_restore,
+        "canonical final output must remain visible throughout compilation");
+    let parser_owner = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/driver_source_pipeline_parsing.spl")).expect("read parser owner");
+    let hir_owner = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/driver_hir_pipeline_lowering.spl")).expect("read HIR owner");
+    let mir_owner = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/driver_pipeline_lowering.spl")).expect("read MIR owner");
+    assert!(parser_owner.contains("compiler_work_parser_schedule_v1"));
+    assert!(hir_owner.contains("compiler_work_hir_schedule_v1"));
+    assert!(mir_owner.contains("compiler_work_mir_schedule_v1"));
+    let aot = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/driver_aot_pipeline.spl")).expect("read aot pipeline");
+    let native = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/driver_aot_native_output.spl")).expect("read native output");
+    assert!(native.contains("compiler_work_codegen_schedule_v1"));
+    let linker = fs::read_to_string(repository.join(
+        "src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl"))
+        .expect("read linker owner");
+    assert!(linker.contains("compiler_work_link_schedule_v1"));
+    let protocol = fs::read_to_string(repository.join(
+        "src/compiler/80.driver/cache/native_noop_admission.spl")).expect("read protocol");
+    assert!(protocol.contains("content-digest="));
+    assert!(protocol.contains("native_noop_ancestry_authenticated_v1"));
+    assert!(protocol.contains("ancestry-cycle"));
+    assert!(protocol.contains("ancestry-depth-unbounded"));
+    assert!(protocol.contains("native_noop_preserve_collision_v1"));
+    assert!(protocol.contains("generation-collision-preservation-failed"));
+    assert!(protocol.contains("native_noop_frame_v1"));
+    assert!(protocol.contains("native_noop_exclusive_stage_v1"));
+    assert!(protocol.contains("file_create_excl(candidate, content)"));
+    for point in ["generation-write", "generation-rename", "pointer-write", "pointer-rename"] {
+        assert!(protocol.contains(point));
+    }
+    parse_and_lower(&repository, "src/compiler/80.driver/cache/native_noop_admission.spl");
+    parse_and_lower(&repository, "src/compiler/80.driver/perf/compiler_work_counters.spl");
+    parse_only(&repository, "src/compiler/80.driver/driver_source_pipeline_parsing.spl");
+    parse_only(&repository, "src/compiler/80.driver/driver_hir_pipeline_lowering.spl");
+    parse_only(&repository, "src/compiler/80.driver/driver_pipeline_lowering.spl");
+    parse_only(&repository, "src/compiler/80.driver/driver_orchestration.spl");
+    parse_and_lower(&repository, "test/03_system/compiler/feature/native_zero_work_admission_spec.spl");
+    parse_and_lower(&repository, "test/03_system/compiler/feature/native_zero_work_crash_probe.spl");
+}

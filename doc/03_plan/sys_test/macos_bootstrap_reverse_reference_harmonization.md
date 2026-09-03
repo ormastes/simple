@@ -1,8 +1,8 @@
 <!-- codex-design -->
 # SPipe Plan: macOS Bootstrap Reverse-Reference Harmonization
 
-Status: PLAN ONLY. No executable test or generated manual is added by this
-documentation audit.
+Status: MBH-NFR-002 executable coverage implemented; cross-architecture native
+qualification remains governed by the wider M4 plan.
 
 ## Shared scenario and checker names
 
@@ -34,6 +34,15 @@ Unimplemented helpers must call `fail(...)`; they must never silently return.
 | MBH-REQ-005 | integration | separate writers, read-only manifest admission, wrong producer/provider/target/schema rejection |
 | MBH-REQ-007 | live native macOS runners | two admitted slices, `lipo`, per-slice hashes, native execution, promote-without-rebuild |
 | MBH-NFR-001..006 | receipts and repeated runs | normalization equality, zero-work no-op, 20 warm requests, writer/crash/GC matrix |
+
+MBH-NFR-002 is additionally traced to
+`test/03_system/compiler/feature/native_zero_work_admission_spec.spl` and
+`test/03_system/app/compiler/feature/macos_reverse_reference_m4_native_qualification_spec.spl`.
+Its cases cover a true native-build warm hit, zero actual phase scheduler
+counters, canonical invocation/input mismatches, immutable-name collision
+recovery, deleted/corrupt ancestry, and process death before/after generation
+and `CURRENT` renames. The native executable is required; absence or a rejected
+runtime is `BLOCKED`, never a synthetic pass.
 
 Planned executable location:
 `test/03_system/compiler/bootstrap/macos_bootstrap_reverse_reference_harmonization_spec.spl`.

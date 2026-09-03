@@ -5,6 +5,12 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Authenticated unchanged native-build admission** — bind the complete
+  normalized invocation, requested inputs, compiler/toolchain environment, and
+  actual source closure to immutable content-addressed receipts; recursively
+  verify every ancestor before admitting a warm build; preserve and recover
+  unselected generation-name collisions; and expose real parser/HIR/MIR/codegen/link
+  scheduler counters with native crash-boundary and end-to-end SPipe coverage.
 - **Exact-ref mandatory-check evidence** — retain bootstrap gate logs in a
   commit-ready textual evidence tree, validate them from the exact pushed Git
   revision, reject dirty bootstrap attribution, and allow receipt-backed TODO
