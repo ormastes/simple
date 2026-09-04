@@ -2431,6 +2431,14 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
         int status = 0;
         if (waitpid((pid_t)pid, &status, 0) < 0) return -1;
         if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+        /* Same rule as the WNOHANG path below, which is where this was fixed
+           first: a bare -1 here discards WTERMSIG and renders every signal
+           death as a bare 255 to the caller. The bootstrap then reports
+           "worker was KILLED ... the signal number was discarded by an older
+           runtime", which is indistinguishable from an OOM, a SIGSEGV and a
+           wait failure -- and a Stage-3 kill could not be attributed because of
+           it. Report -(128+signo) here too. */
+        if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
         return -1;
     }
     int64_t waited_ms = 0;
