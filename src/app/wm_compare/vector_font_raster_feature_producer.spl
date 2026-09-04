@@ -39,28 +39,35 @@ fn raster_receipt() -> text:
             val glyph = rasterizer.rasterize(codepoint, 24)
             if glyph == nil:
                 return "vector_font_simple_status=failed reason=glyph-rasterization codepoint={codepoint}"
-            if sample == SAMPLE_COUNT - 1:
-                val width = glyph.?.gbm_width
-                val height = glyph.?.gbm_height
-                val pixels = glyph.?.gbm_pixels
-                if width <= 0 or height <= 0 or pixels.len() != width * height:
-                    return "vector_font_simple_status=failed reason=invalid-glyph codepoint={codepoint}"
-                rendered_glyphs = rendered_glyphs + 1
-                output_pixels = output_pixels + pixels.len()
-                checksum = (checksum ^ width) * 1099511628211
-                checksum = (checksum ^ height) * 1099511628211
-                checksum = (checksum ^ glyph.?.gbm_bearing_x) * 1099511628211
-                checksum = (checksum ^ glyph.?.gbm_bearing_y) * 1099511628211
-                checksum = (checksum ^ glyph.?.gbm_advance) * 1099511628211
-                var pixel: i64 = 0
-                while pixel < pixels.len():
-                    val alpha = pixels[pixel].to_i64()
-                    coverage = coverage + alpha
-                    checksum = (checksum ^ alpha) * 1099511628211
-                    pixel = pixel + 1
             codepoint = codepoint + 1
         samples.push(time_now_nanos() - start)
         sample = sample + 1
+
+    # Accuracy evidence is deliberately outside every timed sample.
+    var codepoint = FIRST_CODEPOINT
+    while codepoint <= LAST_CODEPOINT:
+        val glyph = rasterizer.rasterize(codepoint, 24)
+        if glyph == nil:
+            return "vector_font_simple_status=failed reason=evidence-rasterization codepoint={codepoint}"
+        val width = glyph.?.gbm_width
+        val height = glyph.?.gbm_height
+        val pixels = glyph.?.gbm_pixels
+        if width <= 0 or height <= 0 or pixels.len() != width * height:
+            return "vector_font_simple_status=failed reason=invalid-glyph codepoint={codepoint}"
+        rendered_glyphs = rendered_glyphs + 1
+        output_pixels = output_pixels + pixels.len()
+        checksum = (checksum ^ width) * 1099511628211
+        checksum = (checksum ^ height) * 1099511628211
+        checksum = (checksum ^ glyph.?.gbm_bearing_x) * 1099511628211
+        checksum = (checksum ^ glyph.?.gbm_bearing_y) * 1099511628211
+        checksum = (checksum ^ glyph.?.gbm_advance) * 1099511628211
+        var pixel: i64 = 0
+        while pixel < pixels.len():
+            val alpha = pixels[pixel].to_i64()
+            coverage = coverage + alpha
+            checksum = (checksum ^ alpha) * 1099511628211
+            pixel = pixel + 1
+        codepoint = codepoint + 1
 
     val ordered = sorted_i64(samples)
     if rendered_glyphs != 94 or coverage <= 0:
