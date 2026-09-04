@@ -4,6 +4,12 @@ set -eu
 die() { echo "engine2d-vulkan-c-parity: FAIL — $*" >&2; exit 1; }
 value() { awk -F= -v key="$2" '$1 == key { if (seen++) exit 2; value=$2 } END { if (!seen) exit 3; print value }' "$1"; }
 uint() { case $1 in ''|*[!0-9]*) return 1;; esac; }
+sint_nonzero() {
+    case $1 in
+        -*) digits=${1#-}; uint "$digits" && [ "$digits" != 0 ] ;;
+        *) uint "$1" && [ "$1" != 0 ] ;;
+    esac
+}
 hash() { [ ${#1} -eq 64 ] && case $1 in *[!0-9a-f]*) return 1;; esac; }
 
 validate() {
@@ -23,7 +29,12 @@ validate() {
         uint "$n" && [ "$n" -gt 0 ] || return 1
     done
     checksum=$(value "$file" checksum) || return 1
-    [ -n "$checksum" ] && [ "$checksum" != 0 ] || return 1
+    sint_nonzero "$checksum" || return 1
+    p50=$(value "$file" p50_ns) || return 1
+    p95=$(value "$file" p95_ns) || return 1
+    [ "$p50" -le "$p95" ] || return 1
+    # Bounds keep the 2x comparison and ratio arithmetic inside signed i64.
+    [ "$p95" -le 1000000000000000 ] || return 1
     [ -n "$(value "$file" feature)" ] && [ -n "$(value "$file" timing_scope)" ]
 }
 
@@ -48,7 +59,7 @@ compare() {
 self_test() {
     dir=$(mktemp -d "${TMPDIR:-/tmp}/engine2d-vulkan-c-parity.XXXXXX")
     trap 'rm -rf "$dir"' EXIT HUP INT TERM
-    write() { impl=$1 p95=$2 hash_value=$3; cat <<EOF
+    write() { impl=$1 p95=$2 hash_value=$3 checksum_value=${4:-99} p50=${5:-1000}; cat <<EOF
 schema=engine2d-vulkan-feature-perf-v1
 implementation=$impl
 backend=vulkan
@@ -60,11 +71,11 @@ height=4320
 warmup_count=1
 sample_count=31
 timing_scope=vulkan-submit-and-fence
-p50_ns=1000
+p50_ns=$p50
 p95_ns=$p95
 timed_readback_bytes=0
 mismatch_count=0
-checksum=99
+checksum=$checksum_value
 completion=known
 fallback=none
 EOF
@@ -76,6 +87,17 @@ EOF
     if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-over-2x-accepted; fi
     write simple 1900 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc >"$dir/simple"
     if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-workload-drift-accepted; fi
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -99 >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -99 >"$dir/c"
+    compare "$dir/simple" "$dir/c" >/dev/null
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa not-a-checksum >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa not-a-checksum >"$dir/c"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-invalid-checksum-accepted; fi
+    write simple 1999 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 99 3000 >"$dir/simple"
+    write c 1000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/c"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-p50-over-p95-accepted; fi
+    write simple 1000000000000001 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$dir/simple"
+    if (compare "$dir/simple" "$dir/c") >/dev/null 2>&1; then die selftest-overflow-timing-accepted; fi
     echo engine2d_vulkan_c_parity_selftest=pass
 }
 
