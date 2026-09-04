@@ -200,3 +200,76 @@ session was held to. Both edits are string/comment-only. The multi-line
 `print "..." + "..."` continuation in `parallel.spl` matches, in shape, the
 existing precedent at `parallel.spl:406-411` in the same function; the `eprint`
 strings added to `native_build_main.spl` contain no `{}` interpolation at all.
+
+---
+
+## Follow-up 2026-09-04 (same day): route decided, staged plan filed
+
+Staged plan: `doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md`.
+It carries the full argument; only the deltas to THIS record are listed here.
+
+**The "Proposed fix" section above is superseded.** It proposed wiring
+`build_parallel()` behind a one-module compile CLI. Three findings made that
+the *third* choice, not the first:
+
+1. **In-process threads are dead for two independent reasons**, so nobody
+   should re-propose them. (i) On the interpreted worker path that native-build
+   actually takes, `spl_thread_create` dispatches to
+   `rt_thread_spawn_isolated_with_context`
+   (`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2926-2930`), which
+   evaluates the closure **inline on the calling thread**
+   (`interpreter_extern/concurrency.rs:349-404`); `spl_thread_pool_spawn_worker`
+   returns `0` unconditionally (`concurrency.rs:310-312`). (ii) The LLVM temp
+   paths are **pid-keyed, not module-keyed** —
+   `llvm_backend_tools.spl:26-29` (`simple_llvm_{getpid()}.{ll,bc,o}`) and
+   `llvm_backend.spl:293-294` (`simple_opt_{pid}.ll`) — so two codegens in one
+   process overwrite each other's IR.
+2. **MIR serialisation is strictly one-way.** `50.mir/mir_json.spl` (687 lines)
+   and `50.mir/mir_serialization.spl` (35 lines) contain `serialize_*` only;
+   `70.backend/backend_plugin/transport.spl:145` encodes onto a wire it never
+   reads back. There is no decoder for `MirModule` or for
+   `FrozenStorageModuleSnapshotV1.sites`/`.evidence`.
+3. **`opt`/`llc` are ALREADY subprocesses taking a `.ll` file as input** —
+   `llvm_backend.spl:289-302` and `llvm_backend_tools.spl:110-113` ("Writes IR
+   to a temp file, invokes llc"). Splitting `compile_module` into
+   `emit_ir` / `ir_to_object` therefore reaches real parallelism through the
+   existing `build_parallel()` with **no MIR crossing a boundary**, no
+   front-end duplication and no heap multiplication. That is now the primary
+   route (plan stage P2). Its cost is that it edits `70.backend`.
+
+**Two prerequisites this record did not name:**
+
+- `build_cache_persist` (`driver_build/incremental.spl:1050-1071`) is a
+  **non-atomic whole-file rewrite** — no temp+rename — and
+  `driver_native_collect_capsule_result_v1` (`driver_aot_native_output.spl:395-400`)
+  calls it per module. Any concurrent publisher races it. This is also a
+  latent torn-manifest-on-crash bug **today, at concurrency 1**.
+- Phase-1 cache hits are **manifest-driven, not receipt-driven**
+  (`driver_aot_native_output.spl:1058-1077` requires
+  `build_cache.get_cached_outputs` + `build_cache_module_witness`). A worker
+  that writes an object and a `.capsule-receipt` but no manifest entry yields
+  **zero** parent hits — which is why a parse/HIR-style shard fallback needs
+  per-shard manifest fragments and a parent merge, not just object publication.
+
+**Changed in this session:** one unconditional honesty line at phase-2 entry
+(`driver_aot_native_output.spl:1218-1243`) reporting the uncached-module count,
+`concurrency=1`, and the RESOLVED thread value together with the invariant that
+no value above 1 takes effect. It deliberately does NOT say "requested threads=N
+is not honoured": `driver_native_build_threads()` returns 0 when
+`SIMPLE_NATIVE_BUILD_THREADS` is unset (`driver_aot_native_output.spl:248-255`)
+and an admitted `BackendSession` clamps the value to 1, so that phrasing would
+be false at 1 and meaningless at 0. The `parallel.spl` notice from the prior
+session is verbose-gated and so was unreachable on the default path where the
+>1h33m silent phase was observed.
+No behaviour change. Not linted, for the same cost reason stated above; the edit
+is a `print` plus a call to `_sffi_stdout_flush`, which is defined in this same
+file at `:168` and already called at `:238` and `:1012`. Its multi-line
+`print "..." + "..."` shape matches the existing precedent at `parallel.spl:497-499`.
+
+**Still unproven** (do not cite as measured): the `opt`+`llc` share of step 5 —
+a 6x25s probe on 2026-09-04 saw zero live `llc`/`opt` children, but both running
+builds were in the FRONT END at the time (`phase2:surface:file:*`,
+`[bootstrap-error-count] source_idx=2`), so it observed the wrong window and
+settles nothing. That share decides P2-vs-P3 and must be sampled during a real
+step-5 window. Also still open: whether the original >1h33m stall was step 4 or
+step 5.
