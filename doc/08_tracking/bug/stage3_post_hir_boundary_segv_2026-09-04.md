@@ -7,6 +7,12 @@ Open. A clean, provenance-admitted Apple Silicon Stage 2 compiler completed all
 `phase3:hir_typecheck:done` marker. This is later than the historical streaming
 owner crash and does not identify the same source owner.
 
+The first instrumented replay completed the HIR loop, cache summary, shard
+gate, poison-owner read, and HIR context commit. It emitted
+`phase3:hir:layout-validation:start` and then exited from signal 11 without
+`phase3:hir:layout-validation:done`. The fault is therefore inside the
+post-HIR validation dispatcher, not context commit or owner reclaim.
+
 ## Retained evidence
 
 - Resume log: `build/caret-bootstrap-current.stage3-resume.retry3.log`
@@ -30,6 +36,8 @@ indistinguishable crash region.
 of those boundaries. The modern SSpec
 `stage3_post_hir_boundary_diagnostics_spec.spl` requires every marker and their
 execution order, preventing the blind region from returning during refactors.
+The dispatcher now also brackets value-struct, layer-equality, effect, aspect,
+and weave passes independently; the same spec requires that ordered evidence.
 
 ## Next bounded action
 
