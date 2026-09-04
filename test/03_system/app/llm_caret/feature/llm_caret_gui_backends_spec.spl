@@ -14,18 +14,34 @@ shared by the Electron and Engine2D Metal launch paths.
 
 ## Evidence boundary
 
-This source-level system contract verifies the production GUI state, semantic
-HTML, and Draw-IR handoff. A live GUI launch additionally requires the
-GPU-companion artifact (`gui_metal.spl`) and its GPU-capable runtime lane; it
-must not be substituted with the core CLI/TUI artifact.
+The in-process scenarios verify production GUI state, semantic HTML, and the
+Draw-IR handoff. The live scenarios invoke the shipped cached artifacts and
+fail closed unless browser, Electron, and the separate GPU companion each open
+a real window and retain a screenshot plus protocol/process evidence.
+
+**Screenshots:**
+`build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_gui_live/`
 """
 
 use app.llm_caret.gui_native_model.{caret_native_state, caret_native_key,
     caret_native_apply_response}
 use app.llm_caret.gui.{caret_gui_native_html}
 use app.llm_caret.provider.{dispatch_send}
+use app.io.mod.{process_run_timeout}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir}
+
+struct CaretGuiLiveEvidence:
+    stdout: text
+    stderr: text
+    exit_code: i32
+
+fn run_caret_gui_live_case(case_name: text) -> CaretGuiLiveEvidence:
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        "sh",
+        ["scripts/check/check-llm-caret-gui-live.shs", "--case", case_name],
+        120000)
+    CaretGuiLiveEvidence(stdout: stdout, stderr: stderr, exit_code: exit_code)
 
 describe "LLM Caret Electron and pure-Simple Metal GUI backends":
     it "REQ-002 and REQ-006 submit test to the dummy provider":
@@ -66,3 +82,42 @@ describe "LLM Caret Electron and pure-Simple Metal GUI backends":
         expect(html).to_contain("aria-label=\"LLM Caret native chat\"")
         expect(html).to_contain("data-backend=\"metal\"")
         expect(html).to_contain("Message LLM Caret: test")
+
+    it "should launch the browser GUI and complete a visible dummy-provider turn":
+        step("Launch the provenance-qualified Caret browser GUI")
+        val result = run_caret_gui_live_case("browser")
+        step("Send test through the live loopback GUI and capture the visible window")
+        expect(result.stdout).to_contain("case=browser-live status=PASS")
+        expect(result.stdout).to_contain("browser.png")
+        step("Check the live browser evidence verdict")
+        expect(result.stdout).to_contain("evidence_status=PASS")
+        expect(result.exit_code).to_equal(0)
+
+    it "should launch Electron with the live Caret page and retain a visible capture":
+        step("Launch the provenance-qualified Caret Electron GUI")
+        val result = run_caret_gui_live_case("electron")
+        step("Observe the live Electron child and capture its visible window")
+        expect(result.stdout).to_contain("case=electron-live status=PASS")
+        expect(result.stdout).to_contain("electron.png")
+        step("Check the live Electron evidence verdict")
+        expect(result.stdout).to_contain("evidence_status=PASS")
+        expect(result.exit_code).to_equal(0)
+
+    it "should launch the Metal companion and present device-readback pixels":
+        step("Launch the provenance-qualified Caret Metal companion")
+        val result = run_caret_gui_live_case("metal")
+        step("Observe a live Winit window after Metal device readback and present")
+        expect(result.stdout).to_contain("case=metal-live status=PASS")
+        expect(result.stdout).to_contain("metal.png")
+        step("Check the live Metal evidence verdict")
+        expect(result.stdout).to_contain("evidence_status=PASS")
+        expect(result.exit_code).to_equal(0)
+
+    it "should fail closed when live GUI prerequisites are absent":
+        step("Inspect cached runtime and host capture prerequisites")
+        val result = run_caret_gui_live_case("prerequisites")
+        step("Check that every prerequisite produced an executable verdict")
+        expect(result.stdout).to_contain("artifact_root=")
+        expect(result.stdout).to_contain("failed_cases=0")
+        expect(result.stdout).to_contain("evidence_status=PASS")
+        expect(result.exit_code).to_equal(0)

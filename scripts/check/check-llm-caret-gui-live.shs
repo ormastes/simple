@@ -1,0 +1,207 @@
+#!/bin/sh
+# Fail-closed live-window qualification for the shipped Caret GUI surfaces.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+artifact_root="$root/build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_gui_live"
+case_name=${2-}
+failures=0
+server_pid=""
+metal_pid=""
+
+cleanup() {
+    [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true
+    [ -z "$metal_pid" ] || kill "$metal_pid" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+fail() {
+    failures=$((failures + 1))
+    printf '%s\n' "case=$1 status=FAIL reason=$2 artifact=$3"
+}
+
+pass() {
+    printf '%s\n' "case=$1 status=PASS artifact=$2"
+}
+
+wait_for_text() {
+    file=$1 text=$2 attempts=0
+    while [ "$attempts" -lt 40 ]; do
+        grep -F "$text" "$file" >/dev/null 2>&1 && return 0
+        attempts=$((attempts + 1))
+        sleep 0.25
+    done
+    return 1
+}
+
+require_core() {
+    sh "$root/scripts/check/check-llm-caret-tui-pty.shs" --case prerequisites
+}
+
+provenance_value() {
+    awk -F= -v requested="$1" '$1 == requested { sub(/^[^=]*=/, ""); n += 1; value=$0 }
+        END { if (n == 1 && value != "") print value; else exit 1 }' "$2"
+}
+
+hash_file() {
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+
+require_metal() {
+    metal="$root/build/bootstrap/caret-package/caret_metal"
+    provenance="$metal.provenance"
+    [ -x "$metal" ] && [ -f "$provenance" ] || return 1
+    expected=$(provenance_value binary_sha256 "$provenance") || return 1
+    [ "$(hash_file "$metal")" = "$expected" ] || return 1
+    committed=$(cd "$root" && jj log -r '@-' --no-graph -T 'commit_id ++ "\n"') || return 1
+    [ "$(provenance_value source_commit "$provenance")" = "$committed" ] || return 1
+}
+
+capture_screen() {
+    destination=$1
+    /usr/sbin/screencapture -x "$destination" >/dev/null 2>&1 &&
+        [ -s "$destination" ]
+}
+
+run_browser() {
+    label=browser-live
+    log="$artifact_root/browser.log"
+    html="$artifact_root/browser.html"
+    response="$artifact_root/browser-chat.http"
+    shot="$artifact_root/browser.png"
+    port=$((43000 + ($$ % 1000)))
+    : >"$log"
+    "$root/bin/caret" --provider dummy --gui --port="$port" >"$log" 2>&1 &
+    server_pid=$!
+    if ! wait_for_text "$log" "llm_caret GUI ready"; then
+        fail "$label" server-not-ready "$log"
+        return
+    fi
+    printf 'GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' |
+        nc -w 5 127.0.0.1 "$port" >"$html" 2>/dev/null || true
+    body='{"content":"test"}'
+    printf 'POST /api/chat HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' "${#body}" "$body" |
+        nc -w 5 127.0.0.1 "$port" >"$response" 2>/dev/null || true
+    sleep 1
+    if ! grep -F 'LLM Caret' "$html" >/dev/null 2>&1; then
+        fail "$label" visible-html-missing "$html"
+    elif ! grep -F 'hello' "$response" >/dev/null 2>&1; then
+        fail "$label" dummy-response-missing "$response"
+    elif ! capture_screen "$shot"; then
+        fail "$label" visible-capture-missing "$shot"
+    else
+        pass "$label" "$shot"
+    fi
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=""
+}
+
+run_electron() {
+    label=electron-live
+    electron="$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+    log="$artifact_root/electron.log"
+    shot="$artifact_root/electron.png"
+    port=$((44000 + ($$ % 1000)))
+    if [ ! -x "$electron" ]; then
+        fail "$label" electron-not-installed "$electron"
+        return
+    fi
+    : >"$log"
+    "$root/bin/caret" --provider dummy --electron --port="$port" >"$log" 2>&1 &
+    server_pid=$!
+    if ! wait_for_text "$log" "llm_caret Electron launched pid="; then
+        fail "$label" electron-not-launched "$log"
+        return
+    fi
+    child=$(sed -n 's/.*Electron launched pid=\([0-9][0-9]*\).*/\1/p' "$log" | tail -1)
+    sleep 2
+    if [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null; then
+        fail "$label" electron-child-not-live "$log"
+    elif ! capture_screen "$shot"; then
+        fail "$label" visible-capture-missing "$shot"
+    else
+        pass "$label" "$shot"
+    fi
+    [ -z "$child" ] || kill "$child" 2>/dev/null || true
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+    server_pid=""
+}
+
+run_metal() {
+    label=metal-live
+    metal="$root/build/bootstrap/caret-package/caret_metal"
+    provenance="$metal.provenance"
+    log="$artifact_root/metal.log"
+    events="$artifact_root/metal.events"
+    shot="$artifact_root/metal.png"
+    if ! require_metal; then
+        fail "$label" metal-artifact-or-provenance-missing "$metal"
+        return
+    fi
+    : >"$log"
+    : >"$events"
+    SIMPLE_GUI=1 SIMPLE_EVT_LOG="$events" "$metal" --prompt test >"$log" 2>&1 &
+    metal_pid=$!
+    if ! wait_for_text "$events" "CARET_FRAME backend=metal source=device_readback"; then
+        fail "$label" metal-present-marker-missing "$events"
+    elif ! kill -0 "$metal_pid" 2>/dev/null; then
+        fail "$label" metal-window-not-live "$log"
+    elif ! capture_screen "$shot"; then
+        fail "$label" visible-capture-missing "$shot"
+    else
+        pass "$label" "$shot"
+    fi
+    kill "$metal_pid" 2>/dev/null || true
+    wait "$metal_pid" 2>/dev/null || true
+    metal_pid=""
+}
+
+[ "${1-}" = "--case" ] || {
+    printf '%s\n' 'usage: check-llm-caret-gui-live.shs --case prerequisites|browser|electron|metal|all' >&2
+    exit 2
+}
+mkdir -p "$artifact_root"
+
+case "$case_name" in
+    prerequisites)
+        require_core || failures=$((failures + 1))
+        for tool in nc /usr/sbin/screencapture; do
+            command -v "$tool" >/dev/null 2>&1 || fail prerequisites missing-tool "$tool"
+        done
+        electron="$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+        [ -x "$electron" ] || fail prerequisites electron-not-installed "$electron"
+        require_metal || fail prerequisites metal-artifact-or-provenance-missing "$root/build/bootstrap/caret-package/caret_metal"
+        ;;
+    browser)
+        require_core || exit 1
+        run_browser
+        ;;
+    electron)
+        require_core || exit 1
+        run_electron
+        ;;
+    metal)
+        run_metal
+        ;;
+    all)
+        require_core || exit 1
+        run_browser
+        run_electron
+        run_metal
+        ;;
+    *)
+        printf '%s\n' "unknown case: $case_name" >&2
+        exit 2
+        ;;
+esac
+
+printf '%s\n' "artifact_root=$artifact_root"
+printf '%s\n' "failed_cases=$failures"
+if [ "$failures" -eq 0 ]; then
+    printf '%s\n' 'evidence_status=PASS'
+    exit 0
+fi
+printf '%s\n' 'evidence_status=FAIL'
+exit 1

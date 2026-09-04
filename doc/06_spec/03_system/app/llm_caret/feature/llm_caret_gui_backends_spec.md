@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -42,6 +42,36 @@ expect(final_state.assistant).to_equal("hello")
 ```
 
 </details>
+
+#### Launch the browser GUI and complete a visible dummy-provider turn
+
+- Launch the provenance-qualified cached Caret browser GUI.
+- Send `test` through its live loopback HTTP surface and require `hello`.
+- Capture the visible browser window as `browser.png`.
+- Require `case=browser-live status=PASS` and a zero exit status.
+
+#### Launch Electron with the live Caret page
+
+- Launch the cached Caret artifact with `--electron`.
+- Require the reported Electron child process to remain alive after loading.
+- Capture the visible Electron window as `electron.png`.
+- Require `case=electron-live status=PASS` and a zero exit status.
+
+#### Launch the Metal companion and present device pixels
+
+- Verify the separate `caret_metal` binary and source-bound provenance.
+- Launch it with `SIMPLE_GUI=1` and submit the dummy prompt `test`.
+- Require `backend=metal source=device_readback` while its Winit window lives.
+- Capture the visible Metal window as `metal.png` and require a zero exit
+  status.
+
+#### Fail closed when live GUI prerequisites are absent
+
+- Verify the cached core Caret artifact/runtime provenance.
+- Require `nc`, macOS screen capture, Electron, and the provenance-qualified
+  Metal companion.
+- Any missing artifact, process, response, backend marker, or non-empty capture
+  makes the scenario fail; no headless substitute is accepted.
 
 #### REQ-004 lowers semantic Caret HTML through Draw IR
 
@@ -95,15 +125,14 @@ expect(html).to_contain("Message LLM Caret: test")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_gui_backends_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-09-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-**Live-launch boundary:** This manual does not claim a screenshot or a live
-Metal window. A live GUI result is valid only after the GPU companion entry
-`src/app/llm_caret/gui_metal.spl` is built with its GPU-capable runtime and
-its retained capture identifies the launched artifact. The core Caret entry
-deliberately rejects `--metal-gui` so CLI/TUI native closure checks cannot
-silently stand in for GUI evidence.
+**Live-launch boundary:** The four live scenarios now execute the production
+launch checker, but remain red until the core and Metal artifacts, Electron,
+and actual captures exist. Source-level HTML/Draw-IR scenarios cannot satisfy
+those live scenarios. Captures are retained under
+`build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_gui_live/`.
 
 ## Overview
 
@@ -114,8 +143,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
