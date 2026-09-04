@@ -26,7 +26,7 @@
 > and therefore whether this is a bug or simply expensive-but-correct work. Those
 > need instrumentation, not another stack sample.
 
-**Status:** OPEN
+**Status:** FIX IMPLEMENTED; staged verification pending
 **Filed:** 2026-09-02
 **Severity:** P1 — blocks Stage-3 self-host on aarch64-apple-darwin. The stage does not
 error and does not deadlock; it burns CPU for a very long time in one large scan.
@@ -40,9 +40,11 @@ without bound, `tasks_done=1 tasks_total=6`, `current=complete`. Measured direct
 **6,600 object files, zero new in 90 seconds, zero files touched in 3 minutes**, while a
 process sat in state `RN` accumulating 69+ minutes of CPU.
 
-This reads as a hang and has been treated as one (and, when the sampler reported
-`cpu_pct=0.0` for the wrapper rather than the worker, as an OOM/memory problem). It is
-neither. It is a quadratic algorithm making real but vanishing progress.
+This reads as a hang and has been treated as one. A 2026-09-04 replay added the
+missing resource evidence: free disk fell from 11 GiB to 146 MiB in four minutes
+while the worker reached roughly 2.6 GiB RSS, then returned to 9.8 GiB free as
+soon as that worker stopped. The missing space was swap created under promotion
+pressure. Continuing would have produced another signal-9 or disk-full failure.
 
 ## Evidence — profiler, two independent samples
 
@@ -62,21 +64,20 @@ Frame counts from a 4s sample: `module_surfaces_promote` 212, `rt_transient_heap
 
 ## Root cause
 
-`src/compiler_rust/runtime/src/value/collections.rs:1949`, the last statement of
-`rt_transient_heap_promote`:
+The Rust bootstrap runtime inserted a value into `reachable_heap` before asking
+whether it was a heap node:
 
 ```rust
-scope.objects.retain(|object| !reachable_heap.contains(&object.0));
+if !reachable_heap.insert(current.0) { continue; }
+if let Some(children) = transient_heap_children(current) { ... }
 ```
 
-`Vec::retain` is O(|scope.objects|). The function is called **once per promoted surface**,
-and `scope.objects` holds every transient object allocated in the enclosing scope. Over
-760 modules' surfaces the total cost is O(surfaces x objects) — quadratic in the size of
-the compilation.
-
-The reachability walk above it (the `pending`/`reachable_heap`/`reachable_raw` BFS) is
-fine; it is bounded by the promoted graph. The defect is specifically that the *whole
-scope vector* is rescanned and compacted on every individual promote.
+`transient_heap_children` returned `Some(empty)` for immediates. Consequently
+every scalar word discovered while scanning raw aggregates was retained in the
+heap-identity hash set even though it had neither heap identity nor children.
+The compiler surface graph contains enough such words to create multi-gigabyte
+hash/swap pressure before HIR. The C and pure-Simple counterparts classify first
+and never add immediate words to their heap-node plans.
 
 ## Why it was mis-triaged repeatedly
 
@@ -88,17 +89,13 @@ scope vector* is rescanned and compacted on every individual promote.
   while the real worker is a separate process burning 100% of a core, so the run looks
   idle from the sampler's view.
 
-## Suggested fixes (not implemented)
+## Implemented fix
 
-1. **Defer compaction.** Accumulate promoted objects into a `HashSet` on the scope and
-   perform ONE `retain` at scope end (`rt_transient_array_scope_end`) instead of per
-   promote. This turns O(n^2) into O(n).
-2. **Mark instead of remove.** Tag promoted entries (e.g. `Option<..>` slot or a parallel
-   bitset) and skip them at scope end, avoiding vector compaction entirely.
-3. If per-call removal is genuinely required, use a `HashMap<ptr, index>` side table plus
-   `swap_remove` for O(1) removal instead of `retain`.
-
-Option 1 is the smallest change consistent with the existing scope-end teardown.
+`transient_heap_children` now returns `None` for non-heap immediates. The walker
+therefore never inserts them into `reachable_heap`; real heap leaves still return
+`Some(empty)` and retain their identity semantics. The focused Rust runtime test
+`immediate_words_never_enter_the_reachable_heap_set` executes nil and scalar
+representatives and passed (1 test, 0 failures).
 
 ## Reproduction
 
@@ -108,7 +105,8 @@ above appears immediately and persistently.
 
 ## Scope note (honest)
 
-The quadratic characterisation is from stack sampling plus reading the call site, not from
-an instrumented count of `scope.objects` length over time. The hot path is certain; the
-exact growth curve is inferred from `Vec::retain`'s definition and the per-surface call
-pattern, and has not been measured directly.
+The earlier quadratic explanation is withdrawn: promotion is one large scan, as
+the correction at the top states. The scalar-set amplification is proven by code
+order and the focused classifier test; the 10+ GiB swap delta is measured. A
+fresh Stage 2/3 replay is still required to prove end-to-end memory and completion
+after rebuilding the Rust bootstrap runtime.

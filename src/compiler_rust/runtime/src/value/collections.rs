@@ -1817,7 +1817,13 @@ pub extern "C" fn rt_transient_array_scope_pause() -> bool {
 
 fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
     if !value.is_heap() {
-        return Some(Vec::new());
+        // An immediate has no heap identity. Returning Some(empty) made the
+        // promotion walker insert every scalar word from raw aggregates into
+        // reachable_heap before discovering that it had no children. The
+        // compiler's surface graph contains enough scalar words to consume
+        // ~10 GiB of swap before HIR. None means "not a heap node"; a genuine
+        // leaf heap object still returns Some(empty) below.
+        return None;
     }
     match value.heap_type()? {
         HeapObjectType::Array => {
@@ -1865,6 +1871,24 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
             unsafe { Some(vec![(*ptr).payload]) }
         }
         _ => Some(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod transient_heap_classification_tests {
+    use super::transient_heap_children;
+    use crate::value::RuntimeValue;
+
+    #[test]
+    fn immediate_words_never_enter_the_reachable_heap_set() {
+        for value in [
+            RuntimeValue::NIL,
+            RuntimeValue::from_int(0),
+            RuntimeValue::from_int(1),
+            RuntimeValue::from_int(i32::MAX as i64),
+        ] {
+            assert!(transient_heap_children(value).is_none());
+        }
     }
 }
 
