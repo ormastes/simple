@@ -91,3 +91,48 @@ Stage 3 on aarch64-apple-darwin reaches `hir 760/760` (0 fatals), passes
 `phase4:monomorphize`, enters `phase5:mode_dispatch`, then raises 2-6 of these
 and exits 1. Requires ~30 GB free disk sustained for ~90 minutes; below that the
 run dies with `os error 28` before reaching the fatal.
+
+---
+
+## CONFIRMED 2026-09-03 (second run, probe fully functional)
+
+The earlier reading rested on ONE swallowed line. After removing the unsafe span
+deref (#337) the probe emits both staged lines cleanly, and the finding now holds
+across EVERY raise rather than being inferred from an absence:
+
+```
+[mir-zerokind-raise] seq=1 module= disc=-1 kindzero=true kindnil=false
+                     spannil=false spanzero=false
+[mir-zerokind-raise] seq=1 span=non-nil-non-zero-but-UNDEREFERENCEABLE
+[mir-zerokind-raise] seq=2 ... identical
+[mir-zerokind-raise] seq=3 ... identical
+```
+
+6 probe lines / 3 raises, on an 8,930,201-byte log with `hir-fatals=0`. The
+corrupt-aggregate conclusion is now measured, not deduced.
+
+## NEW SIGNAL: `module=` is EMPTY on every raise
+
+`self.current_module_id` renders as the empty string at the raise point, in all
+three cases. That field is a plain `MirLowering` member (`mir_lowering_types.spl:61`)
+and is `eprint`ed successfully elsewhere in the same file, so this is not a
+formatting artefact — the lowering context genuinely has no module id set when
+the fatal fires.
+
+Taken together — `disc=-1`, an undereferenceable span, AND an empty module id —
+the evidence points at the **MirLowering context itself** being in an invalid
+state at this point, not merely one bad `HirType` flowing into a healthy lowering.
+That is a materially different target from "find the construct that produced a
+bad type", and it is where the next investigation should start:
+
+- who sets `current_module_id`, and can the raise be reached on a path where it
+  was never set (or was reset)?
+- is this lowering reached via a route that skips normal per-module setup?
+- does the same route explain how a `HirType` with a garbage span reaches it?
+
+## Still unexplained
+
+The count varies 2 / 4 / 6 across runs on byte-identical source. An
+order-dependent or state-dependent producer remains the best explanation, and it
+is consistent with a context-initialisation defect rather than a fixed set of
+source sites.

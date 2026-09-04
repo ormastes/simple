@@ -45,10 +45,30 @@ FILE.md files) are allowed.
 | `.spipe` | SPipe state files |
 | `.simple` | Simple language config |
 | `.vscode` | VS Code settings |
+| `.claude-plugin` | Claude Code plugin manifest |
 | `build` | Build output (mutable, includes target/ and bootstrap/) |
 | `tmp` | Temporary files (mutable) |
+| `docs` | Generated spec samples (INDEX/README/test-spec); distinct from `doc/` |
+| `assets` | Fonts and other binary assets consumed by tests and packaging |
+| `plugins` | First-party plugin packages (llm_caret_messaging, ...) |
+| `spec` | Compiler schema contracts (`spec/compiler_schema/`) |
+| `var` | Runtime sample state for web-stack integration specs |
+| `variants` | Platform variant overlays (see `variants/FILE.md`) |
+| `target` | `gc-boundary-check-tests` fixture read by `driver/src/cli/check.rs` |
+| `targets.sdn` | Build target registry read by `src/app/build/targets/targets_cli.spl` |
+| `gh-cli-cache` | Quarantined non-UTF-8 GitHub CLI archive pending independent review and deletion |
+| `release` | Quarantined legacy release binary pending independent review and deletion |
+| `scratch_fx` | Quarantined binary scratch fixtures pending independent review and deletion |
+| `sweep` | Quarantined non-UTF-8 sweep fixture pending independent review and deletion |
+| `tmp5` | Quarantined SCV binary packs pending independent review and deletion |
+| `tmp10` | Quarantined SCV binary packs pending independent review and deletion |
+| `tmp50` | Quarantined SCV binary packs pending independent review and deletion |
+| `tmp5b` | Quarantined SCV binary packs pending independent review and deletion |
+| `tmpdrv` | Quarantined compressed fixtures pending independent review and deletion |
 
-**No other files at root.**
+**No other files at root.** The quarantine entries above are temporary and
+must be removed through an independently reviewed change because the protected
+self-review policy intentionally rejects non-UTF-8 blob deletion.
 
 ## Child Manifests
 

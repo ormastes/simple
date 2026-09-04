@@ -1,0 +1,36 @@
+# Regression: the native phase-3 failure branch must ATTEMPT a guarded read of
+# the surviving diagnostics before reporting them lost.
+#
+# Incident: the branch printed
+#   "phase 3 FAILED (diagnostics unreadable: error array did not survive transport)"
+# and returned CompileResult.TypeError([]) WITHOUT EVER READING, so every
+# phase-3 failure reached the user as "native-build failed without diagnostics".
+# The refusal was a stale workaround for a fault since fixed in the accessors
+# (driver_types.spl guards error_message_at/errors_safe with
+# rt_heap_ref_wellformed(self.errors)).
+#
+# This spec fails if that unconditional refusal is ever reintroduced.
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Phase 3 native diagnostic transport":
+    it "reads surviving diagnostics instead of hardcoding an 'unreadable' verdict":
+        val source = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
+        expect(source.len()).to_be_greater_than(0)
+
+        # The hardcoded no-read verdict must not come back.
+        expect(source).to_not_contain("did not survive transport")
+
+        # The guarded read must exist, and must precede the fallback verdict.
+        val read_loop = source.index_of("val phase3_message: text = self.ctx.error_message_at(phase3_report_idx)")
+        val emit_line = source.index_of("phase3_surviving_errors.push(phase3_message)")
+        val fallback = source.index_of("no readable diagnostics; recorded error_count=")
+
+        expect(read_loop).to_be_greater_than(-1)
+        expect(emit_line).to_be_greater_than(read_loop)
+        expect(fallback).to_be_greater_than(emit_line)
+
+    it "reports the surviving scalar error_count so 'lost' differs from 'none'":
+        val source = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
+        expect(source).to_contain("val phase3_recorded_count: i64 = self.ctx.error_count()")
+        expect(source).to_contain("no readable diagnostics; recorded error_count=")

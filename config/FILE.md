@@ -14,6 +14,7 @@ Configuration files for build, test, packaging, and tooling.
 | `doc_coverage.sdn` | Documentation coverage configuration |
 | `docker-compose.test.yml` | Docker test compose |
 | `docker-compose.yml` | Docker compose |
+| `log_opt` | Toolchain build-log optimizer plugin descriptors |
 | `mcp` | MCP server configurations |
 | `packaging` | Packaging configurations |
 | `process.sdn` | Process configuration |

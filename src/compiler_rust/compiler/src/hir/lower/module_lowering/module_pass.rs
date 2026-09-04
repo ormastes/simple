@@ -1389,6 +1389,37 @@ impl Lowerer {
         }
     }
 
+    /// Record the free-function names THIS module's own source declares.
+    ///
+    /// Consumed by `lower_identifier`: a `use m.{f as g}` whose ORIGINAL name
+    /// `f` is also declared here must NOT be rewritten back to the bare `f`,
+    /// because the bare name is claimed by the local definition and the import
+    /// would silently rebind to it (`fn f(): g()` then calls itself forever).
+    /// See `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
+    /// Populated ONLY for a non-flattened unit. A flattened unit merges every
+    /// imported module's functions into these same `items`, so "declared here"
+    /// would be true of every import and the suppression would misfire — and it
+    /// needs no suppression anyway: `collect_flattened_import_aliases` records
+    /// an owner-exact binding that `lower_identifier` consults FIRST. The
+    /// `__simple_flatten_import_binding__` markers the flattener emits are the
+    /// discriminator (measured: present on the flattened/interpreter lane,
+    /// absent on the native-project lane, which is exactly why that lane's
+    /// `import_alias_bindings` is empty and the bug lived there).
+    fn collect_own_declared_function_names(&mut self, ast_module: &Module) {
+        let flattened = ast_module.items.iter().any(|item| match item {
+            Node::Const(c) => crate::interpreter::decode_import_binding_marker(&c.name).is_some(),
+            _ => false,
+        });
+        if flattened {
+            return;
+        }
+        for item in &ast_module.items {
+            if let Node::Function(f) = item {
+                self.own_declared_function_names.insert(f.name.clone());
+            }
+        }
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
@@ -1403,6 +1434,7 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         // This registers placeholders so types can reference each other
@@ -2086,6 +2118,7 @@ impl Lowerer {
         // `use m.{f as g}` resolves `g` instead of emitting an unresolved
         // external symbol. Must run before any expression is lowered.
         self.collect_flattened_import_aliases(ast_module);
+        self.collect_own_declared_function_names(ast_module);
 
         // Pass 0: Pre-register all struct/class/enum names to allow self-referential types
         for item in &ast_module.items {
