@@ -120,3 +120,10 @@ it does not claim real-vector-font accuracy. Real-font accuracy remains owned
 by the independent Simple device-readback versus CPU-oracle checksum gate. A
 Simple synthetic packed-font producer must use the identical atlas, placement,
 glyph count, and workload hash before the C receipt is comparable.
+
+The primitive pair fixes four 8K workloads: 1% retained rectangle fill,
+sixteen full-width horizontal lines, the same lines lowered to one-pixel
+rectangle dispatches, and a 1% image copy. Both implementations seed the full
+background before one warmup and 31 samples, batch each feature frame into one
+submission, exclude readback from timing, and run the same exact final-pixel
+oracle. Device name plus driver identity forms the cross-process device hash.

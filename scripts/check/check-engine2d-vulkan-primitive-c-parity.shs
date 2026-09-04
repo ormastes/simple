@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BUILD_DIR=${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-primitive-c-parity}
+SIMPLE_PRIMITIVE_FEATURE_BIN=${SIMPLE_PRIMITIVE_FEATURE_BIN:-}
+
+if [ -z "$SIMPLE_PRIMITIVE_FEATURE_BIN" ] || [ ! -x "$SIMPLE_PRIMITIVE_FEATURE_BIN" ]; then
+    echo 'engine2d_vulkan_primitive_c_parity_status=blocked reason=missing-simple-feature-binary'
+    exit 2
+fi
+case $SIMPLE_PRIMITIVE_FEATURE_BIN in
+    *compiler_rust*|*bootstrap*/simple)
+        echo 'engine2d_vulkan_primitive_c_parity_status=blocked reason=bootstrap-artifact-inadmissible'
+        exit 2
+        ;;
+esac
+
+mkdir -p "$BUILD_DIR"
+for feature in rect line axis-line image; do
+    active=100 count=1 operation=$feature
+    case $feature in
+        line|axis-line) active=10000; count=16 ;;
+    esac
+    case_dir="$BUILD_DIR/$feature"
+    mkdir -p "$case_dir"
+    ENGINE2D_VULKAN_OPERATION=$operation \
+        ENGINE2D_VULKAN_ACTIVE_BASIS_POINTS=$active \
+        ENGINE2D_VULKAN_RECT_COUNT=$count \
+        ENGINE2D_VULKAN_SAMPLES=31 BUILD_DIR="$case_dir/c" \
+        sh "$ROOT/scripts/check/check-engine2d-vulkan-clear-8k.shs"
+    VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json} \
+        "$SIMPLE_PRIMITIVE_FEATURE_BIN" --feature "$feature" \
+        >"$case_dir/simple-feature.receipt"
+    sh "$ROOT/scripts/check/check-engine2d-vulkan-c-parity.shs" --compare \
+        --simple "$case_dir/simple-feature.receipt" \
+        --c "$case_dir/c/c-feature.receipt" >"$case_dir/parity.receipt"
+    grep -Fxq engine2d_vulkan_c_parity_status=pass "$case_dir/parity.receipt"
+    echo "engine2d_vulkan_primitive_${feature}_c_parity_status=pass"
+done
+echo engine2d_vulkan_primitive_c_parity_status=pass
