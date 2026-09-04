@@ -345,7 +345,9 @@ impl HirLowering:
                         imported_mod.physical_index, imported_mod_name, imported_name,
                         qualified_local, import_span, materialize_enum)
                     return
-            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
+            # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
+            val existing_enum_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val already_bound = existing_enum_symbol_id.is_valid()
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
@@ -365,7 +367,9 @@ impl HirLowering:
                 self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif trait_position >= 0:
-            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
+            # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
+            val existing_trait_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val already_bound = existing_trait_symbol_id.is_valid()
             val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 # Preserve the physical declaration name in the symbol while
@@ -434,7 +438,9 @@ impl HirLowering:
                    hir_module_declares_item(imported_mod, alias_target):
                     self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, alias_target, local_name, import_span, materialize_enum)
                     return
-            val already_bound = self.symbols.lookup_or_invalid(local_name).is_valid()
+            # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
+            val existing_alias_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val already_bound = existing_alias_symbol_id.is_valid()
             if not already_bound:
                 # SymbolTable.define's type-level first-write-wins list does
                 # not include TypeAlias. Guard the define itself so an alias
@@ -518,6 +524,27 @@ impl HirLowering:
                         self.symbols.bind_qualified_type(
                             imported_mod.module_name, imported_name,
                             SymbolId(id: terminal_type))
+            else:
+                # CHASEMISS (2026-09-03): this `else` did not exist. A failed
+                # re-export chase registered NOTHING and reported NOTHING, so
+                # an explicit `use facade.{Name}` for a name the facade only
+                # re-exports silently bound no symbol, and the failure did not
+                # surface until some later signature or field type died with a
+                # hard `unresolved type: Name` attributed to whichever module
+                # was being lowered -- an innocent importer three layers from
+                # the actual break. That is why this class stayed invisible:
+                # every diagnostic pointed at a victim, never at the facade.
+                #
+                # Same stance and wording as the materialization walk's
+                # `[hir-callable-dep-origin-unresolved]`/`[hir-payload-origin-
+                # unresolved]` receipts, which already announce an unresolvable
+                # owner ahead of the later hard error. This is a RECEIPT, not a
+                # fix: it does not resolve the name, it names the facade and
+                # item so the later fatal is attributable. Kept unconditional
+                # (not gated behind SIMPLE_BOOTSTRAP_DIAG) for exactly the
+                # reason PR #320 landed -- a diagnostic nobody turns on is a
+                # diagnostic that does not exist.
+                eprint("[hir-reexport-chase-unresolved] facade={imported_mod.module_name} item={imported_name} local={local_name} importer={self.module_filename}: the facade neither declares this name nor routes it through a resolvable re-export; nothing was registered and a later `unresolved type`/`unresolved name: {imported_name}` will be reported against an importing module instead")
 
     me report_reexport_chase_stats():
         """Level-gated (SIMPLE_HIR_REEXPORT_STATS=1, default off) readout for the

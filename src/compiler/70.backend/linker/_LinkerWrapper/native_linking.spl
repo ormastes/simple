@@ -348,13 +348,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-ldl")
         args.push("--as-needed")
         args.push("-lm")
-        args.push("-lSDL2")
         args.push("--no-as-needed")
     elif os == "macos":
-        # sdl2-compat installs into the Homebrew lib dir, which is not on the
-        # default linker search path — add it before -lSDL2 resolves.
+        # Homebrew's lib dir is not on the default linker search path.
         # /opt/homebrew/lib covers Apple Silicon brew; /usr/local/lib covers
-        # Intel brew. Both are harmless no-ops when absent.
+        # Intel brew. Both are harmless no-ops when absent. Kept after -lSDL2
+        # was dropped: it is a general brew search path, not SDL2-specific.
         args.push("-L")
         args.push("/opt/homebrew/lib")
         args.push("-L")
@@ -363,13 +362,11 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-lpthread")
         args.push("-lm")
         args.push("-lSystem")
-        args.push("-lSDL2")
     elif os == "freebsd":
         args.push("-lc")
         args.push("-lpthread")
         args.push("--as-needed")
         args.push("-lm")
-        args.push("-lSDL2")
         args.push("--no-as-needed")
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
@@ -822,13 +819,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-        # sdl2-compat lives in the Homebrew lib dir, which cc does not search
-        # by default — add it before -lSDL2 resolves.
+        # Homebrew's lib dir, which cc does not search by default. Kept after
+        # -lSDL2 was dropped: a general brew search path, not SDL2-specific.
         args.push("-L")
         args.push("/opt/homebrew/lib")
         args.push("-L")
         args.push("/usr/local/lib")
-        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+        for flag in ["-lc", "-lpthread", "-lm", "-lSystem"]:
             args.push(flag)
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
@@ -860,7 +857,6 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-lpthread")
         args.push("-Wl,--as-needed")
         args.push("-lm")
-        args.push("-lSDL2")
         args.push("-Wl,--no-as-needed")
         var support_inputs = object_files
         for runtime_arg in runtime_args:
@@ -905,8 +901,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-Wl,--as-needed")
         args.push("-lm")
         if not hosted_cross:
-            args.push("-lSDL2")
-        args.push("-Wl,--no-as-needed")
+            args.push("-Wl,--no-as-needed")
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
@@ -960,7 +955,21 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
         msvc_config.libs, config.libraries)
 
     # Add essential Windows libraries
-    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib", "SDL2.lib"]
+    # SDL2.lib is deliberately ABSENT. src/runtime/runtime_sdl2.c binds every
+    # SDL entry point through function pointers resolved at RUNTIME
+    # (SDL2_BIND_REQUIRED -> spl_dlopen), so no SDL import library is needed
+    # to link, and SDL2 is a third-party SDK that is not part of the Windows
+    # SDK: measured 2026-09-02 on this lane, d3d11.lib and dxgi.lib are both
+    # present under Windows Kits 10 um/x64 while SDL2.lib exists nowhere on
+    # the machine -- an unconditional SDL2.lib is a guaranteed LNK1181 on any
+    # host without SDL2 installed. Every sibling list agrees: neither
+    # native_all_msvc_support_libraries nor the mingw/linux/macos lists in
+    # native_all_support.spl names SDL2 at all. A program that genuinely
+    # wants SDL2 statically still gets it via config.libraries above.
+    # CROSS-PLATFORM: this list is inside _link_native_msvc and is reached
+    # only on the Windows/MSVC link path; Linux, macOS and mingw are
+    # byte-unaffected.
+    val win_libs = ["kernel32.lib", "ws2_32.lib", "bcrypt.lib", "userenv.lib", "ntdll.lib", "advapi32.lib", "d3d11.lib", "dxgi.lib"]
     for wlib in win_libs:
         if not msvc_config.libs.contains(wlib):
             msvc_config.libs.push(wlib)
@@ -1007,7 +1016,7 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
         case Ok(_):
             Ok(output)
         case Err(e):
-            Err("Windows MSVC linking failed: {e}")
+            Err("Windows MSVC linking failed: {e.message}")
 
 fn _find_msvc_lib_paths() -> [text]:
     """Find MSVC CRT and Windows SDK library paths."""

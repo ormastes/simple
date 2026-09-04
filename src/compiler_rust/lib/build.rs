@@ -55,6 +55,12 @@ fn main() {
         // uses) and returns a `Tool` whose `to_command()` already carries the
         // resolved INCLUDE/LIB/PATH environment, independent of whatever the
         // invoking shell happens to have set.
+        // MSVC emits the intermediate object into the CURRENT DIRECTORY (the
+        // crate root, inside src/compiler_rust) unless /Fo is given. That
+        // mutates the fingerprinted seed-input tree mid-build, so the
+        // --full-bootstrap post-cargo fingerprint check aborts with "Rust
+        // inputs changed during full bootstrap". Keep the object in OUT_DIR.
+        let obj_path = out_dir.join("term_native.obj");
         let tool = cc::Build::new().opt_level(2).get_compiler();
         let cl_result = tool
             .to_command()
@@ -63,6 +69,7 @@ fn main() {
                 "/nologo",
                 src.to_str().expect("path utf8"),
                 &format!("/Fe:{}", lib_path.to_str().expect("path utf8")),
+                &format!("/Fo:{}", obj_path.to_str().expect("path utf8")),
             ])
             .status();
 

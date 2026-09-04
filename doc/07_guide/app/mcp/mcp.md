@@ -401,6 +401,8 @@ Repo-native replacement for the user-level "context-mode" plugin. Handlers:
 | `simple_ctx_fetch_and_index` | GET via the Simple http client (http/https only, no JS), cap bytes, strip tags, index | url |
 | `simple_ctx_stats` | Store location, chunk/source counts, bytes indexed/returned/saved, per-tool call counts | |
 | `simple_token_stats` | Per-feature token savings (ctx-mimic, ponytail-mimic, total; 7-day window); `reset: true` or `args: "--reset"` clears the ledger | |
+| `simple_token_burn` | Code burn: which feature/tool spent the budget, ranked by bytes returned to the model, with tokens saved vs the unoptimized original | |
+| `simple_log_optimize` | Filter a clang/rust/ninja/cmake/simple build log through its plugin descriptor; no `log` argument lists the installed plugins | log |
 
 - **Persistent store**: `.simple/ctx/` (override with `SIMPLE_CTX_DIR`), two
   SDN tables (`chunks.sdn` append-only with a linear row reader, `stats.sdn`
@@ -441,6 +443,68 @@ atomically (tmp + rename). Code: `src/app/mcp/main_lazy_telemetry.spl`.
 | `tokens_saved` | `max(0, bytes_captured - bytes_returned) / 4` (4 bytes ≈ 1 token) over cache MISSES only. Summed per feature and over the last 7 days. |
 | `cache_hits` | ponytail calls answered from the content-hash memo. A hit returns byte-identical findings, so it saves 0 tokens and adds nothing to `bytes_captured`. |
 | `repeat_work_avoided_bytes` | Sum over hits of the prior analysis bytes (source scanned + findings produced) that were NOT recomputed. Latency/CPU saved, not context saved (double-counted into `tokens_saved` until 2026-08-28). |
+
+### Code burn — where the tokens went
+
+`simple_token_stats` answers "how much did the mimics save". `simple_token_burn`
+answers the other half: **which** tool spent the budget. It groups the same
+ledger by `feature/tool`, ranks on `bytes_returned` (what actually reached the
+model), and prints each row's share plus its saving against the unoptimized
+original, ending with the whole-session comparison:
+
+```text
+feature/tool | calls | bytes_to_model | share% | tokens_saved_vs_original
+logopt/logopt:ninja | 1 | 900 | 55% | 9775
+ctx/simple_ctx_search | 1 | 420 | 25% | 0
+TOTAL | 3 | 1620 | 100% | 11700
+unoptimized original would have been ~48420 byte(s); optimized to 1620 (3% of original)
+```
+
+A row with `tokens_saved = 0` is not a defect: a search result has nothing to
+compare against, because no raw capture stood behind it.
+
+### Toolchain log optimizers (plugins)
+
+Smart truncation is blind — a 40 KB ninja log is mostly progress lines, and the
+one `FAILED:` that matters can sit past the cap. A **log-opt plugin** classifies
+lines instead, so the error survives and the noise never reaches the model.
+
+A plugin is ONE SDN file under `config/log_opt/` (override `SIMPLE_LOG_OPT_DIR`);
+its name is the file's basename. Drop a new file in and it is live on the next
+call — no code change, no rebuild, which is what makes these app-specific
+plugins dynamically loadable:
+
+```text
+log_opt | kind, pattern |
+    detect, ninja:
+    keep,   FAILED:
+    drop,   ] Building
+```
+
+| kind | meaning |
+|------|---------|
+| `detect` | any match claims the log for this plugin; the plugin with the most hits wins |
+| `keep` | line is always retained — checked BEFORE `drop` |
+| `drop` | line is removed |
+
+Patterns are plain substrings; a leading `^` anchors to the line start.
+Deliberately not regex: a descriptor is data a user edits by hand, and a bad
+regex in a log filter would fail the whole capture.
+
+Shipped descriptors: `clang` (include chains, macro-expansion notes),
+`rust` (cargo progress, `= note:`/`= help:` hints), `ninja` (`[n/m]` progress),
+`cmake` (`-- Detecting`/`-- Found` probe chatter), `simple`
+(`warning[...]`, `Session setup`, `[native-incremental]` — while every verdict
+line named in `.claude/rules/testing.md` is an explicit `keep`).
+
+The engine runs inside `ctx_cap_exec_stdout`, i.e. on every
+`simple_ctx_execute` / `_batch_execute`, **before** the size cap, and each
+application is recorded as `logopt/logopt:<name>` so `simple_token_burn`
+attributes the saving per plugin. The **raw** text is what gets indexed, so a
+dropped line is still reachable through `simple_ctx_search`.
+
+Code: `src/app/mcp/main_lazy_log_opt.spl`. Spec:
+`test/01_unit/app/mcp/log_opt_burn_spec.spl`.
 
 **Why context-mode saves tokens.** `simple_ctx_batch_execute` / `_execute` /
 `_fetch_and_index` run the program (or GET the page) inside the server, store

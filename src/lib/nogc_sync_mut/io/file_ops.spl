@@ -4,6 +4,7 @@
 # Extern fn declarations (runtime resolves at file level)
 
 use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_copy}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
 @unsafe(reason: "raw file byte-write ABI; the provider borrows the caller-owned byte array", capabilities: [ffi])
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 @unsafe(reason: "raw mmap text ABI; provider text ownership and nil-on-failure behavior are not admitted", capabilities: [ffi])
@@ -85,20 +86,20 @@ fn _file_shell_int(command: text, default: i64) -> i64:
 
 fn file_exists(path: text) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_file_exists(path)
+        rt_file_exists(host_path_native(path))
 
 fn file_is_regular_no_follow(path: text) -> bool:
     # ponytail: predicate + later hash is sufficient for local retained-test
     # artifacts; replace with no-follow open/fstat/hash-on-fd for hostile races.
     unsafe(capabilities: [ffi]):
-        rt_file_is_regular_no_follow(path)
+        rt_file_is_regular_no_follow(host_path_native(path))
 
 fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<text, text>:
     if max_bytes < 0:
         return Err("bounded file read requires a non-negative limit")
     var content: text? = nil
     unsafe(capabilities: [ffi]):
-        content = rt_file_read_regular_no_follow_bounded(path, max_bytes)
+        content = rt_file_read_regular_no_follow_bounded(host_path_native(path), max_bytes)
     if content.?:
         Ok(content.unwrap())
     else:
@@ -106,7 +107,7 @@ fn file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> Result<tex
 
 fn file_size_raw(path: text) -> i64:
     unsafe(capabilities: [ffi]):
-        rt_file_size(path)
+        rt_file_size(host_path_native(path))
 
 fn file_read(path: text) -> text:
     # rt_file_read_text returns Option in bootstrap runtime — unwrap with ??
@@ -116,17 +117,17 @@ fn file_read(path: text) -> text:
 fn file_write(path: text, content: text) -> bool:
     file_delete(path)
     unsafe(capabilities: [ffi]):
-        rt_file_write_text_at(path, 0, content) >= 0
+        rt_file_write_text_at(host_path_native(path), 0, content) >= 0
 
 fn file_write_bytes(path: text, data: [u8]) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_file_write_bytes(path, data)
+        rt_file_write_bytes(host_path_native(path), data)
 
 
 # reason positional io file_ops API
 fn file_atomic_write(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
-        rt_file_atomic_write(path, content)
+        rt_file_atomic_write(host_path_native(path), content)
 
 fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
     unsafe(capabilities: [ffi]):
@@ -161,16 +162,16 @@ fn _timestamp_str() -> text:
 # reason positional io file_ops API
 fn file_append(path: text, content: text) -> bool:
     val current_size = unsafe(capabilities: [ffi]):
-        rt_file_size(path)
+        rt_file_size(host_path_native(path))
     val offset = if current_size > 0: current_size else: 0
     unsafe(capabilities: [ffi]):
-        rt_file_write_text_at(path, offset, content) >= 0
+        rt_file_write_text_at(host_path_native(path), offset, content) >= 0
 
 fn file_stat(path: text) -> i64:
     # Get file modification time in seconds since epoch (direct SFFI).
     # Returns 0 if file doesn't exist or on error.
     unsafe(capabilities: [ffi]):
-        rt_file_stat(path)
+        rt_file_stat(host_path_native(path))
 
 fn file_modified_time(path: text) -> i64:
     # Get file modification time in seconds since epoch.
@@ -182,7 +183,7 @@ fn file_remove(path: text) -> bool:
 
 fn file_hash_sha256(path: text) -> text:
     unsafe(capabilities: [ffi]):
-        rt_file_hash_sha256(path)
+        rt_file_hash_sha256(host_path_native(path))
 
 fn file_read_lines(path: text) -> Result<[text], text>:
     match read_file_text_result(path):
@@ -196,7 +197,7 @@ fn file_read_lines(path: text) -> Result<[text], text>:
 fn file_lock(path: text, timeout_secs: i64) -> i64:
     var handle: i64 = -1
     unsafe(capabilities: [ffi]):
-        handle = rt_file_lock(path, timeout_secs)
+        handle = rt_file_lock(host_path_native(path), timeout_secs)
     handle
 
 fn file_unlock(handle: i64) -> bool:
@@ -219,7 +220,7 @@ export file_read_bytes
 
 fn file_mmap_read_text(path: text) -> text:
     unsafe(capabilities: [ffi]):
-        rt_file_mmap_read_text(path)
+        rt_file_mmap_read_text(host_path_native(path))
 
 # `rt_file_mmap_read_bytes` delegates to rt_file_read_bytes, which yields nil
 # on any fs::read error (missing/unreadable path). TOTAL with the documented
@@ -228,7 +229,7 @@ fn file_mmap_read_text(path: text) -> text:
 fn file_mmap_read_bytes(path: text) -> Result<[i64], text>:
     var bytes: [i64]? = nil
     unsafe(capabilities: [ffi]):
-        bytes = rt_file_mmap_read_bytes(path)
+        bytes = rt_file_mmap_read_bytes(host_path_native(path))
     if bytes == nil:
         Err("file mmap read failed: {path}")
     else:
@@ -241,7 +242,7 @@ fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
     # Read text from file at specific offset without changing file position.
     var value: text? = nil
     unsafe(capabilities: [ffi]):
-        value = rt_file_read_text_at_checked(path, offset, size)
+        value = rt_file_read_text_at_checked(host_path_native(path), offset, size)
     if value.?:
         Ok(value.unwrap())
     else:
@@ -251,12 +252,12 @@ fn file_read_text_at(path: text, offset: i64, size: i64) -> Result<text, text>:
 fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
     # Write text to file at specific offset without changing file position.
     unsafe(capabilities: [ffi]):
-        rt_file_write_text_at(path, offset, data)
+        rt_file_write_text_at(host_path_native(path), offset, data)
 
 fn file_fsync(path: text) -> bool:
     var synced = false
     unsafe(capabilities: [ffi]):
-        synced = rt_file_fsync(path)
+        synced = rt_file_fsync(host_path_native(path))
     synced
 
 fn directory_fsync(path: text) -> bool:
@@ -264,7 +265,7 @@ fn directory_fsync(path: text) -> bool:
     unsafe(capabilities: [ffi]):
         # POSIX synchronizes directory entries through the same fsync syscall;
         # hosted backends that cannot open/sync directories fail closed here.
-        synced = rt_file_fsync(path)
+        synced = rt_file_fsync(host_path_native(path))
     synced
 
 fn file_fsync_cached(path: text) -> bool:

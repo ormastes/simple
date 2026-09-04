@@ -648,7 +648,17 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     val worker_spawn_trace = native_build_worker_spawn_trace_enabled()
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:start timeout_ms={native_build_timeout_ms(args)} args={worker_args.len()}"
-    val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    # The worker's exit status is an i32 that arrives ZERO-EXTENDED across the
+    # wrapper boundary, so a genuine -1 presents as 4294967295 (0xFFFFFFFF).
+    # Every `code == -1` test below therefore never matched and BOTH
+    # abnormal-exit branches were dead code: an operator saw the bare number
+    # 4294967295 from the `else` instead of this file's own accurate message
+    # ("wrapper exited abnormally (signal or wait failure, code -1)").
+    # Normalised once here so all downstream comparisons -- including the
+    # `code == 0` success checks, and the spawn trace below -- see a real
+    # signed status.
+    val code = if code_raw == 4294967295: -1 else: code_raw
     if worker_spawn_trace:
         eprint "[native-build-trace] worker_spawn:returned status={code} stdout_len={stdout.len()} stderr_len={stderr.len()}"
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)

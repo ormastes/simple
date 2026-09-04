@@ -3,8 +3,46 @@
 - **Date:** 2026-08-17
 - Status: OPEN (P3)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
-- **Status:** FIXED
+- **Status:** FIXED (re-landed 2026-09-02 — see below; the 2026-08-17 "FIXED"
+  claim was false, the remedy was absent from the tree)
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh` (stage2 capability probe)
+
+## Re-verified and re-fixed 2026-09-02 (fix/bugdb-batch-g triage)
+
+The "FIXED 2026-08-17" section below describes the correct remedy and cites
+real evidence, but **the remedy was not present in the current tree**:
+`grep -n "capability build not attempted\|rm -f.*stage2-capability" scripts/bootstrap/bootstrap-from-scratch.sh`
+returned nothing before this re-fix — the script still only did
+`rm -f "${stage2_capability_bin}"` (the binary, not the log) and unconditionally
+printed the two warnings with no log-repair step, i.e. exactly the original
+defect. This is the repo's known landed-fix-gets-reverted-by-sync pattern, not
+a mistaken original report.
+
+Re-applied both remedies at the same call site (`rm -f` the log immediately
+before the probe; write
+`capability build not attempted: stage2 unusable (stage2_status=N)` into it in
+the failure branch when it does not already exist).
+
+**Verified by execution** (shell, not the broken `simple` binary — this bug is
+entirely shell-side): built two standalone fixtures replaying the exact
+failure branch (`stage2_status=1`, `stage2_bin` non-executable) against a
+pre-seeded stale log —
+
+```
+$ echo "STALE FROM PREVIOUS RUN" > logs/stage2-capability.log
+$ sh fixture_OLD.sh logs   # old code path (no rm -f, no repair)
+$ cat logs/stage2-capability.log
+STALE FROM PREVIOUS RUN                              # RED: stale log survives
+
+$ echo "STALE FROM PREVIOUS RUN" > logs/stage2-capability.log
+$ sh fixture_NEW.sh logs   # this fix's exact snippet
+$ cat logs/stage2-capability.log
+capability build not attempted: stage2 unusable (stage2_status=1)   # GREEN
+```
+
+`sh -n scripts/bootstrap/bootstrap-from-scratch.sh` confirms the edited script
+still parses cleanly. Not verified inside a real bootstrap run (forbidden for
+this task) — same limitation the original 2026-08-17 evidence already stated.
 
 ## Symptom
 When stage2 itself failed (`stage2_status != 0` or `stage2_bin` not executable),

@@ -2,6 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -43,11 +44,11 @@ extern fn rt_stderr_flush()
 
 fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
     unsafe(capabilities: [ffi]):
-        rt_process_run(cmd, args)
+        rt_process_run(host_path_native(cmd), args)
 
 fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
     unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(cmd, args, timeout_ms, max_output_bytes)
+        rt_process_run_bounded(host_path_native(cmd), args, timeout_ms, max_output_bytes)
 
 fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
@@ -55,7 +56,7 @@ fn _process_is_running_raw(pid: i64) -> bool:
 
 fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_async(cmd, args)
+        rt_process_spawn_async(host_path_native(cmd), args)
 
 fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -67,7 +68,7 @@ fn _process_kill_raw(pid: i64) -> bool:
 
 fn _process_spawn_piped_raw(cmd: text, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
-        rt_process_spawn_piped(cmd, args)
+        rt_process_spawn_piped(host_path_native(cmd), args)
 
 fn _process_write_stdin_raw(pid: i64, data: text) -> bool:
     unsafe(capabilities: [ffi]):
@@ -358,12 +359,19 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         return ("", "\n[ERROR: failed to spawn process '{cmd}']", -1)
 
     # Poll in small increments instead of one blocking wait, relaying newly
-    # appended bytes after every poll. The total time budget across all
-    # polls still equals `effective_timeout` -- exactly the same budget
-    # process_run_timeout_unix's single blocking rt_process_wait() call
-    # enforces -- so overall timeout behaviour is unchanged; only the
-    # granularity of observation changes.
+    # appended bytes after every poll.
+    #
+    # The budget is measured against a REAL wall-clock start, not by summing the
+    # requested quanta. Summing quanta was wrong in both directions and the old
+    # comment here asserted the opposite: `_process_wait_raw` can return early
+    # (child exited) or take longer than its quantum under load, and the relay
+    # work below it (file_size + file_read_text_at + print + flush, twice per
+    # iteration) costs real time that was never charged at all. So a nominal
+    # 300s budget could span far more than 300s of wall time on a loaded host,
+    # making the timeout unpredictable rather than the "unchanged" behaviour the
+    # old comment claimed. `time_now_unix_micros` is already imported here.
     val poll_quantum_ms: i64 = 500
+    val start_micros: i64 = time_now_unix_micros()
     var elapsed_ms: i64 = 0
     var stdout_relayed = 0
     var stderr_relayed = 0
@@ -373,7 +381,9 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
         val remaining = effective_timeout - elapsed_ms
         val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
         exit_code = _process_wait_raw(pid, quantum)
-        elapsed_ms = elapsed_ms + quantum
+        # Real elapsed time, including the relay work below. Never a sum of
+        # requested quanta -- see the note above the loop.
+        elapsed_ms = (time_now_unix_micros() - start_micros) / 1000
         val out_size = file_size(stdout_file)
         if out_size > stdout_relayed:
             match file_read_text_at(stdout_file, stdout_relayed, out_size - stdout_relayed):

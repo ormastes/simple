@@ -27,6 +27,12 @@ Harden the Simple GUI library's 2D rendering and vector-font paths with measurab
 implementation-evidence-in-progress
 
 ## Log
+- implementation: Fixed the CPU/SIMD scale checker's macOS RSS measurement path; Darwin `/usr/bin/time -l` is normalized to KiB while GNU hosts retain `time -f max_rss_kb=%M`.
+- verification: The deployed CLI passed its version probe but delegated `run` compilation to the Rust bootstrap seed; native CPU/SIMD evidence remains rejected pending an admitted self-hosted compiler or post-launch seed-warning gate.
+- verification: Live macOS Metal browser capture completed on Apple M4: Chrome and Electron both reported GPU compositing through ANGLE Metal, produced 320x240 ARGB with 76,800 nonblank pixels and checksum 329775811848360, and differed by zero pixels. The Simple row remains unavailable pending an admitted compiler, so the three-way Metal gate is still RED.
+- implementation: Restored the clobbered production WM browser event probe from retained jj history and completed its sandbox/GPU/animation fields; the current validator now admits the producer source artifact. Live production admission still requires real Aetheric and pure-Simple font-composition receipts.
+- verification: A real headful Electron/Chromium primitive receipt used CDP wheel input against an overflow panel and advanced `scrollTop` to 40. Pointer, Ctrl+Alt keyboard, scroll, and native resize events were all trusted; fallback was false and dropped events were zero. This panel receipt is separate from the internal-window routing proof and does not replace Simple production admission.
+- verification: Rejected `bin/release/macos-arm64/simple` for native evidence: its LLVM feature is absent; its Cranelift build ignored strict no-stub intent, generated 652 unresolved-symbol stubs, and returned 3 instead of the module-global fixture's required 42.
 - dev: Created state file with 7 acceptance criteria (type: feature).
 - research: Reused the existing GTK GUI size/speed baseline and repeat evidence scripts as the native-equivalent comparison lane.
 - implementation: Added explicit Simple/GTK open latency fields and vector-font checksum/determinism fields to the retained-mode benchmark evidence.
@@ -81,6 +87,14 @@ Simple frame 1 us vs GTK frame 28 us — Simple already 320x faster at startup, 
 - AC-3 is advanced by retained framebuffer/cache, static pixel hot paths, and retained static-shell primitive command plans; broader fill/copy/blit/text optimization across dynamic GUI scenes still needs implementation and evidence.
 - AC-6 now has focused vector-font unavailable fallback evidence in the repeat script and tracked report; additional GPU/native unavailable combinations can extend the same probe pattern.
 - Native Simple executable size/speed evidence is intentionally skipped in the fast smoke run (`SKIP_SIMPLE_NATIVE=1`); a release-grade run should capture native artifact bytes or record an explicit native-build blocker.
-- Wire unwired probes into contract: warm_startup, frame_time_p50/p95, input_to_paint.
+- The CPU/SIMD scale contract now publicly emits cold/warm startup,
+  frame-time p50/p95, and p95 input-to-paint for both CPU/SIMD and scalar
+  software at 4K and 8K. Fresh native measurements remain pending an admitted
+  current compiler/runtime.
+- Perf correctness: the exporter no longer aliases lifecycle and interaction
+  latency to frame percentiles. Cold start, post-warmup render, frame samples,
+  and scroll-state-to-present samples now use distinct clock intervals; the
+  frame checksum remains bound to the ordinary frame rather than the later
+  interaction sample.
 - Run 8K benchmark on current hardware (RTX A6000 + TITAN RTX) and capture baseline numbers.
 - Tauri integration: requires cargo-tauri CLI + WebKitGTK dev headers.
