@@ -6,6 +6,7 @@ completion, zero timed readback, zero pixel mismatches, and no fallback.
 
 | Feature | Work | p50 | p95 | 80 fps |
 |---|---:|---:|---:|---|
+| full-frame clear | 33,177,600 pixels | 2.297 ms | 4.194 ms | PASS |
 | filled rectangle | 331,776 pixels | 0.423 ms | 0.477 ms | PASS |
 | 16 horizontal generic lines | 16 x 7,680 pixels | 9.492 ms | 10.174 ms | PASS |
 | 16 horizontal lines as rectangles | 16 x 7,680 pixels | 0.630 ms | 1.229 ms | PASS |
@@ -32,3 +33,8 @@ rectangle lowering was 8.3x faster at p95 than its ordered generic line shader.
 Simple/C ratios remain pending until an admitted self-hosted compiler produces
 the Simple feature executables. Bootstrap artifacts are rejected by the parity
 runners, so these C measurements are baselines rather than parity claims.
+
+The clear row is now a first-class normalized `clear_full` parity workload,
+not merely raw baseline output. Its exact post-sample readback covered all
+132,710,400 framebuffer bytes and matched every pixel; readback remained
+outside the timed submit/fence interval.
