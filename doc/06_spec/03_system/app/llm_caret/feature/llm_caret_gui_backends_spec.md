@@ -64,7 +64,8 @@ expect(final_state.assistant).to_equal("hello")
 
 #### Launch the Metal companion and present device pixels
 
-- Verify the separate `caret_metal` binary and source-bound provenance.
+- Verify the separate `caret_metal` binary and source-bound provenance, then
+  reach it through the public `bin/caret --metal-gui` wrapper route.
 - Launch it with `SIMPLE_GUI=1`, focus the real Winit process, type `test`, and
   deliver Enter through macOS accessibility input.
 - Require the production event log to record the `test`/`hello` submission.

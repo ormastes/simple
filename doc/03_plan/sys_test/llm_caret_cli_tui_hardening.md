@@ -710,6 +710,11 @@ evidence. Completion additionally requires three provenance-qualified launches:
    `test`/`hello` submit event, Metal device readback/present markers, and a
    retained visible-window capture.
 
+The public launch remains `bin/caret --provider dummy --metal-gui`: the wrapper
+selects the cached companion (or `SIMPLE_CARET_METAL_NATIVE`) before selecting
+the core CLI/TUI artifact. A missing/non-executable companion fails with 127;
+the core entry's defensive rejection is not an acceptable production route.
+
 Each live case must fail closed when its native artifact, provenance, runtime,
 window system, backend, interaction response, or capture is absent. Headless
 Draw-IR/readback remains useful supporting evidence but cannot substitute for

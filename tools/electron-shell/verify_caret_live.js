@@ -54,7 +54,8 @@ async function evaluate(target) {
               const user = document.querySelector('.message.user');
               const assistant = document.querySelector('.message.assistant');
               if (user && assistant) return {
-                ok: user.textContent === 'test' && assistant.textContent === 'hello',
+                ok: document.title === 'LLM Caret' &&
+                    user.textContent === 'test' && assistant.textContent === 'hello',
                 title: document.title,
                 user: user.textContent,
                 assistant: assistant.textContent
