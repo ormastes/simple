@@ -284,8 +284,14 @@ mod tests {
         assert_eq!(target.triple_str(), "x86_64-pc-windows-msvc");
         if cfg!(target_os = "windows") {
             let resolved = detect_cxx_compiler_for_target(&target);
-            assert!(command_works(&resolved), "resolved compiler is not runnable: {resolved}");
-            assert!(is_msvc_target(&resolved), "resolved compiler has the wrong ABI: {resolved}");
+            assert!(
+                command_works(&resolved),
+                "resolved compiler is not runnable: {resolved}"
+            );
+            assert!(
+                is_msvc_target(&resolved),
+                "resolved compiler has the wrong ABI: {resolved}"
+            );
         }
     }
 

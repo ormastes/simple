@@ -21,7 +21,21 @@ use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
 use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name, pane_available,
-    pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send}
+    pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send,
+    pane_read_output, pane_read_response}
+
+fn cs_visible_pane_lines(agent_id: text, output: text) -> [text]:
+    var lines: [text] = []
+    for line in output.replace("\r", "").split("\n"):
+        val clean = line.trim()
+        val marker = clean.index_of("Assistant:")
+        if marker >= 0:
+            lines = lines + ["<- " + agent_id + ": " + clean.substring(marker, clean.len())]
+        else:
+            val prompt = clean.index_of("You:")
+            if prompt >= 0:
+                lines = lines + ["<- " + agent_id + ": ready"]
+    lines
 
 # cpu_pct/rss_mb use -1 as the UNMEASURED sentinel; 0 would be a real idle
 # reading and must stay distinguishable from "we never got a number".
@@ -298,6 +312,7 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
 
     val panes = pane_list(d.session)
     var agents: [CsAgent] = []
+    var log = d.log
     var running = 0
     for a in d.agents:
         var next = _unmeasured(a, "gone: pane closed", "pane " + a.pane_id +
@@ -309,9 +324,12 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
         if next.status == "running":
             running = running + 1
         agents = agents + [next]
+        for visible in cs_visible_pane_lines(a.agent_id,
+                pane_read_output(d.session, a.pane_id)):
+            log = log + [visible]
     _dash(d, "connected: " + backend + " session " + d.session + ", " +
         agents.len().to_text() + " agent(s), " + running.to_text() + " running",
-        agents, d.selected, d.log)
+        agents, d.selected, log)
 
 # Command line for a launch spec. Pure, so the spawned shape is testable
 # without tmux. Element 0 is the command; the rest are its arguments.
@@ -448,9 +466,16 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
             return (d, "cannot deliver message: " + chat_id + " has no pane yet")
         if not pane_send(d.session, chat_pane, body):
             return (d, "pane backend refused the message for " + chat_id)
+        val response_lines = cs_visible_pane_lines(chat_id,
+            pane_read_response(d.session, chat_pane))
+        if response_lines.len() > 0:
+            return (_dash(d, d.manager_status, d.agents, d.selected,
+                d.log + response_lines), "sent to " + chat_id + " (pane " + chat_pane +
+                ") | " + response_lines[0])
         return (d, "sent to " + chat_id + " (pane " + chat_pane + ")")
     (d, action)
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
 export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names
+export cs_visible_pane_lines

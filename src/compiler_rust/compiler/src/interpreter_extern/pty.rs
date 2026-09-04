@@ -28,10 +28,7 @@ pub fn rt_pty_open(args: &[Value]) -> Result<Value, CompileError> {
 /// `master_fd`.  Returns the child PID on success, -1 on error.
 pub fn rt_pty_spawn(args: &[Value]) -> Result<Value, CompileError> {
     let master_fd = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
-    let shell = args
-        .get(1)
-        .map(value_text)
-        .unwrap_or_else(|| "/bin/sh".to_string());
+    let shell = args.get(1).map(value_text).unwrap_or_else(|| "/bin/sh".to_string());
     Ok(Value::Int(pty_spawn_impl(master_fd, &shell)))
 }
 
@@ -698,10 +695,13 @@ mod tests {
             .as_int()
             .unwrap() as i32;
         assert!(handle > 0);
-        assert!(rt_pty_spawn(&[Value::Int(handle as i64), Value::text("cmd.exe")])
-            .unwrap()
-            .as_int()
-            .unwrap() > 0);
+        assert!(
+            rt_pty_spawn(&[Value::Int(handle as i64), Value::text("cmd.exe")])
+                .unwrap()
+                .as_int()
+                .unwrap()
+                > 0
+        );
         assert_eq!(
             rt_pty_write(&[
                 Value::Int(handle as i64),

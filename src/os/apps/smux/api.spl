@@ -15,6 +15,8 @@ use os.apps.smux.buffer.{ScrollbackBuffer}
 # =========================================================================
 
 var _svc: ServiceState = ServiceState.empty()
+var _clients: [MuxClientAttachment] = []
+var _metrics_cell: [SmuxMetrics] = [SmuxMetrics.zero()]
 
 # =========================================================================
 # Test support
@@ -22,6 +24,9 @@ var _svc: ServiceState = ServiceState.empty()
 
 pub fn smux_reset_for_test():
     _svc = ServiceState.empty()
+    while _clients.len() > 0:
+        _clients.pop()
+    _metrics_cell[0] = SmuxMetrics.zero()
 
 # =========================================================================
 # ID generation
@@ -54,14 +59,15 @@ pub fn smux_create_session(name: text) -> MuxSession:
     st = st.add_pane(pr)
 
     # bump startup counter
-    val m = st.metrics
+    val m = _metrics_cell[0]
     val new_m = SmuxMetrics(
         startup_count: m.startup_count + 1,
         last_startup_ns: 1u64,
         resize_count: m.resize_count,
         capture_count: m.capture_count
     )
-    _svc = st.with_metrics(new_m).with_next_id(n + 3)
+    _svc = st.with_next_id(n + 3)
+    _metrics_cell[0] = new_m
 
     return session
 
@@ -74,19 +80,24 @@ pub fn smux_list_sessions() -> [MuxSession]:
     return result
 
 pub fn smux_attach(session_id: text, client_id: text, cols: int, rows: int) -> MuxClientAttachment:
-    val existing = _svc.find_client_idx(client_id)
-    if existing >= 0:
-        return _svc.get_client(existing)
+    var i = 0
+    while i < _clients.len():
+        if _clients[i].client_id == client_id:
+            return _clients[i]
+        i = i + 1
     val att = MuxClientAttachment.create(client_id, session_id, cols, rows)
-    _svc = _svc.add_client(att)
+    _clients.push(att)
     return att
 
 pub fn smux_detach(client_id: text) -> bool:
-    val idx = _svc.find_client_idx(client_id)
-    if idx < 0:
-        return false
-    _svc = _svc.remove_client(idx)
-    return true
+    var i = 0
+    while i < _clients.len():
+        if _clients[i].client_id == client_id:
+            val old = _clients[i]
+            _clients[i] = MuxClientAttachment.create("", old.session_id, old.cols, old.rows)
+            return true
+        i = i + 1
+    return false
 
 # =========================================================================
 # Window management
@@ -182,14 +193,14 @@ pub fn smux_resize(session_id: text, window_id: text, pane_id: text, cols: int, 
     val updated = pr.resize(cols, rows)
     _svc = _svc.replace_pane(idx, updated)
 
-    val m = _svc.metrics
+    val m = _metrics_cell[0]
     val new_m = SmuxMetrics(
         startup_count: m.startup_count,
         last_startup_ns: m.last_startup_ns,
         resize_count: m.resize_count + 1,
         capture_count: m.capture_count
     )
-    _svc = _svc.with_metrics(new_m)
+    _metrics_cell[0] = new_m
 
     return Ok(updated.pane)
 
@@ -217,14 +228,14 @@ pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_li
     val pr = _svc.get_pane(idx)
     val cap = pr.capture(history_lines)
 
-    val m = _svc.metrics
+    val m = _metrics_cell[0]
     val new_m = SmuxMetrics(
         startup_count: m.startup_count,
         last_startup_ns: m.last_startup_ns,
         resize_count: m.resize_count,
         capture_count: m.capture_count + 1
     )
-    _svc = _svc.with_metrics(new_m)
+    _metrics_cell[0] = new_m
 
     # capture.rows must be > 0 for the initial pane even when empty
     val effective_rows = if cap.rows == 0: 1 else: cap.rows
@@ -259,4 +270,4 @@ pub fn smux_is_deferred_feature(feature: text) -> bool:
 # =========================================================================
 
 pub fn smux_metrics() -> SmuxMetrics:
-    return _svc.metrics
+    return _metrics_cell[0]

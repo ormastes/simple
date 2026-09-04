@@ -160,6 +160,7 @@ mod pty_process {
 mod pty_process {
     use std::collections::HashMap;
     use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use windows::core::{PCWSTR, PWSTR};
@@ -179,6 +180,24 @@ mod pty_process {
         output_read: isize,
         pseudo_console: isize,
         process: Option<isize>,
+    }
+
+    fn child_environment_block() -> Vec<u16> {
+        // This marker describes the current simple.exe process, not its
+        // descendants. A nested driver must create its own large-stack thread.
+        let mut entries: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| !key.to_string_lossy().eq_ignore_ascii_case("_SIMPLE_STACK_SET"))
+            .collect();
+        entries.sort_by_key(|(key, _)| key.to_string_lossy().to_ascii_uppercase());
+        let mut block = Vec::new();
+        for (key, value) in entries {
+            block.extend(key.encode_wide());
+            block.push('=' as u16);
+            block.extend(value.encode_wide());
+            block.push(0);
+        }
+        block.push(0);
+        block
     }
 
     impl Session {
@@ -310,6 +329,7 @@ mod pty_process {
             startup.lpAttributeList = attributes;
             let mut process_info: PROCESS_INFORMATION = std::mem::zeroed();
             let mut command_line: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
+            let environment = child_environment_block();
             let result = CreateProcessW(
                 PCWSTR::null(),
                 PWSTR(command_line.as_mut_ptr()),
@@ -317,7 +337,7 @@ mod pty_process {
                 None,
                 false,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                None,
+                Some(environment.as_ptr().cast::<c_void>()),
                 PCWSTR::null(),
                 &startup.StartupInfo,
                 &mut process_info,
@@ -716,6 +736,29 @@ mod tests {
             output.push_str(&pty_process::read(handle as i64, 100));
         }
         assert!(output.contains("SIMPLE_CONPTY_OK"), "ConPTY output: {output:?}");
+        assert!(pty_process::close(handle as i64));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_child_does_not_inherit_simple_stack_recursion_marker() {
+        std::env::set_var("_SIMPLE_STACK_SET", "1");
+        let handle = pty_process::open(24, 80);
+        assert!(handle > 0);
+        assert!(
+            pty_process::spawn(
+                handle,
+                "cmd.exe /d /c if defined _SIMPLE_STACK_SET (echo MARKER_LEAKED) else (echo MARKER_CLEARED)"
+            ) > 0
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut output = String::new();
+        while std::time::Instant::now() < deadline && !output.contains("MARKER_CLEARED") {
+            output.push_str(&pty_process::read(handle as i64, 100));
+        }
+        std::env::remove_var("_SIMPLE_STACK_SET");
+        assert!(output.contains("MARKER_CLEARED"), "ConPTY output: {output:?}");
+        assert!(!output.contains("MARKER_LEAKED"), "ConPTY output: {output:?}");
         assert!(pty_process::close(handle as i64));
     }
 
