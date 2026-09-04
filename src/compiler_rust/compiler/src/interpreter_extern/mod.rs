@@ -2805,6 +2805,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_pty_write", pty::rt_pty_write);
     insert_simple!("rt_pty_read", pty::rt_pty_read);
     insert_simple!("rt_pty_close", pty::rt_pty_close);
+    insert_simple!("rt_pty_is_running", pty::rt_pty_is_running);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);
