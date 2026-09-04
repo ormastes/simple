@@ -311,7 +311,33 @@ impl LlvmBackend {
         let tagged = builder
             .build_or(new_i64, i64_type.const_int(1, false), "aggcopy_tagged")
             .map_err(|e| crate::error::factory::llvm_build_failed("or tag", &e))?;
-        Ok(tagged)
+        // A source that is not a live heap handle has nothing to copy, and the
+        // freshly allocated block above was filled with ZEROES for it (see the
+        // `aggcopy_word_guarded` select). Returning that block for such a
+        // source manufactures a non-nil, all-zero aggregate out of a value that
+        // was nil: `src_is_valid` requires tag == TAG_HEAP(1), while the nil
+        // sentinel is raw 3 (TAG_SPECIAL), so every nil `Optional<aggregate>`
+        // took that path. The reader then sees a well-formed pointer whose
+        // fields are all 0 -- an `x == nil` test misses, and a field that is an
+        // enum reads back as discriminant 0.
+        //
+        // Propagate the original value instead. This is the same rule the deep
+        // field loop above already applies per word ("Replace only a live
+        // tagged heap handle; nil (0) and non-handle words keep their original
+        // value"); it simply was never applied to the block as a whole.
+        //
+        // Measured on aarch64: a byte-identical probe built by this backend
+        // reported NON-NIL for a `Ty?` local, an enum payload and array
+        // elements, while the same source built by the pure-Simple backend
+        // reported nil for all of them. That divergence is what made the
+        // Stage-3 self-host fail with E-MIR-TYPE-ZeroKind, because HIR tuple
+        // destructuring stores literal `nil` type slots that came back as
+        // zeroed aggregates.
+        let result = builder
+            .build_select(src_is_valid, tagged, src_tagged, "aggcopy_result")
+            .map_err(|e| crate::error::factory::llvm_build_failed("select result", &e))?
+            .into_int_value();
+        Ok(result)
     }
 
     #[cfg(feature = "llvm")]

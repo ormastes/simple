@@ -264,3 +264,154 @@ no extra bootstrap run.
 Do NOT re-derive the "which construct forgot to write kind" framing; this record
 already refuted it, and the `current_module_id` finding is further evidence that
 the defect is in how a type's LAYOUT is attributed, not in a producer.
+
+---
+
+## 2026-09-04 (second session): the transport print was NEVER swallowed, and the producer is TUPLE element types
+
+### 1. The "swallowed" print actually ran — it rendered as an EMPTY LINE
+
+Not a codegen swallow, not a guard problem. In the untruncated worker stderr
+`build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage3-tmp/native-build-stderr-354080.log`
+there are **exactly 16 blank lines in the whole 483,113-byte file**, at lines
+3972, 3974 … 4002 — strictly alternating 1:1 with the 16
+`[post-mono-verify] unhandled HirTypeKind variant at walk_type` lines, and
+bounded by `[mono] …` (3971) and `phase4:monomorphize:done` (4004). Each blank
+immediately PRECEDES its report, which is exactly the source order of
+`post_mono_verify.spl:222-224`. The arm ran; the formatted string collapsed to
+"". Do not spend another session hunting a dropped `print`.
+
+Ruled out as the collapse mechanism, by native-built probes (admitted Stage 2,
+`/tmp/zkprobe/probe{,2,3,4}.spl`): a faithful 27-variant-enum replica of the
+whole `walk_type` shape (recursive payloads, real arm bodies, same field order,
+same format string) prints correctly; nil interpolation prints the literal parts;
+symbol lengths 16…16384 and `$ % s % n` in the symbol print correctly. The
+collapse is value/state-dependent, not structural. Instrumentation hardened at
+`post_mono_verify.spl:222-236`: a literal-only marker line first (cannot
+collapse), then receipt and symbol on separate lines.
+
+### 2. A 30-second reproducer that needs NO bootstrap
+
+```
+SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH=<stage2-runtime-authority> \
+  build/bootstrap/stage2/<triple>/simple compile --format=smf <file>.spl -o /tmp/x.smf
+```
+Run from the repo root. This reproduces BOTH symptoms — the 16 capped
+`[post-mono-verify]` reports AND `E-MIR-TYPE-ZeroKind` — in ~31 s. Note the
+verifier that runs is the one baked into the Stage-2 binary, so source edits to
+`post_mono_verify.spl` do not take effect here; the INPUT is the free variable.
+
+### 3. The producer: tuple destructuring and tuple element access
+
+The Stage-2 transport receipts name the owning symbols (this is the first time
+this defect has ever been localised to a function). On the real closure they are
+`file_ops.spl._file_shell_{bool,int,output}` (4 each),
+`signal_stubs.spl.{signal_dispatch_pending,_store_signal_handler}`,
+`parser_types_expr.spl.tensorsuffix_from_string` — every one of them a tuple
+destructure or `.N` tuple access.
+
+Minimal reproduction (`/tmp/zkprobe/tup{,2,3}.spl`, 20 lines each) gives an exact
+count law:
+
+| construct | malformed HirTypes |
+|---|---|
+| `val t = three()` (bind only, no destructure) | **0** |
+| `t.0` / `t.2` tuple index | **1** per access |
+| `val (a,b) = (1,2)` literal destructure | **2** (= N names) |
+| `val (a,b,c) = ("x","y",7)` literal destructure | **3** (= N names) |
+| `val (a,b,c) = f()` call destructure | **4** (= N names + the `__tuple_destr` temp Let) |
+| `val (a,b,c) = t` where `t` is a **parameter** | **4** |
+
+`E-MIR-TYPE-ZeroKind` fires on the same functions in the same runs
+(`scope-tail:…zz_c_field0`, the tuple-index probe), so the ZeroKind fatal and the
+post-mono `case _` are consistent with the same corrupt object seen at two
+stages.
+
+Relevant code: `src/compiler/20.hir/hir_lowering/statements.spl:295-345`
+(`lower_tuple_destructure`, `td_elem_types`, `td_idx_type`),
+`statements.spl:198-253` (literal fast path), the element-type tables
+`local_tuple_types` / `fn_tuple_returns`
+(`statements.spl:104,308-309,328-329`; `expression_support.spl:200-201`;
+`module_declarations_bootstrap.spl:157`). The parameter row above is the sharp
+one: there `td_elem_types` is empty and every `td_idx_type` is `nil`, yet 4
+malformed types still appear — so this is NOT a bad readback out of those Dicts,
+and it is NOT "a producer forgot to write `kind`" either. Something downstream
+materialises a per-binding `HirType` for a tuple element as a ZEROED aggregate
+(`disc=-1`, `kind` raw 0, span non-nil/non-zero/undereferenceable) rather than
+leaving it absent — `walk_type` early-returns on a true `nil`, so a genuine nil
+would report 0.
+
+### 3a. MECHANISM (measured): the Rust seed's aarch64 codegen materialises
+`Optional<struct> = nil` as a NON-NIL zeroed aggregate
+
+One probe, `/tmp/zkprobe/opt.spl` (~30 lines: a `Ty?` local, a `Ty?` enum
+payload, `[Ty?]`, a `Dict<i64, Ty?>` miss), built twice from BYTE-IDENTICAL
+source and run on this host:
+
+| slot | built by Stage 2 (pure-Simple codegen) | built by the **Rust seed** |
+|---|---|---|
+| `val direct: Ty? = nil` | nil-ok | **NON-NIL** |
+| enum payload `SKind.Let(_, ty: nil, _)` read back | nil-ok | **NON-NIL** |
+| `[Ty?] = [nil, nil]` element read back | nil-ok | **NON-NIL** (x2) |
+| `Dict<i64, Ty?>` miss | nil-ok | nil-ok |
+
+Seed recipe (the runtime path must be the ARCHIVE, not its directory, or the
+link fails):
+`SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH=build/bootstrap/stage3/<triple>/stage2-runtime-authority/deps/libsimple_runtime.a src/compiler_rust/target/bootstrap/simple native-build --source src/app/cli --source src/lib --entry-closure --entry <probe> -o <out>`
+
+This is the mechanism, and it closes every open thread in this record:
+
+- The running Stage-2 compiler is machine code the **Rust seed** generated, so
+  its `HirType?` slots behave this way. `lower_tuple_destructure` writes a
+  literal `nil` type into the `__tuple_destr` temp Let and into every element
+  Let whose type it cannot resolve — each of those reads back as a non-nil,
+  all-zero `HirType`.
+- `walk_type`'s `if ty == nil: return` therefore does NOT fire, the match runs
+  on a zero `kind`, and `case _` is taken: **1 report per nil `HirType?` slot**,
+  which is exactly the count law in the table above.
+- `lower_type` sees the same object and raises `E-MIR-TYPE-ZeroKind`
+  ("`kind` field is raw 0"). `kindzero=true / kindnil=false`, `disc=-1`, and a
+  span that is neither nil nor zero yet cannot be dereferenced are all just
+  descriptions of a zeroed aggregate.
+- x86_64 self-hosts while both aarch64 hosts fail — consistent with an
+  AAPCS64-specific by-value Optional-aggregate representation in the seed.
+- The 2/4/6 variation across byte-identical runs is whatever lands in the
+  discriminant byte, not a set of source sites.
+
+The fix therefore belongs in `src/compiler_rust/**` (seed aarch64 codegen for
+`Optional<aggregate>`), which is outside this session's scope. A defensive
+`.spl`-side mitigation is possible — never store a bare `nil` into an
+`HirType?`/`HirStmt` type slot — but it treats a symptom that will resurface
+anywhere else a nil Optional-of-struct crosses a seed-generated boundary.
+
+### 4. Bonus corruption signal, same runs
+
+Two byte-identical runs of the same command emitted
+`E-SFFI-016: missing return in non-unit function 'flag_template' at :29:46` and
+`… function 'walk_interpolations' at :29:46` — same location, DIFFERENT function
+name. A name read from a wrong slot is the same layout-attribution class this
+record describes, and it is a second, cheap handle on it.
+
+### Codegen attribution — read this before quoting any "ruled out" above
+
+Probes built with the Stage-2 binary exercise **Stage 2's pure-Simple driver
+codegen**, NOT the seed codegen that generated the running compiler. Every
+negative result in §1 (interpolation, nested guarded print in a `case _`, string
+length, special characters, the 27-variant `walk_type` replica) is therefore a
+statement about Stage-2 codegen only. §3a is the counter-example that proves the
+distinction matters: the identical probe passes under Stage 2 and fails under the
+seed. The input bisection in §3 is unaffected — it feeds the real running
+compiler — so the count law and the owner symbols stand.
+
+Equally: the 30-second reproducer's only free variable is the INPUT. The verifier
+and the HIR lowering it runs are baked into the Stage-2 binary, so editing
+`post_mono_verify.spl` or `statements.spl` changes nothing there (confirmed: after
+this session's edit, the reproducer still printed the OLD single-line transport
+format). Compiler-side instrumentation needs a Stage-2 rebuild.
+
+### Next step
+
+Fix `Optional<aggregate> = nil` in the Rust seed's aarch64 codegen
+(`src/compiler_rust/**`) so a nil Optional of a struct reads back nil, and
+re-run the 30-second reproducer on `/tmp/zkprobe/tup2.spl`: the count law
+predicts every report and every `E-MIR-TYPE-ZeroKind` disappears.
