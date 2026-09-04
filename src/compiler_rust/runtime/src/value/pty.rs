@@ -16,6 +16,7 @@ mod pty_process {
 
     lazy_static::lazy_static! {
         static ref SLAVE_TABLE: Mutex<HashMap<i32, i32>> = Mutex::new(HashMap::new());
+        static ref CHILD_TABLE: Mutex<HashMap<i32, libc::pid_t>> = Mutex::new(HashMap::new());
     }
 
     pub(super) fn open(rows: i32, cols: i32) -> i32 {
@@ -114,7 +115,43 @@ mod pty_process {
                 table.remove(&master_fd);
             }
 
+            if let Ok(mut table) = CHILD_TABLE.lock() {
+                table.insert(master_fd, pid);
+            }
+
             pid as i64
+        }
+    }
+
+    pub(super) fn is_running(master_fd: i64) -> bool {
+        let Ok(mut table) = CHILD_TABLE.lock() else {
+            return false;
+        };
+        let Some(&pid) = table.get(&(master_fd as i32)) else {
+            return false;
+        };
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if result == 0 {
+            true
+        } else {
+            table.remove(&(master_fd as i32));
+            false
+        }
+    }
+
+    pub(super) fn forget(master_fd: i64) {
+        if let Ok(mut table) = CHILD_TABLE.lock() {
+            table.remove(&(master_fd as i32));
+        }
+        if let Some(slave_fd) = SLAVE_TABLE
+            .lock()
+            .ok()
+            .and_then(|mut table| table.remove(&(master_fd as i32)))
+        {
+            unsafe {
+                libc::close(slave_fd);
+            }
         }
     }
 }
@@ -126,14 +163,15 @@ mod pty_process {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
     use windows::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
     use windows::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW,
     };
 
     struct Session {
@@ -143,12 +181,26 @@ mod pty_process {
         process: Option<isize>,
     }
 
+    impl Session {
+        fn terminate_child(&mut self) -> bool {
+            let Some(process) = self.process.take() else {
+                return true;
+            };
+            let process = HANDLE(process as *mut c_void);
+            unsafe {
+                let already_exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+                let terminated = already_exited
+                    || (TerminateProcess(process, 1).is_ok() && WaitForSingleObject(process, 2_000) == WAIT_OBJECT_0);
+                let closed = CloseHandle(process).is_ok();
+                terminated && closed
+            }
+        }
+    }
+
     impl Drop for Session {
         fn drop(&mut self) {
             unsafe {
-                if let Some(process) = self.process.take() {
-                    let _ = CloseHandle(HANDLE(process as *mut c_void));
-                }
+                let _ = self.terminate_child();
                 ClosePseudoConsole(HPCON(self.pseudo_console));
                 let _ = CloseHandle(HANDLE(self.input_write as *mut c_void));
                 let _ = CloseHandle(HANDLE(self.output_read as *mut c_void));
@@ -336,11 +388,24 @@ mod pty_process {
     }
 
     pub(super) fn close(handle: i64) -> bool {
-        SESSIONS
+        let Some(mut session) = SESSIONS
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(&(handle as i32)))
-            .is_some()
+        else {
+            return false;
+        };
+        session.terminate_child()
+    }
+
+    pub(super) fn is_running(handle: i64) -> bool {
+        let Ok(sessions) = SESSIONS.lock() else {
+            return false;
+        };
+        let Some(process) = sessions.get(&(handle as i32)).and_then(|session| session.process) else {
+            return false;
+        };
+        unsafe { WaitForSingleObject(HANDLE(process as *mut c_void), 0) == WAIT_TIMEOUT }
     }
 }
 
@@ -381,6 +446,11 @@ pub fn host_pty_read(handle: i64, timeout_ms: i64) -> String {
 #[cfg(windows)]
 pub fn host_pty_close(handle: i64) -> bool {
     pty_process::close(handle)
+}
+
+#[cfg(windows)]
+pub fn host_pty_is_running(handle: i64) -> bool {
+    pty_process::is_running(handle)
 }
 
 #[no_mangle]
@@ -578,6 +648,7 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     #[cfg(unix)]
     {
         let fd = fd as RawFd;
+        pty_process::forget(fd as i64);
         unsafe {
             if libc::close(fd) == 0 {
                 RuntimeValue::from_bool(true)
@@ -600,6 +671,14 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_pty_close(fd: i64) -> RuntimeValue {
     native_pty_close(fd)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_pty_is_running(handle: i64) -> RuntimeValue {
+    #[cfg(any(unix, windows))]
+    return RuntimeValue::from_bool(pty_process::is_running(handle));
+    #[cfg(not(any(unix, windows)))]
+    RuntimeValue::from_bool(false)
 }
 
 #[cfg(test)]
@@ -638,5 +717,31 @@ mod tests {
         }
         assert!(output.contains("SIMPLE_CONPTY_OK"), "ConPTY output: {output:?}");
         assert!(pty_process::close(handle as i64));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_close_terminates_an_active_child_within_its_bound() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle > 0);
+        assert!(pty_process::spawn(handle, "cmd.exe /Q") > 0);
+
+        let started = std::time::Instant::now();
+        assert!(pty_process::close(handle as i64));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(!pty_process::close(handle as i64));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_running_state_tracks_spawn_exit_and_close() {
+        assert!(!pty_process::is_running(-1));
+        let handle = pty_process::open(24, 80);
+        assert!(handle > 0);
+        assert!(!pty_process::is_running(handle as i64));
+        assert!(pty_process::spawn(handle, "cmd.exe /Q") > 0);
+        assert!(pty_process::is_running(handle as i64));
+        assert!(pty_process::close(handle as i64));
+        assert!(!pty_process::is_running(handle as i64));
     }
 }

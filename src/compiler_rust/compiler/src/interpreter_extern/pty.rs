@@ -62,6 +62,12 @@ pub fn rt_pty_close(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(pty_close_impl(handle)))
 }
 
+/// `rt_pty_is_running(handle: i64) -> bool`
+pub fn rt_pty_is_running(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1) as i32;
+    Ok(Value::Bool(pty_is_running_impl(handle)))
+}
+
 // -------------------------------------------------------------------------
 // Platform implementations
 // -------------------------------------------------------------------------
@@ -75,6 +81,7 @@ mod unix_impl {
     /// Maps master_fd -> slave_fd so `pty_spawn_impl` can wire up the child.
     lazy_static::lazy_static! {
         static ref SLAVE_TABLE: Mutex<HashMap<i32, i32>> = Mutex::new(HashMap::new());
+        static ref CHILD_TABLE: Mutex<HashMap<i32, libc::pid_t>> = Mutex::new(HashMap::new());
     }
 
     pub(super) fn pty_open(rows: i32, cols: i32) -> i32 {
@@ -192,6 +199,9 @@ mod unix_impl {
             if let Ok(mut table) = SLAVE_TABLE.lock() {
                 table.remove(&master_fd);
             }
+            if let Ok(mut table) = CHILD_TABLE.lock() {
+                table.insert(master_fd, pid);
+            }
 
             pid as i64
         }
@@ -227,7 +237,30 @@ mod unix_impl {
                 }
             }
         }
+        if let Ok(mut table) = CHILD_TABLE.lock() {
+            table.remove(&fd);
+        }
         unsafe { libc::close(fd) == 0 }
+    }
+
+    pub(super) fn pty_is_running(fd: i32) -> bool {
+        let mut table = match CHILD_TABLE.lock() {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
+        let pid = match table.get(&fd).copied() {
+            Some(value) => value,
+            None => return false,
+        };
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if result == 0 {
+            return true;
+        }
+        if result == pid {
+            table.remove(&fd);
+        }
+        false
     }
 }
 
@@ -252,6 +285,10 @@ fn pty_read_impl(handle: i32, timeout_ms: u64) -> String {
 #[cfg(unix)]
 fn pty_close_impl(handle: i32) -> bool {
     unix_impl::pty_close(handle)
+}
+#[cfg(unix)]
+fn pty_is_running_impl(handle: i32) -> bool {
+    unix_impl::pty_is_running(handle)
 }
 
 #[cfg(windows)]
@@ -598,6 +635,10 @@ fn pty_read_impl(handle: i32, timeout_ms: u64) -> String {
 fn pty_close_impl(handle: i32) -> bool {
     simple_runtime::value::pty::host_pty_close(handle as i64)
 }
+#[cfg(windows)]
+fn pty_is_running_impl(handle: i32) -> bool {
+    simple_runtime::value::pty::host_pty_is_running(handle as i64)
+}
 
 #[cfg(not(any(unix, windows)))]
 fn pty_open_impl(_rows: i32, _cols: i32) -> i32 {
@@ -619,6 +660,10 @@ fn pty_read_impl(_handle: i32, _timeout_ms: u64) -> String {
 fn pty_close_impl(_handle: i32) -> bool {
     false
 }
+#[cfg(not(any(unix, windows)))]
+fn pty_is_running_impl(_handle: i32) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests {
@@ -635,6 +680,7 @@ mod tests {
         );
         assert_eq!(rt_pty_read(&[Value::Int(-1), Value::Int(0)]).unwrap(), Value::text(""));
         assert_eq!(rt_pty_close(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
+        assert_eq!(rt_pty_is_running(&[Value::Int(-1)]).unwrap(), Value::Bool(false));
     }
     #[test]
     fn empty_write_is_safe_for_invalid_handle() {
