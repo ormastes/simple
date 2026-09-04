@@ -11,10 +11,22 @@ hooks_dir=$(git -C "$repo_root" rev-parse --git-path hooks 2>/dev/null) || {
 case "$hooks_dir" in /*) ;; *) hooks_dir="$repo_root/$hooks_dir" ;; esac
 mkdir -p "$hooks_dir"
 
-# Pre-commit remains deferred, but preserve an unrelated local hook without
-# letting a second setup overwrite an already-preserved payload.
+# The FULL pre-commit remains deferred (ui-backend-isolation ratchet), but the
+# workspace root guard must not wait on it: with no pre-commit at all the repo
+# root was completely unguarded at commit time, which is how ~200 undeclared
+# files were committed on 2026-09-03. Install the minimal root-guard hook and
+# preserve any FOREIGN pre-commit as pre-commit.local for it to chain.
+managed_pre_commit="$repo_root/scripts/hooks/pre-commit-root-guard"
+[ -f "$managed_pre_commit" ] || {
+    echo "setup-hooks: ERROR: managed pre-commit is missing: $managed_pre_commit" >&2
+    exit 1
+}
 pre_commit="$hooks_dir/pre-commit"
-if [ -f "$pre_commit" ] && [ ! -L "$pre_commit" ]; then
+# An OLDER copy of the managed hook must NOT be preserved: the hook chains
+# pre-commit.local, so preserving itself there is an unbounded self-chain. Match
+# the identity marker rather than the current bytes so this survives edits.
+if [ -f "$pre_commit" ] && [ ! -L "$pre_commit" ] &&
+   ! grep -q '^# simple-repo-managed-hook: pre-commit-root-guard$' "$pre_commit" 2>/dev/null; then
     [ ! -e "$pre_commit.local" ] || {
         echo "setup-hooks: ERROR: refusing to overwrite $pre_commit.local" >&2
         exit 1
@@ -30,10 +42,14 @@ installer="$repo_root/scripts/setup/install-must-check-hooks.shs"
 }
 sh "$installer" --install
 
-if [ ! -e "$pre_commit" ]; then
-    echo "setup-hooks: note: $pre_commit NOT installed (blocked on the"
-    echo "setup-hooks:       ui-backend-isolation ratchet; see the bug doc)"
-fi
+# Copy, never symlink: linked worktrees share one hooks directory, so a symlink
+# into any single worktree breaks every other one. check-guard-wiring.shs
+# accepts this copy only when it is byte-identical to the tracked file.
+cp "$managed_pre_commit" "$pre_commit.new"
+chmod +x "$pre_commit.new"
+mv -f "$pre_commit.new" "$pre_commit"
+echo "setup-hooks: installed $pre_commit (workspace root guard only; the full"
+echo "setup-hooks:       pre-commit stays blocked on the ui-backend-isolation ratchet)"
 
 hook_check="$repo_root/scripts/check/check-hook-installation.shs"
 [ -f "$hook_check" ] || {
