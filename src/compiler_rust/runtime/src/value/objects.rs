@@ -365,11 +365,7 @@ pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
         return 0;
     }
     let addr = value.as_heap_ptr() as usize;
-    if addr < 4096 {
-        0
-    } else {
-        1
-    }
+    if addr < 4096 { 0 } else { 1 }
 }
 
 #[no_mangle]

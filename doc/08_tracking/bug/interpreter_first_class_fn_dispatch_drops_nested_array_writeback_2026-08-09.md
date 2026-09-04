@@ -1,21 +1,6 @@
 # Interpreter: two mutating `me` calls inside one first-class-function-dispatched invocation drop the first write
 
-Status: OPEN (P1) — **not reproducible at `origin/main`, but the measurement is
-weaker than the ones on neighbouring rows and is recorded as such, not as a
-closure.** Running this record's own repro verbatim under
-`SIMPLE_EXECUTION_MODE=interpreter` on a seed built from `origin/main`
-`1b76db1d6c3` (aarch64-apple-darwin) prints `events_len=2` — the expected
-value, not the reported `1`.
-
-Why this is not marked RESOLVED like the sibling rows closed the same day: a
-regression measurement is only worth what its negative control is worth, and
-there is no pre-fix binary here that can run this probe at all. The deployed
-2026-07-25 seed rejects the source outright ("Common mistake detected" on the
-`self.` receiver form), so it cannot produce the `events_len=1` that would
-prove the probe discriminates. The neighbouring rows closed on 2026-09-02 all
-had a binary that reproduced the defect; this one does not. A JIT-capable or
-Linux host should re-run the repro before this row is closed.
-
+Status: OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 (compiler/interpreter internals, out of scope for the application-level task
 that found it).
