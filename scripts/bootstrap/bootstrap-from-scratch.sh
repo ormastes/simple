@@ -1342,6 +1342,8 @@ bootstrap_stage_sanity() (
   sanity_system_drive=${SystemDrive:-${SYSTEMDRIVE:-}}
   sanity_program_data=${ProgramData:-${PROGRAMDATA:-}}
   sanity_win_temp=${TEMP:-${TMP:-}}
+  sanity_cc=${CC:-}
+  sanity_cxx=${CXX:-}
   for sanity_env_name in $(env | sed 's/=.*//'); do
     case "${sanity_env_name}" in
       ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
@@ -1402,6 +1404,14 @@ bootstrap_stage_sanity() (
     TMP=${sanity_win_temp}
     export TEMP TMP
   fi
+  if [ -n "${sanity_cc}" ]; then
+    CC=${sanity_cc}
+    export CC
+  fi
+  if [ -n "${sanity_cxx}" ]; then
+    CXX=${sanity_cxx}
+    export CXX
+  fi
   evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
   frontend_log="${evidence_tmp}.frontend"
   rm -f "${evidence_tmp}" "${frontend_log}"
@@ -1425,12 +1435,25 @@ bootstrap_stage_sanity() (
     [ "${version}" = "simple-bootstrap ${version_expected}" ]; then
     version_match_status=0
   fi
-  unsupported_status=0
-  if unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1); then
-    unsupported_status=0
-  else
-    unsupported_status=$?
-  fi
+  # Capture the native process status directly. On MSYS, wrapping this command
+  # substitution in an `if` has intermittently reported the assignment's zero
+  # status instead of the Windows child's exit 1, even though the candidate
+  # emitted the expected diagnostic. Temporarily disabling errexit preserves
+  # the actual timeout/child status without weakening any subsequent check.
+  set +e
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*|CYGWIN*)
+      # The candidate has already answered the bounded --version probe. Invoke
+      # its immediate argv dispatch directly: MSYS coreutils timeout 8.32 can
+      # translate a native PE child's exit 1 to 0 while preserving its stderr.
+      unsupported=$("${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1)
+      ;;
+    *)
+      unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1)
+      ;;
+  esac
+  unsupported_status=$?
+  set -e
   frontend_status=0
   CANDIDATE_FRONTEND_BACKEND="${backend}" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
@@ -1782,6 +1805,9 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
     # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
     bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
+    CC=${cc_abs}
+    CXX=${cc_abs}
+    export CC CXX
   fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"

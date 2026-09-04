@@ -23,6 +23,33 @@ candidate_frontend_timeout_bin() {
 # regardless of its exit status.
 CANDIDATE_FRONTEND_MAX_LOG_BYTES=${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}
 
+candidate_frontend_executable_path() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*) printf '%s.exe\n' "$1" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+candidate_frontend_run_expect() {
+    candidate_frontend_run_path=$1
+    candidate_frontend_run_expected=$2
+    candidate_frontend_run_label=$3
+    candidate_frontend_run_status=0
+    candidate_frontend_run_output=$(
+        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
+            "${COMPILER_EXEC_TIMEOUT_SECONDS}s" \
+            "$candidate_frontend_run_path" 2>&1
+    ) || candidate_frontend_run_status=$?
+    if [ "$candidate_frontend_run_status" -ne 0 ]; then
+        echo "candidate_frontend_smoke: ${candidate_frontend_run_label} executable exited ${candidate_frontend_run_status}: ${candidate_frontend_run_output}" >&2
+        return 1
+    fi
+    if [ "$candidate_frontend_run_output" != "$candidate_frontend_run_expected" ]; then
+        echo "candidate_frontend_smoke: ${candidate_frontend_run_label} output '${candidate_frontend_run_output}', expected '${candidate_frontend_run_expected}'" >&2
+        return 1
+    fi
+}
+
 # candidate_frontend_smoke <candidate>
 #
 # CANDIDATE_FRONTEND_BOOTSTRAP selects the SIMPLE_BOOTSTRAP value the candidate
@@ -42,7 +69,7 @@ candidate_frontend_smoke() (
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
     trap 'rm -rf "$probe_dir"' 0
     trap 'exit 1' HUP INT TERM
-    probe_output=$probe_dir/p2_add
+    probe_output=$(candidate_frontend_executable_path "$probe_dir/p2_add")
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
@@ -90,16 +117,15 @@ candidate_frontend_smoke() (
         head -c 4096 "$probe_dir/build.log" >&2
         exit 1
     fi
-    probe_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || exit 1
-    [ "$probe_stdout" = 5 ]
+    candidate_frontend_run_expect "$probe_output" 5 p2_add || exit 1
 
     # Exact Stage-2 MIR-retention guard. An admitted self-compiled compiler was
     # observed emitting two method-call instructions, then losing them when
     # end_function called finalize_block with an already-empty pending list.
     # p2_add alone did not distinguish that failure, so keep this fixture and
     # cache independent and require its native result before admission.
-    retention_output=$probe_dir/stage2_mir_retention
+    retention_output=$(candidate_frontend_executable_path \
+        "$probe_dir/stage2_mir_retention")
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
@@ -128,16 +154,16 @@ candidate_frontend_smoke() (
         head -c 4096 "$probe_dir/build.log" >&2
         exit 1
     }
-    retention_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$retention_output" 2>/dev/null) || exit 1
-    [ "$retention_stdout" = 3 ] || exit 1
+    candidate_frontend_run_expect \
+        "$retention_output" 3 stage2_mir_retention || exit 1
 
     # Stage-3 module-identity guard. Stage 2 previously admitted even though
     # its native lowering turned both of these source paths into the empty
     # module name. Compile and execute the canonical helper through the exact
     # candidate that will build Stage 3; interpreter-only tests cannot prove
     # this boundary.
-    naming_output=$probe_dir/stage2_module_path_naming
+    naming_output=$(candidate_frontend_executable_path \
+        "$probe_dir/stage2_module_path_naming")
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
@@ -172,13 +198,9 @@ candidate_frontend_smoke() (
         tail -c 4096 "$probe_dir/build.log" >&2
         exit 1
     fi
-    naming_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$naming_output" 2>/dev/null) || exit 1
     naming_expected=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main')
-    [ "$naming_stdout" = "$naming_expected" ] || {
-        echo "candidate_frontend_smoke: Stage-2 module naming mismatch: '$naming_stdout'" >&2
-        exit 1
-    }
+    candidate_frontend_run_expect \
+        "$naming_output" "$naming_expected" stage2_module_path_naming || exit 1
 
     # Positional-entry no-crash probe (2026-08-25). Both probes above name the
     # entry with the `--entry` FLAG, and that flag form is the ONLY form this
@@ -195,7 +217,8 @@ candidate_frontend_smoke() (
     # it. Only death-by-signal and a hang are failures. `--entry-closure` is
     # mandatory -- without it the candidate scans the default source roots and
     # runs unbounded on a two-line fixture.
-    positional_output=$probe_dir/hello_world_positional
+    positional_output=$(candidate_frontend_executable_path \
+        "$probe_dir/hello_world_positional")
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
