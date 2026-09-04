@@ -5,7 +5,9 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-font-8k}"
 ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 GLYPHS="${ENGINE2D_VULKAN_GLYPHS:-64}"
 SAMPLES="${ENGINE2D_VULKAN_SAMPLES:-31}"
-MODE="${ENGINE2D_VULKAN_FONT_MODE:-warm-pool}"
+MODE="${ENGINE2D_VULKAN_FONT_MODE:-packed}"
+REQUIRE_PHYSICAL="${ENGINE2D_VULKAN_REQUIRE_PHYSICAL:-0}"
+REQUIRE_80FPS="${ENGINE2D_VULKAN_REQUIRE_80FPS:-0}"
 RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_font_status=blocked reason=missing-icd"; exit 2; fi
@@ -35,4 +37,42 @@ gcc -O2 -Wall -Wextra -Werror "$ROOT/test/09_baselines/engine2d_vulkan/engine2d_
 VK_ICD_FILENAMES="$ICD" "$BUILD_DIR/bench" "$BUILD_DIR/font.spv" "$GLYPHS" "$SAMPLES" "$MODE" | tee "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_font_mismatch_count=0$' "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_font_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
+if [ "$REQUIRE_PHYSICAL" = 1 ]; then
+    grep -Eq '^engine2d_vulkan_font_adapter_type=(discrete|integrated)$' "$BUILD_DIR/receipt.env" || {
+        echo 'engine2d_vulkan_font_status=blocked reason=physical-adapter-required'
+        exit 2
+    }
+fi
+if [ "$REQUIRE_80FPS" = 1 ]; then
+    grep -q '^engine2d_vulkan_font_within_80fps_budget=true$' "$BUILD_DIR/receipt.env" || {
+        echo 'engine2d_vulkan_font_status=failed reason=p95-over-80fps-budget'
+        exit 1
+    }
+fi
+if [ "$MODE" = packed ]; then
+    field() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$BUILD_DIR/receipt.env"; }
+    workload_hash=$(printf '%s' "font-packed-v1;7680x4320;atlas=16x16-opaque;glyphs=$GLYPHS;placement=20x20;params-upload=timed" | sha256sum | awk '{print $1}')
+    device_hash=$(printf '%s' "$(field engine2d_vulkan_font_adapter_name)|$(field engine2d_vulkan_font_adapter_driver_identity)" | sha256sum | awk '{print $1}')
+    cat >"$BUILD_DIR/c-feature.receipt" <<EOF
+schema=engine2d-vulkan-feature-perf-v1
+implementation=c
+backend=vulkan
+feature=font-atlas-packed
+workload_hash=$workload_hash
+device_hash=$device_hash
+width=$(field engine2d_vulkan_font_width)
+height=$(field engine2d_vulkan_font_height)
+warmup_count=1
+sample_count=$(field engine2d_vulkan_font_samples)
+timing_scope=params-upload-and-vulkan-submit-and-fence
+p50_ns=$(field engine2d_vulkan_font_frame_p50_ns)
+p95_ns=$(field engine2d_vulkan_font_frame_p95_ns)
+timed_readback_bytes=$(field engine2d_vulkan_font_timed_readback_bytes)
+mismatch_count=$(field engine2d_vulkan_font_mismatch_count)
+checksum=$(field engine2d_vulkan_font_checksum)
+completion=known
+fallback=none
+EOF
+    echo "engine2d_vulkan_font_feature_receipt=$BUILD_DIR/c-feature.receipt"
+fi
 echo "engine2d_vulkan_font_status=pass"
