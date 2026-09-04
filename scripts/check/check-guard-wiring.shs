@@ -58,6 +58,17 @@ set -u
 GREP=grep
 [ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
+# Extract every fixed-string pattern occurrence from stdin. Same reason as the
+# recursive scan below: this runs once per matched file (943 of them on this
+# tree) with ~1,500 -F patterns, and BSD grep is pathological at that. Verified
+# byte-identical output against `/usr/bin/grep -o -F -f` over 25 real guard
+# scripts before switching.
+if command -v rg >/dev/null 2>&1; then
+    _fixed_strings_only() { rg -o -F -f "$1" --no-line-number --no-filename 2>/dev/null; }
+else
+    _fixed_strings_only() { $GREP -o -F -f "$1" 2>/dev/null; }
+fi
+
 # A tree this size always has hundreds of guards. Anything near zero means the
 # enumerator broke, not that the tree got clean. Raise as the tree grows; never
 # lower it to make a run pass.
@@ -144,8 +155,28 @@ scan_wiring() {
     if [ -s "$_wd/guards" ] && [ -s "$_wd/searchdirs" ]; then
         # xargs -d is not portable; searchdirs are repo-relative and space-free.
         # shellcheck disable=SC2046
-        $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
-            2>/dev/null > "$_wd/reffiles" || :
+        # Prefer ripgrep for this one scan. `grep -F -f` with ~1,500 patterns
+        # is fine on GNU grep (Aho-Corasick) and pathological on the BSD grep
+        # that ships as /usr/bin/grep on macOS. Measured 2026-09-03 on this
+        # tree, identical inputs (1,539 patterns, 943 matching files):
+        #     /usr/bin/grep -r -I -l -F -f   >47 min, still running when killed
+        #     rg -F -f -l --no-ignore --hidden   0.17 s
+        # That is not a micro-optimisation: check-guard-wiring is a BLOCKING
+        # push-tier gate, so on a mac every `git push` sat in this one grep for
+        # an hour or more and looked hung. Output equivalence was verified
+        # before switching — byte-identical file lists from both tools over
+        # config/, bin/, tools/ and .github/. --no-ignore --hidden are required
+        # (.github is a dot-directory and rg honours .gitignore by default);
+        # rg skips binaries like -I and lists names like -l.
+        if command -v rg >/dev/null 2>&1; then
+            # shellcheck disable=SC2046
+            rg -F -f "$_wd/guards" -l --no-ignore --hidden $(cat "$_wd/searchdirs") \
+                2>/dev/null > "$_wd/reffiles" || :
+        else
+            # shellcheck disable=SC2046
+            $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
+                2>/dev/null > "$_wd/reffiles" || :
+        fi
         while IFS= read -r _f; do
             # Drop human-facing report/help-text prose lines before matching.
             # A handful of aggregate guards (e.g. check-metal-generated-2d-
@@ -161,7 +192,7 @@ scan_wiring() {
             # which never start with that shape.
             $GREP -v -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*_(report_note|note|report)="' \
                 "$_f" 2>/dev/null |
-                $GREP -o -F -f "$_wd/guards" 2>/dev/null | sort -u |
+                _fixed_strings_only "$_wd/guards" |sort -u |
                 while IFS= read -r _b; do
                     printf '%s\t%s\n' "$_f" "$_b"
                 done
@@ -258,6 +289,22 @@ scan_installed_hooks() {
         if [ "$_b" = pre-push ] && [ -x "$_h" ] &&
            [ "$_launcher_tracked" -eq 1 ] && [ -f "$_launcher" ] &&
            cmp -s "$_launcher" "$_h"; then
+            continue
+        fi
+
+        # Same exception, same terms, for the repo-managed pre-commit added
+        # 2026-09-03 (scripts/hooks/pre-commit-root-guard). Linked worktrees
+        # share one hooks directory, which is exactly why a symlink into any
+        # single worktree is not usable and the launcher is copied instead; a
+        # managed pre-commit has the identical constraint. Content identity,
+        # tracked provenance, basename and executability are all still
+        # load-bearing — a one-byte drift is still invalid — so this widens the
+        # rule by exactly one named, tracked file and grandfathers nothing.
+        if [ "$_b" = pre-commit ] && [ -x "$_h" ] &&
+           git -C "$_root_phys" ls-files --error-unmatch \
+               scripts/hooks/pre-commit-root-guard >/dev/null 2>&1 &&
+           [ -f "$_root_phys/scripts/hooks/pre-commit-root-guard" ] &&
+           cmp -s "$_root_phys/scripts/hooks/pre-commit-root-guard" "$_h"; then
             continue
         fi
 

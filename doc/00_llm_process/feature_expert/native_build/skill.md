@@ -136,3 +136,30 @@ an admitted full CLI can run test/maintenance/docgen. Do not use the known-bad
 `release/` artifact or any Rust seed to turn `TEST_BLOCKED` into PASS. This
 criterion does not authenticate arbitrarily renamed binaries and does not
 admit Stage 4, build the render carrier, or prove 8K execution.
+
+## Entry-closure completeness depends on a byte/char-correct import scan (2026-09-01)
+
+`--entry-closure` discovers modules by TEXT-scanning each source for `use` /
+`import` lines (`_driver_entry_import_module_paths` in
+`src/compiler/80.driver/driver_source_loading.spl`), not by parsing. That
+scanner is therefore load-bearing for correctness, not just speed: any import
+it misses is a module the closure never collects, which becomes
+`import_target_indices = -1` in `module_surface_registry_index`, then a
+silent no-route in the callable-dependency sweep, and finally a hard
+`unresolved type: X` attributed to some OTHER module that merely imported the
+callable. The reported file is routinely NOT the file at fault.
+
+The unit hazard behind this: `text.len()` and `text[a:b]` are **BYTE**-indexed
+while `char_code_at(i)` is **CHAR**-indexed. Scanning with one and slicing with
+the other desyncs at the first multi-byte character. An em-dash in a header
+comment was enough to reduce `engine.spl` from 39 imports to 1 and the daemon's
+closure from 230 modules to 96.
+
+Debugging rule: when a native build reports unresolved types, check
+`[build] source_closure N/N` FIRST. A closure that is too small explains the
+whole error set, and `[hir-callable-dep-origin-unresolved]` names the real
+owner while the `[hir-fatal]` lines name innocent importers. Probe the scanner
+directly via `_driver_cached_entry_source_scan(path)` — it answers in seconds
+and beats a 40-minute build. Regression:
+`test/01_unit/compiler/bootstrap/entry_closure_non_ascii_import_scan_spec.spl`.
+Record: `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`.

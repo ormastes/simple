@@ -147,6 +147,24 @@ fn runtime_module_initializer_supported(const_: HirConst) -> bool:
         # machinery -- it only starts routing array globals through the same
         # runtime-init path Call/Binary/MethodCall already use.
         case ArrayLit(_, _): true
+        # Same defect as the ArrayLit case above, one container kind over:
+        # `var D: Dict<K, V> = {}` (or any dict literal) module-level global.
+        # DictLit matched no arm here and the type-driven fallback below has
+        # no Dict case, so this returned false, `lower_static` returned before
+        # emitting a MirStatic, and no `global_symbol_ids` entry was recorded.
+        # Every later `D = new_d` then missed BOTH `find_global_static` and
+        # `find_local` and aborted the build with "assignment target has no
+        # local binding" (mir_lowering_stmts.spl). This is a SECOND, narrower
+        # instance of that message than the `global_statics_by_id` mirror
+        # desync fixed in `lower_static` below: the mirror fix repairs every
+        # global that HAS a static, this arm is what gives a dict global one at
+        # all. The MCP closure reaches assigned dict globals through std
+        # (`log.spl` SCOPE_LEVELS at :256).
+        # `lower_runtime_module_initializers_named` lowers the initializer
+        # generically via `self.lower_expr(const_.value)` and OVERWRITES the
+        # static with the type of that lowered value, so admitting DictLit
+        # needs no new lowering machinery, exactly like ArrayLit.
+        case DictLit(_, _, _): true
         case _:
             match const_.type_.kind:
                 case Int(_, _) | Float(_) | Bool | Str: true
@@ -397,7 +415,24 @@ impl MirLowering:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
         if not symbol_info.?:
             return
-        val info = symbol_info.unwrap()
+        # SIGSEGV FIX (2026-09-02). `.unwrap()` here was the ONLY bare unwrap in
+        # this file (every other Option site uses `??`, e.g. :338, :351), and it
+        # was the crash site: EXC_BAD_ACCESS / KERN_INVALID_ADDRESS at 0x48 in
+        # MirLowering.record_external_layout_reference, per the macOS crash
+        # report. Any module publishing a bare `unwrap` (Poll, FailSafeResult)
+        # steals the `Option.unwrap` binding and returns raw 0, so the very next
+        # line dereferenced a null base at a small field offset. The `.?`
+        # presence test above is NOT affected by that theft, which is why the
+        # guard passed and the unwrap still handed back 0.
+        # `match`/`case Some` is this file's established safe idiom (6 sites).
+        var info_opt = symbol_info
+        match info_opt:
+            case Some(info_value):
+                self.record_external_layout_reference_resolved(symbol, info_value)
+            case nil:
+                return
+
+    me record_external_layout_reference_resolved(symbol: SymbolId, info: HirSymbol):
         var owner = mir_layout_canonical_module_name(info.defining_module ?? "")
         var key = "{owner}::{info.name}"
         var owner_count = 0
@@ -1657,6 +1692,21 @@ impl MirLowering:
                 return
         elif not runtime_module_initializer_supported(const_):
             return
+        else:
+            # A dict-literal global's storage type is knowable only from the
+            # LOWERED initializer (a dict is an i64 handle, not the pointer the
+            # `Dict<K, V>` annotation lowers to). Emitting a placeholder static
+            # here declared the global as `ptr` while the initializer produced
+            # an i64, and llc rejected the module with
+            #   '%l1' defined with type 'i64' but expected 'ptr'
+            # `lower_runtime_module_initializers_named` creates BOTH the static
+            # and its `global_statics_by_id` mirror entry from the real value
+            # type, so hand ownership to it rather than guessing. Returning here
+            # is safe: `lower_const` (function_lowering.spl) has already
+            # registered `global_symbol_ids` for this symbol, unconditionally.
+            match const_.value.kind:
+                case DictLit(_, _, _): return
+                case _: ()
         val static_type = match folded:
             case Some(const_value):
                 match const_.type_.kind:
@@ -1705,23 +1755,48 @@ impl MirLowering:
                     global_owner = defining_module
         val owner_dots = global_owner.replace(".", "_")
         val owner_slashes = owner_dots.replace("/", "_")
-        val owner_safe = owner_slashes.replace("-", "_")
+        val owner_dashes = owner_slashes.replace("-", "_")
+        # Windows source paths reach this name with a drive colon and
+        # backslashes ("C:\dir"). Neither is legal in an LLVM global name, and
+        # llc rejects the module with "expected '=' in global variable". Sanitize
+        # them the same way as the separators above; the three copies of this
+        # sequence (lower_static, lower_runtime_module_initializers_named,
+        # materialize_folded_global_static_for_address) must stay identical or
+        # one symbol would get two storage slots.
+        val owner_colons = owner_dashes.replace(":", "_")
+        val owner_safe = owner_colons.replace("\\", "_")
         val global_link_name = if owner_safe == "": const_.name else: "{owner_safe}__{const_.name}"
         if sym_id >= 0:
             self.global_symbol_ids[sym_id] = true
         var bldr = self.builder
         var module_ = bldr.module
         var statics = module_.statics
-        statics[const_.symbol] = MirStatic(
+        val lowered_static = MirStatic(
             symbol: const_.symbol,
             name: global_link_name,
             type_: static_type,
             init: init_const,
             is_mutable: const_.is_mutable
         )
+        statics[const_.symbol] = lowered_static
         module_.statics = statics
         bldr.module = module_
         self.builder = bldr
+        # Mirror the entry into the i64-keyed index. `find_global_static`
+        # (expr_dispatch.spl) reads ONLY `global_statics_by_id` -- it stopped
+        # scanning `module.statics` to dodge the seed's struct-keyed SymbolId
+        # lookup defect -- but this producer was never updated to feed it, so
+        # the mirror was written by nothing except the address-taken-folded-val
+        # path and lambda lifting. Consequence: EVERY module-level `var` was
+        # invisible to `find_global_static`, so `lower_assign_var`'s
+        # `global_symbol_ids.contains(...) and find_global_static(...).?` guard
+        # fell through to the per-function local path and every `G = x` aborted
+        # the build with "assignment target has no local binding", whatever the
+        # global's type. That is the fatal that blocked
+        # `native-build src/app/mcp/main.spl` (2026-09-03); a `var G: text = ""`
+        # reproduces it in three lines.
+        if sym_id >= 0:
+            self.global_statics_by_id[sym_id] = lowered_static
 
     me lower_runtime_module_initializers(module: HirModule, consts: [HirConst], bootstrap_module_index: i64 = -1):
         self.lower_runtime_module_initializers_named(module.name, consts, bootstrap_module_index)
@@ -1781,7 +1856,15 @@ impl MirLowering:
 
         for const_ in dynamic:
             val value = self.lower_expr(const_.value)
-            val value_type = self.lookup_local_type(value)
+            var value_type = self.lookup_local_type(value)
+            # A dict initializer's SSA local is an i64 handle, but its MIR type
+            # is `Dict(K, V)`, which the LLVM backend declares as `ptr`. Storing
+            # the handle into that global is rejected by llc ("'%l1' defined
+            # with type 'i64' but expected 'ptr'"). Declare the storage as what
+            # is actually stored.
+            match const_.value.kind:
+                case DictLit(_, _, _): value_type = MirType.i64()
+                case _: ()
             var value_builder = self.builder
             var value_module = value_builder.module
             var statics = value_module.statics
@@ -1792,15 +1875,25 @@ impl MirLowering:
                         runtime_global_owner = runtime_defining_module
             val runtime_owner_dots = runtime_global_owner.replace(".", "_")
             val runtime_owner_slashes = runtime_owner_dots.replace("/", "_")
-            val runtime_owner_safe = runtime_owner_slashes.replace("-", "_")
+            val runtime_owner_dashes = runtime_owner_slashes.replace("-", "_")
+            val runtime_owner_colons = runtime_owner_dashes.replace(":", "_")
+            val runtime_owner_safe = runtime_owner_colons.replace("\\", "_")
             val runtime_global_link_name = if runtime_owner_safe == "": const_.name else: "{runtime_owner_safe}__{const_.name}"
-            statics[const_.symbol] = MirStatic(
+            val runtime_static = MirStatic(
                 symbol: const_.symbol,
                 name: runtime_global_link_name,
                 type_: value_type,
                 init: nil,
                 is_mutable: const_.is_mutable
             )
+            statics[const_.symbol] = runtime_static
+            # Same mirror contract as `lower_static` above: this pass
+            # OVERWRITES the static with the type of the lowered initializer,
+            # so the i64 index must be re-pointed at the new entry or
+            # `find_global_static` would keep handing out the placeholder type
+            # (or nothing at all, for a runtime-only initializer).
+            if const_.symbol.id >= 0:
+                self.global_statics_by_id[const_.symbol.id] = runtime_static
             value_module.statics = statics
             value_builder.module = value_module
             value_builder.emit(MirInst(kind: MirInstKind.StoreGlobal(const_.symbol, mir_operand_copy(value)), span: Some(const_.span)))

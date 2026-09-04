@@ -25,6 +25,7 @@ use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, cus
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_name, bootstrap_hir_symbol_known_name, function_params, platform_attr_fields_for}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: Any) -> i64
@@ -838,12 +839,18 @@ impl HirLowering:
         # Pre-compute bit widths for all fields
         var widths: [i64] = []
         for f in bitfield_fields:
-            val w = if f.bits.?:
-                f.bits.unwrap()
+            # `if val` binds directly; a bare `.unwrap()` here can be STOLEN by
+            # any module publishing its own `unwrap` and return raw 0 (explainer
+            # at _Expressions/expression_core.spl:50) -> silently wrong layout.
+            # Statement form, not `val x = if val ...:` -- if-val as an assignment
+            # RHS does not survive the bootstrap flat-AST bridge (tag=18 parse error).
+            var w = 0
+            if val explicit_bits = f.bits:
+                w = explicit_bits
             elif f.is_reserved:
-                0
+                w = 0
             else:
-                self.infer_bit_width(f.type_)
+                w = self.infer_bit_width(f.type_)
             widths.push(w)
 
         # Build index array for field ordering

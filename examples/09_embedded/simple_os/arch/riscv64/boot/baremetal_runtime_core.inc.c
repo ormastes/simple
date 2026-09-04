@@ -118,6 +118,15 @@ static uint16_t g_last_used_idx = 0;
 extern RuntimeValue spl_start(void);
 extern char _stack_top[];
 
+static void serial_puts(const char *s);
+static int g_rv_heap_exhausted_reported = 0;
+static void rv_report_heap_exhausted(void)
+{
+    if (g_rv_heap_exhausted_reported) return;
+    g_rv_heap_exhausted_reported = 1;
+    serial_puts("[rv64] FATAL bump heap exhausted (high half) - rv_alloc returned NULL\r\n");
+}
+#define RV_HEAP_EXHAUSTED_REPORT() rv_report_heap_exhausted()
 #define BAREMETAL_ENABLE_ALIGNED_ALLOC 1
 #include "../../common/baremetal_bump_heap.h"
 
