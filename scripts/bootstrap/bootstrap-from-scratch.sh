@@ -2571,6 +2571,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   cmp -s "${runtime_admitted_snapshot}" \
     "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   stage2_native_log="$(absolute_path "${log_dir}/stage2-native-build.log")"
+  # A pre-execution transcript refusal produces no build log. Remove the prior
+  # attempt before entering the runner so failure diagnostics cannot attribute
+  # stale compiler output to this invocation.
+  rm -f "${stage2_native_log}"
   bootstrap_run_stage2_native() {
     bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
