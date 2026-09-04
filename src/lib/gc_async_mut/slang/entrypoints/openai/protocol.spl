@@ -192,6 +192,24 @@ fn parse_chat_request(body: text) -> Result<ChatRequest, text>:
         stream: false
     ))
 
+# Read a JSON string value for the LAST occurrence of `key`, rather than the
+# first. Chat requests carry one "content" per message, so the last one is the
+# newest turn — which is the prompt the engine must answer. Reading the first
+# would answer the system prompt instead, silently and plausibly.
+fn json_string_field_last(source: text, key: text) -> text:
+    val marker = "\"" + key + "\""
+    var at = source.rfind(marker)
+    if at < 0:
+        return ""
+    json_string_field(source.slice(at, source.len()), key)
+
+# OpenAI chat-completion envelope. Only emitted for text that a model actually
+# produced: nothing in this file fabricates a completion, and the stub path in
+# serving_chat.spl still returns an error rather than calling this.
+fn openai_chat_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64) -> ApiResponse:
+    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}"
+    ApiResponse(status: 200, body: body)
+
 # OpenAI error envelope: {"error":{"message","type","param","code"}}.
 # `detail_json` is appended verbatim inside the error object when non-empty so
 # callers can attach machine-readable diagnostics next to the human message.
@@ -215,3 +233,4 @@ fn openai_models_response(ids: [text], owner: text) -> ApiResponse:
 export ApiResponse, ChatRequest
 export json_string_field, json_int_field, json_bool_field_is_true, json_array_object_count
 export parse_chat_request, openai_error_response, openai_models_response
+export json_string_field_last, openai_chat_completion_response
