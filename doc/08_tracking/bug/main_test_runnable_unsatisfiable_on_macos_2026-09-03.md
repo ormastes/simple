@@ -70,3 +70,27 @@ and from the push run itself: conflict-tree PASS, tree-size PASS
 no-direct-rt PASS (16,238 files), guard-wiring PASS (1539 guards, 0 new unwired,
 0 copied hooks), type-walk-constructor-parity PASS (12 constructors),
 windows-checkout-damage PASS (1212 paths, 0 damage).
+
+## Update 2026-09-04 — the guard also DESTROYED the deployed CLI on every run
+
+Separate from the unsatisfiability above, `run_fixture_in` provisioned the
+child-compiler path unconditionally:
+
+```sh
+ln -sf "$(readlink -f "$_bin")" "$_dir/bin/simple"
+```
+
+When the tree under test is the repo itself and `bin/simple` is a regular-file
+exec wrapper (which it is on this mac — the stage4 binary resolves its stdlib
+from `argv[0]`, so a plain symlink cannot be used), `readlink -f "$_bin"` is
+that same path, so the link pointed `bin/simple` at itself. Every later exec
+then failed with `ELOOP` — `timeout: failed to run command
+'.../bin/simple': Too many levels of symbolic links` — and the selftest
+reported the damage it had just caused as fixture C2 failing "not with a parse
+diagnostic". The deployed CLI stayed broken after the push aborted.
+
+Fixed by comparing resolved paths and relinking only on a genuine mismatch.
+After the fix, fixture F passes and C2 reduces to the real, documented cause:
+`error: unknown command 'test'` — the deployed binary is the BOOTSTRAP CLI
+(`simple-bootstrap 1.0.0-beta`), which exposes only `compile` and
+`native-build`. That is the unsatisfiability recorded above, unchanged.
