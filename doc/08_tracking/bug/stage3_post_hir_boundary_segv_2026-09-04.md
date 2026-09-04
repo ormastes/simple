@@ -48,9 +48,34 @@ the original value-returning function remains as a compatibility wrapper for
 focused callers and unit specs. This preserves validation rather than skipping
 the failing pass.
 
+The final permitted replay for this session used a newly rebuilt, admitted
+Stage 2 compiler containing that owner-result repair. It did not reach the
+validation dispatcher: after HIR module 1 of 771 it diagnosed two ambiguous
+explicit callable dependencies named `Option`, from
+`compiler.backend.backend.env` and
+`compiler.backend.backend.interpreter`, while declaring
+`src/compiler/driver/driver.spl`. The diagnostic was emitted successfully, but
+the process then exited with signal 11 instead of returning a normal compile
+failure. This is a distinct earlier frontier; consequently this replay neither
+confirms nor disproves the value-layout repair.
+
+Final-replay evidence:
+
+- Resume transcript:
+  `build/caret-bootstrap-current.stage3-value-layout-owner.log`
+- Native log and status receipt are the paths listed above.
+- Status: `shell_exit_status=139`, `signal_identity=signal-number-11`
+- Last completed marker: `phase3:hir:declare:done` for
+  `src/compiler/driver/driver.spl`
+- Fatal diagnostics: two ambiguous `Option` dependencies, followed by the
+  signal exit.
+
 ## Next bounded action
 
-After rebuilding and re-admitting Stage 2 for this source identity, run Stage 3
-once with `SIMPLE_NO_STUB_FALLBACK=1`. The last emitted marker selects the exact
-operation to repair. Do not replay the uninstrumented receipt or attribute the
-fault to a boundary that the retained evidence cannot distinguish.
+In a fresh bounded session, first remove or qualify the two ambiguous `Option`
+callable dependencies and inspect the HIR fatal-diagnostic cleanup path that
+turns a reported compile error into SIGSEGV. Rebuild and re-admit Stage 2, then
+run Stage 3 once with `SIMPLE_NO_STUB_FALLBACK=1`. Do not run a fourth replay in
+the current session: the mandatory three-cycle convergence cap has been
+reached. The value-layout owner-result repair still needs a replay that reaches
+`phase3:validation:value-struct:done`.
