@@ -37,7 +37,7 @@ int main(int argc,char**argv){
  if(!adapter_identity)adapter_identity="";
  int64_t fb=rt_vulkan_alloc_buffer((int64_t)nb,0x83),src=rt_vulkan_alloc_buffer((int64_t)imgn*4,0x83),atlas=rt_vulkan_alloc_buffer(GW*GH*4,0x83);
  Kernel clear=kernel(argv[1],"clear",64),rect=kernel(argv[1],"rect_filled",64),image=kernel(argv[1],"image_copy",64),font=kernel(argv[1],"font_atlas_packed",0);
- uint64_t words=8+7ULL*glyphs;int64_t fp=rt_vulkan_alloc_buffer((int64_t)words*4,0x83);uint32_t*pp=calloc((size_t)words,4),*buf=malloc((size_t)nb),*isrc=malloc((size_t)imgn*4);uint32_t mask[GW*GH];
+ uint64_t words=8+7ULL*glyphs;int64_t fp=rt_vulkan_alloc_buffer((int64_t)words*4,0x83);uint32_t*pp=calloc((size_t)words,4),*buf=malloc((size_t)nb),*isrc=malloc((size_t)imgn*4);uint32_t mask[16*16];
  if(!fb||!src||!atlas||!clear.pipe||!rect.pipe||!image.pipe||!font.pipe||!fp||!pp||!buf||!isrc)return 4;
  for(uint64_t i=0;i<np;i++)buf[i]=0xff101010u;
  for(uint64_t i=0;i<imgn;i++)isrc[i]=0xff8844ccu;
