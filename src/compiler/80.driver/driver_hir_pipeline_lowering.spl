@@ -414,8 +414,26 @@ impl CompilerDriver:
         ast_reset()
         self.ctx.modules = {}
         lexer_release_parse_source_globals()
-        val reclaimed_sources = self.ctx.reclaim_source_contents()
-        val reclaimed_streaming_owners = self.ctx.reclaim_streaming_source_contents_owner()
+        # DIAGNOSTIC GATE (2026-09-03, default OFF -- behaviour unchanged unless
+        # SIMPLE_KEEP_SOURCE_CONTENTS=1). This reclaim is UNCONDITIONAL on the
+        # streaming path, while the non-streaming equivalent at
+        # driver_orchestration.spl:181 is gated
+        #   `if source_contents_reclaimable() and not streaming`
+        # i.e. only under --low-memory. That asymmetry is the lead for
+        # E-MIR-TYPE-ZeroKind: the raises carry an EMPTY current_module_id
+        # (whose sole writer is lower_module, module_lowering.spl:1151) and a
+        # span that is neither nil nor zero yet cannot be dereferenced -- a
+        # dangling read, which is what aliasing reclaimed storage looks like.
+        # Setting the var to 1 skips the reclaim: if the fatals vanish, the
+        # reclaim is implicated; if they persist, it is not.
+        # See doc/08_tracking/bug/zerokind_is_a_corrupt_aggregate_2026-09-03.md
+        var reclaimed_sources = 0
+        var reclaimed_streaming_owners = 0
+        if (env_get("SIMPLE_KEEP_SOURCE_CONTENTS") ?? "") == "1":
+            log_phase("phase3:streaming_source_reclaim:SKIPPED (SIMPLE_KEEP_SOURCE_CONTENTS=1)")
+        else:
+            reclaimed_sources = self.ctx.reclaim_source_contents()
+            reclaimed_streaming_owners = self.ctx.reclaim_streaming_source_contents_owner()
         log_phase("phase3:streaming_source_reclaim:done sources={reclaimed_sources} owners={reclaimed_streaming_owners}")
         self.ctx.evict_sources()
         self.ctx.module_surfaces = nil

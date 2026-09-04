@@ -1921,7 +1921,6 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
  * once the Stage 2 sanity gate's Windows-ABI-env bug was fixed and it could
  * finally exercise the MSVC/clang-cl lane instead of silently falling back to
  * GNU). Restored to the single, unconditional guard below; legacy_core.c is
-<<<<<<< origin/main
  * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set.
  *
  * AMENDED 2026-09-02. "Every caller that defines SIMPLE_CORE_C_STANDALONE puts
@@ -1949,23 +1948,6 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
  * alike; the LNK2005 collision the paragraph above describes cannot return,
  * because the lanes that ship legacy_core.c never define it. */
 #if !defined(SIMPLE_CORE_C_STANDALONE) ||     defined(SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER)
-||||||| 591aad1791e
- * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set. */
-#if !defined(SIMPLE_CORE_C_STANDALONE)
-=======
- * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set. */
-/* SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER: set by the build when this TU is
- * the designated owner -- i.e. SIMPLE_CORE_C_STANDALONE is defined but
- * runtime_legacy_core.c is NOT in the source list, so the guard above would
- * otherwise leave the symbol undefined for everyone. runtime_compiler.spl
- * (615 MSVC / 642 GCC) already emitted this flag for exactly that case and
- * documented the resulting LNK2019, but NO C file ever read it, so it was a
- * no-op and the link still failed (measured 2026-09-03, Stage 2 receiver).
- * It is only set when legacy_core.c is absent, so it cannot reintroduce the
- * LNK2005 duplicate described above. Same flag on Unix (-D form), so both
- * platforms gain the definition in this composition. */
-#if !defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER)
->>>>>>> origin/session/win-bootstrap-stage2-admitted-2026-09-03
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)
