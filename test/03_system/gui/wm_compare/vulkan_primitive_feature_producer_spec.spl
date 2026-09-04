@@ -1,0 +1,44 @@
+# @tag: rendering, vulkan, primitive, performance, c-parity
+# @req NFR-GPU-DYN-001 NFR-GPU-DYN-010
+
+use std.spec.{describe, it, expect, step}
+use app.wm_compare.vulkan_primitive_feature_producer.{
+    feature_contract, active_pixels, expected_pixel
+}
+use app.io.mod.{file_read_text}
+
+describe "Simple Vulkan primitive C parity producer":
+    it "pins each C workload label and geometry":
+        step("Resolve the four comparable primitive contracts")
+        expect(feature_contract("rect")).to_equal(("rect_filled_batched", 100, 1))
+        expect(feature_contract("line")).to_equal(("line_batched", 10000, 16))
+        expect(feature_contract("axis-line")).to_equal(
+            ("axis_line_rect_batched", 10000, 16))
+        expect(feature_contract("image")).to_equal(("image_copy_batched", 100, 1))
+        expect(feature_contract("unknown")).to_equal(("", 0, 0))
+        expect(active_pixels(100)).to_equal(331776)
+
+    it "uses the same exact pixel oracle as the C producer":
+        step("Check rectangle, line, image, and untouched background pixels")
+        expect(expected_pixel("rect", 100, 1, 0)).to_equal(0xffcc2222u32)
+        expect(expected_pixel("rect", 100, 1, 331776)).to_equal(0xff101010u32)
+        expect(expected_pixel("line", 10000, 16, 0)).to_equal(0xff22cc44u32)
+        expect(expected_pixel("line", 10000, 16, 7680)).to_equal(0xff101010u32)
+        expect(expected_pixel("image", 100, 1, 0)).to_equal(0xff8844ccu32)
+        expect(expected_pixel("image", 100, 1, 330240)).to_equal(0xff101010u32)
+
+    it "times device-resident completion and reads back only after samples":
+        step("Inspect the executable producer boundary")
+        val source = file_read_text(
+            "src/app/wm_compare/vulkan_primitive_feature_producer.spl")
+        val timed = source.index_of("val started = time_now_nanos()")
+        val readback = source.index_of("val readback = engine.read_pixels_with_source()")
+        expect(timed).to_be_greater_than(0)
+        expect(readback).to_be_greater_than(timed)
+        expect(source).to_contain("receipt.?.readback_bytes != 0")
+        expect(source).to_contain("engine.vulkan_device_name()")
+        expect(source).to_contain("engine.vulkan_driver_identity()")
+        expect(source).to_contain("schema=engine2d-vulkan-feature-perf-v1")
+        expect(source).to_contain(";source-upload=timed")
+        expect(source).to_contain(
+            "source-upload-descriptor-command-record-submit-and-fence")
