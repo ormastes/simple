@@ -11,6 +11,8 @@ ACTIVE="${ENGINE2D_VULKAN_ACTIVE_BASIS_POINTS:-10000}"
 RECT_COUNT="${ENGINE2D_VULKAN_RECT_COUNT:-0}"
 OPERATION="${ENGINE2D_VULKAN_OPERATION:-rect}"
 RUNTIME_LIB="$ROOT/src/compiler_rust/target/release/libsimple_runtime.so"
+REQUIRE_PHYSICAL="${ENGINE2D_VULKAN_REQUIRE_PHYSICAL:-0}"
+REQUIRE_80FPS="${ENGINE2D_VULKAN_REQUIRE_80FPS:-0}"
 
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then echo "engine2d_vulkan_evidence_status=blocked reason=missing-icd"; exit 2; fi
@@ -65,4 +67,44 @@ grep -q '^engine2d_vulkan_mismatch_count=0$' "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_timed_readback_bytes=0$' "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_swapchain_presented=false$' "$BUILD_DIR/receipt.env"
 grep -q '^engine2d_vulkan_dynamic_frame_80fps_proven=false$' "$BUILD_DIR/receipt.env"
+if [ "$REQUIRE_PHYSICAL" = 1 ]; then
+    grep -Eq '^engine2d_vulkan_adapter_type=(discrete|integrated)$' "$BUILD_DIR/receipt.env" || {
+        echo 'engine2d_vulkan_evidence_status=blocked reason=physical-adapter-required'
+        exit 2
+    }
+fi
+if [ "$REQUIRE_80FPS" = 1 ]; then
+    grep -q '^engine2d_vulkan_within_80fps_budget=true$' "$BUILD_DIR/receipt.env" || {
+        echo 'engine2d_vulkan_evidence_status=failed reason=p95-over-80fps-budget'
+        exit 1
+    }
+fi
+if [ "$RECT_COUNT" -gt 0 ]; then
+    field() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$BUILD_DIR/receipt.env"; }
+    feature=$(field engine2d_vulkan_operation)
+    workload="primitive-v2;${WIDTH}x${HEIGHT};feature=$feature;active-bp=$ACTIVE;count=$RECT_COUNT"
+    workload_hash=$(printf '%s' "$workload" | sha256sum | awk '{print $1}')
+    device_hash=$(printf '%s' "$(field engine2d_vulkan_adapter_name)|$(field engine2d_vulkan_adapter_identity)" | sha256sum | awk '{print $1}')
+    cat >"$BUILD_DIR/c-feature.receipt" <<EOF
+schema=engine2d-vulkan-feature-perf-v1
+implementation=c
+backend=vulkan
+feature=$feature
+workload_hash=$workload_hash
+device_hash=$device_hash
+width=$(field engine2d_vulkan_width)
+height=$(field engine2d_vulkan_height)
+warmup_count=1
+sample_count=$(field engine2d_vulkan_samples)
+timing_scope=descriptor-command-record-submit-and-fence
+p50_ns=$(field engine2d_vulkan_submit_fence_p50_ns)
+p95_ns=$(field engine2d_vulkan_submit_fence_p95_ns)
+timed_readback_bytes=$(field engine2d_vulkan_timed_readback_bytes)
+mismatch_count=$(field engine2d_vulkan_mismatch_count)
+checksum=$(field engine2d_vulkan_checksum)
+completion=known
+fallback=none
+EOF
+    echo "engine2d_vulkan_feature_receipt=$BUILD_DIR/c-feature.receipt"
+fi
 echo "engine2d_vulkan_evidence_status=pass"
