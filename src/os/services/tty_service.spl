@@ -280,12 +280,82 @@ impl TtyService:
         Returns (master_entity, slave_entity).
         """
         # Endpoint IDs: use world tick to generate unique values
-        val t = self.world.base.now()
-        val master_ep: u64 = (t + 1) as u64
-        val slave_ep: u64  = (t + 2) as u64
+        val base_ep: u64 = ((self.tty_count() as u64) * 2) + 1
+        val master_ep: u64 = base_ep
+        val slave_ep: u64  = base_ep + 1
         val master = self.tty_create(TTY_PTY_MASTER, master_ep, slave_ep)
         val slave  = self.tty_create(TTY_PTY_SLAVE,  slave_ep,  master_ep)
         (master, slave)
+
+    fn pty_peer_id(tty: Entity, expected_kind: u32, peer_kind: u32) -> i32:
+        val kind_slot = self.world.kinds.get_slot(tty)
+        if kind_slot < 0 or self.world.kinds.dense[kind_slot].kind != expected_kind:
+            return -1
+        val sink_slot = self.world.output_sinks.get_slot(tty)
+        if sink_slot < 0:
+            return -1
+        val peer_input = self.world.output_sinks.dense[sink_slot].endpoint
+        var i = 0
+        while i < self.world.kinds.len():
+            if self.world.kinds.dense[i].kind == peer_kind:
+                val peer_id = self.world.kinds.entity_at(i)
+                val peer = Entity(id: peer_id, generation: 0)
+                val input_slot = self.world.input_sources.get_slot(peer)
+                if input_slot >= 0 and self.world.input_sources.dense[input_slot].endpoint == peer_input:
+                    return peer_id
+            i = i + 1
+        -1
+
+    me pty_append(entity_id: i32, bytes: [u8]) -> i32:
+        val entity = Entity(id: entity_id, generation: 0)
+        val slot = self.world.line_bufs.get_slot(entity)
+        if slot < 0:
+            return -1
+        val old = self.world.line_bufs.dense[slot]
+        var next = old.bytes
+        var i = 0
+        while i < bytes.len():
+            if next.len() >= old.cap:
+                break
+            next = next.push(bytes[i])
+            i = i + 1
+        val t = self.world.base.now()
+        self.world.line_bufs.insert(entity, LineBuf(bytes: next, cap: old.cap), t)
+        i
+
+    me pty_master_write(master: Entity, bytes: [u8]) -> i32:
+        val slave_id = self.pty_peer_id(master, TTY_PTY_MASTER, TTY_PTY_SLAVE)
+        if slave_id < 0:
+            return -1
+        self.pty_append(slave_id, bytes)
+
+    me pty_slave_write(slave: Entity, bytes: [u8]) -> i32:
+        val master_id = self.pty_peer_id(slave, TTY_PTY_SLAVE, TTY_PTY_MASTER)
+        if master_id < 0:
+            return -1
+        self.pty_append(master_id, bytes)
+
+    me pty_drain(tty: Entity) -> [u8]:
+        val slot = self.world.line_bufs.get_slot(tty)
+        if slot < 0:
+            return []
+        val old = self.world.line_bufs.dense[slot]
+        val result = old.bytes
+        val t = self.world.base.now()
+        self.world.line_bufs.insert(tty, LineBuf(bytes: [], cap: old.cap), t)
+        result
+
+    me tty_read_input(slave: Entity) -> [u8]:
+        val kind_slot = self.world.kinds.get_slot(slave)
+        if kind_slot < 0 or self.world.kinds.dense[kind_slot].kind != TTY_PTY_SLAVE:
+            return []
+        self.pty_drain(slave)
+
+    me pty_master_read(master: Entity) -> [u8]:
+        val kind_slot = self.world.kinds.get_slot(master)
+        if kind_slot < 0 or self.world.kinds.dense[kind_slot].kind != TTY_PTY_MASTER:
+            return []
+        self.pty_drain(master)
 
     fn tty_count(self) -> i32:
         """Return the number of live TTY entities (tracked via kinds store)."""

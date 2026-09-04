@@ -248,6 +248,31 @@ int64_t rt_stdin_read_all(void) {
     return result;
 }
 
+/* Read one logical console line as tagged text.  Keep this separate from the
+ * byte-oriented stdin functions above: switching a Windows console to binary
+ * mode changes its interactive line discipline. */
+int64_t rt_read_stdin_line(void) {
+    size_t cap = 128, len = 0;
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    if (!buf) return core_io_empty_text();
+    for (;;) {
+        int ch = fgetc(stdin);
+        if (ch == EOF || ch == '\n') break;
+        if (len == cap) {
+            if (cap >= 1024u * 1024u) break;
+            cap *= 2;
+            uint8_t* grown = (uint8_t*)realloc(buf, cap);
+            if (!grown) break;
+            buf = grown;
+        }
+        buf[len++] = (uint8_t)ch;
+    }
+    if (len > 0 && buf[len - 1] == '\r') len--;
+    int64_t result = rt_string_new(buf, (uint64_t)len);
+    free(buf);
+    return result;
+}
+
 /* Write text to the terminal (stdout); returns bytes written. */
 int64_t rt_term_write(int64_t text_value) {
     int64_t len = rt_string_len(text_value);

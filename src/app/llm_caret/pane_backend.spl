@@ -11,7 +11,7 @@
 # failure with a concrete reason instead of inventing a pane list.
 
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which,
-    sosix_pty_open, sosix_pty_spawn, sosix_pty_write, sosix_pty_close,
+    sosix_pty_open, sosix_pty_spawn, sosix_pty_write, sosix_pty_read, sosix_pty_close,
     sosix_pty_is_running}
 
 struct Pane:
@@ -284,6 +284,36 @@ fn pane_send(session: text, pane_id: text, body: text) -> bool:
         return false
     _tmux_ok(pane_send_enter_argv(pane_id))
 
+# Consume output currently available from a real Windows pane. tmux panes own
+# their display, so they have no dashboard-side output stream to drain.
+fn pane_read_output(session: text, pane_id: text) -> text:
+    if not _is_windows():
+        return ""
+    for record in _windows_panes:
+        if record.session == session and record.pane.pane_id == pane_id:
+            var output = ""
+            var chunk = sosix_pty_read(record.pty_handle, 1)
+            var i: i64 = 0
+            while chunk != "" and i < 64:
+                output = output + chunk
+                chunk = sosix_pty_read(record.pty_handle, 1)
+                i = i + 1
+            return output
+    ""
+
+fn pane_read_response(session: text, pane_id: text) -> text:
+    if not _is_windows():
+        return ""
+    for record in _windows_panes:
+        if record.session == session and record.pane.pane_id == pane_id:
+            var output = ""
+            var i: i64 = 0
+            while i < 300 and not output.contains("Assistant:"):
+                output = output + sosix_pty_read(record.pty_handle, 100)
+                i = i + 1
+            return output
+    ""
+
 # Returns a Pane with an empty pane_id when the backend cannot spawn - callers
 # check `pane_id != ""`. Nothing fabricated.
 fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
@@ -335,3 +365,5 @@ export pane_send_literal_argv, pane_send_enter_argv
 export windows_quote_arg, windows_command_line, windows_spawn_command_line, WINDOWS_PANE_CAPACITY
 export pane_backend_name, pane_available
 export pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send
+export pane_read_output
+export pane_read_response
