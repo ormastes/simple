@@ -1,0 +1,53 @@
+use std.spec.*
+use std.generator.{generate_range, take}
+
+# Purpose and audience: executable spec of `std.generator`'s documented
+# `generate_range` + `take` usage, for the stdlib engineering team.
+# Audience: maintainers of src/lib/nogc_async_mut/generator.spl.
+# Scope: the header-comment usage of the module — build a range generator, take
+# the first n values, get an array of exactly those n values.
+# Out of scope: the JIT lane (see NON-VACUITY), coroutine-backed generators,
+# and the pure-Simple self-hosted compiler's dispatch path, which the bug
+# record explicitly lists as unmeasured.
+# @req REQ-SSPEC-STDLIB
+#
+"""std.generator: take(generate_range(a, b), n) yields the first n values."""
+#
+# Regression guard for
+# doc/08_tracking/bug/generator_take_returns_empty_after_name_collision_fix_2026-08-17.md
+#
+# That record reports `take(generate_range(0, 3), 2)` returning `[]` with exit
+# code 0 — a SILENT empty result, which is harder to notice than the loud
+# `semantic: generator expects a lambda` it replaced. The assertions below are
+# on the contents and the length, so an empty array fails them rather than
+# passing vacuously.
+#
+# NON-VACUITY / lane note (measured 2026-09-02, aarch64-apple-darwin): the
+# record's `[]` could not be reproduced on this host. Both the deployed seed
+# and a seed freshly built from origin/main `1b76db1d6c3` print `len=2` and
+# `[0, 1]`. The freshly built seed cannot JIT here (it drops every module to
+# the interpreter on an unresolved `rt_struct_alloc`), so ONLY the interpreter
+# lane is covered by this file. It is a guard against the interpreter-lane
+# regression, not evidence about the JIT lane.
+#
+# CLASS COVERAGE: `take` is the pair `iter_collect(iter_take(...))`, and the
+# record says either half could be the culprit, so the first value, the last
+# value, the length, and a take-of-1 boundary are each asserted separately.
+
+describe "std.generator take over generate_range":
+    it "returns exactly n values":
+        val g = generate_range(0, 3)
+        val t = take(g, 2)
+        expect(t.len()).to_equal(2)
+
+    it "returns the values in order from the range start":
+        val g = generate_range(0, 3)
+        val t = take(g, 2)
+        expect(t[0]).to_equal(0)
+        expect(t[1]).to_equal(1)
+
+    it "handles a take of one":
+        val g = generate_range(5, 9)
+        val t = take(g, 1)
+        expect(t.len()).to_equal(1)
+        expect(t[0]).to_equal(5)

@@ -141,3 +141,33 @@ This also predicts the record's open question about `f64`/struct tuple sinks:
 every non-`ANY` scalar sink is affected, and `u64`/`i32` "passing" in the matrix
 probe is most likely those rows' sinks not being statically typed, not the
 defect being i64-specific. Not measured; stated as a prediction, not a finding.
+
+---
+
+## Triage 2026-09-02 (aarch64-apple-darwin) — STAYS OPEN, not re-verifiable on this host
+
+The JIT lane cannot be exercised here at all, so no verdict about it was
+formed. Evidence, not inference: every program compiled by
+`src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B,
+2026-09-01 09:24) on this host — including a three-line hello world — prints
+
+```
+[jit-fallback] unresolved external symbol 'rt_struct_alloc': whole module
+dropped to the interpreter (expect ~100-1000x slowdown).
+[INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT
+compile: Module error: unresolved external symbol 'rt_struct_alloc' would
+NULL-jump in JIT; deferring to interpreter
+```
+
+so the module under test always runs on the tree-walk interpreter. A clean run
+on this host is therefore evidence about the INTERPRETER, never about the JIT,
+and reporting one as "not reproducible" would be a false close. `bin/simple`
+here is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`) and has no `run`
+command at all, so it is not an alternative lane.
+
+Status unchanged. Closing this row needs a host where the seed's Cranelift JIT
+resolves `rt_struct_alloc`.
+
+Interpreter half, measured on the same host for completeness: `val t = (5, 6);
+val a: i64 = t.get(0)` prints `tuple0=5`, i.e. the interpreter is correct, which
+matches what this record already says. That is not a JIT result.

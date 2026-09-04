@@ -638,7 +638,16 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # env into warm-up children would let a partial child author the candidate.
     if warm_receipt.eligible:
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, warm_receipt.candidate_path)
-    val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    val (stdout, stderr, code_raw) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    # The worker's exit status is an i32 that arrives ZERO-EXTENDED across the
+    # wrapper boundary, so a genuine -1 presents as 4294967295 (0xFFFFFFFF).
+    # Every `code == -1` test below therefore never matched and BOTH
+    # abnormal-exit branches were dead code: an operator saw the bare number
+    # 4294967295 from the `else` instead of this file's own accurate message
+    # ("wrapper exited abnormally (signal or wait failure, code -1)").
+    # Normalised once here so all downstream comparisons -- including the
+    # `code == 0` success checks -- see a real signed status.
+    val code = if code_raw == 4294967295: -1 else: code_raw
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)

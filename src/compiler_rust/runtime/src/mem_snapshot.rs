@@ -459,8 +459,26 @@ mod tests {
         assert_eq!(
             unsafe {
                 rt_mem_snapshot_record(
-                    fd, 1, b"stage 3".as_ptr(), 7, b"lower=check".as_ptr(), 11, 2,
-                    std::ptr::null(), 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+                    fd,
+                    1,
+                    b"stage 3".as_ptr(),
+                    7,
+                    b"lower=check".as_ptr(),
+                    11,
+                    2,
+                    std::ptr::null(),
+                    0,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
                 )
             },
             true
@@ -469,7 +487,10 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         // `run_id=` is the field the superseded simple-runtime copy dropped;
         // both C copies emit it, so its absence was a real schema divergence.
-        assert!(text.contains("schema=simple.compiler.mem_snapshot.v1 run_id="), "{text}");
+        assert!(
+            text.contains("schema=simple.compiler.mem_snapshot.v1 run_id="),
+            "{text}"
+        );
         assert!(text.contains("event=stage%203 phase=lower%3Dcheck"), "{text}");
         assert!(text.ends_with('\n'));
     }

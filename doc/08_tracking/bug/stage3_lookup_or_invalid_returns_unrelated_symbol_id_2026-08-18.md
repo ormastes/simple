@@ -1,7 +1,14 @@
 # Stage 3: `lookup_or_invalid(name)` returns the id of an UNRELATED symbol (2026-08-18)
 
-Status: OPEN (P1) — root cause of the Stage 3 `enum payload dependency` fatal
-flood. Containment landed separately; this defect is NOT fixed.
+Status: RESOLVED (2026-09-02) — the fix documented below ("ROOT CAUSE PROVEN
++ FIXED") is present in the current tree. Verified by reading
+`src/compiler/20.hir/hir_types.spl:311-333` (`reset_module()` assigns a fresh
+`{}` to each of the 8 maps, no `.clear()` calls) and
+`src/compiler/20.hir/hir_symbol_table_methods.spl:184-212`
+(`lookup_or_invalid` fails closed with `SymbolId(id: -1)` when the found id
+falls outside `[0, next_symbol_id)`). The header above was stale — the body's
+own "ROOT CAUSE PROVEN + FIXED (2026-08-18)" section already recorded the fix;
+only this Status line had not been updated to match.
 
 ## Symptom
 

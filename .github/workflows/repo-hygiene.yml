@@ -67,6 +67,7 @@ jobs:
       # Relocated here from the repo-hygiene job so it actually runs (that job
       # aborted at its first step, leaving this gate dead). Command unchanged.
       - name: CPU-lane hot-loop hot-path gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-cpu-hotloop-idiom.shs
 
@@ -74,6 +75,7 @@ jobs:
       # never declare/call rt_* backend externs or construct backend classes.
       # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
       - name: UI backend-isolation ratchet gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-ui-backend-isolation.shs
 
@@ -81,12 +83,14 @@ jobs:
       # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
       # or a hosted runtime bundle into the standalone binary.
       - name: TUI standalone-closure gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-tui-standalone-closure.shs
 
       # Workspace root write guard: enforces the root-directory placement policy
       # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
       - name: Workspace root write guard
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check-workspace-root-guard.shs
 
@@ -386,6 +390,53 @@ jobs:
   # workflow -- the guards themselves are UNCHANGED and unweakened, and none of
   # them is opted out. Promote a gate out of this job into code-idiom-gates the
   # day the underlying defect is fixed and it goes green.
+
+      # Freestanding RuntimeString.len ABI.
+      #
+      # `.len()` never calls rt_len: codegen inlines a LOAD OF i64 AT +8 with
+      # payload at +16. A freestanding runtime declaring `uint32_t len` reads
+      # correct in its own C accessors (so substring/equality/trim/chars all
+      # look fine) while `.len()` alone returns length | first-4-payload-bytes
+      # -- 0x6F72227B_0000000F for a 15-byte string. Unbounded scan loops, no
+      # trap. Fixed 2026-07-12 for x64, silently reverted by tree wipe
+      # 6f86ff32a7d; riscv64/arm64 were never fixed. Host-only, no boot needed.
+      - name: Freestanding string .len() ABI
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-string-len-abi.shs
+
+      # Freestanding tagged-value invariants (siblings of the .len() ABI gate
+      # above, and blocking for the same reason): all four are pure static
+      # scans of tracked C/Simple source, need nothing but a checkout, run in
+      # under a second, and are GREEN on this tree. Verified 2026-09-01:
+      # 9/0, 6/0, 3/0 and 5/0 respectively. They were previously reachable
+      # from no hook and no workflow -- decoration, per check-guard-wiring.
+      - name: Freestanding byte-array slot tags
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-byte-array-slot-tags.shs
+
+      - name: Freestanding rt_value int tags
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-rt-value-int-tags.shs
+
+      - name: Freestanding dict arms in every definition
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-dict-arms-in-every-definition.shs
+
+      - name: Freestanding dict write path
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-freestanding-dict-write-path.shs
+
+      # Derived syscall-shim linker aliases.
+      #
+      # Hand-maintained `spl_handle_X = kernel__abi__syscall_shim__spl_handle_X`
+      # tables are correct only for the exact entry and seed they were generated
+      # against (mangling carries an entry-specific prefix), and they broke the
+      # x86_64 link outright once the shims were split into sub-modules. The
+      # static scan is host-only and runs in seconds; it fails if any such table
+      # reappears or if the 128MB load base regresses.
+      - name: SimpleOS x86_64 linker aliases are derived, not hand-maintained
+        if: ${{ !cancelled() }}
+        run: sh scripts/check/check-simpleos-x86-64-linker-alias-derived.shs
   advisory-gates:
     name: Advisory Gates (honestly RED, not yet blocking)
     runs-on: ubuntu-latest
@@ -529,6 +580,12 @@ jobs:
           run_guard check-bootstrap-link-libraries-capability.shs
           run_guard check-bootstrap-resume-stage3-progress.shs
           run_guard check-bootstrap-stage3-memory-admission.shs
+          # Wired 2026-09-03 (guard-wiring ratchet, 8 NEW orphans triaged by
+          # READING each script and RUNNING it in a detached worktree at
+          # origin/main). Pure grep/awk over C source; verified locally:
+          # "PASS - 6 definition(s) checked, every bump-allocator NULL path
+          # reports exhaustion ...". No compiler, QEMU, GPU or board needed.
+          run_guard check-bump-heap-exhaustion-reported.shs
           run_guard check-collect-sosix-qemu-evidence.shs
           run_guard check-cortex-m-access-policy-source-contract.shs
           run_guard check-cosmos-ftl-nfc-backend-policy-source-c.shs
@@ -547,6 +604,21 @@ jobs:
           run_guard check-freestanding-value-registry-v1.shs
           run_guard check-gpu-provider-dynload-registry.shs
           run_guard check-gpu-provider-unload-load-race.shs
+          # Pure /usr/bin/grep census over tracked guard scripts; verified
+          # locally: "PASS - 71 file(s) checked, 0 hardcoded".
+          run_guard check-guard-binary-injectable.shs
+          # Runs the --selftest of three sibling guards and asserts none of
+          # them moves the invoking repo's HEAD or status. SKIP_EXPENSIVE=1
+          # excludes check-seed-builds-push.shs, whose selftest compiles cargo
+          # fixtures (minutes); the guard refuses to count a skipped script as
+          # checked, so the verdict stays non-vacuous. Verified locally with
+          # that env: "PASS - 2 guard(s) checked, 0 mutated the invoking
+          # repo's HEAD or status". Set/unset around the call rather than as a
+          # command prefix so the value cannot leak into later run_guard rows.
+          SKIP_EXPENSIVE=1
+          export SKIP_EXPENSIVE
+          run_guard check-guard-selftest-repo-isolation.shs
+          unset SKIP_EXPENSIVE
           run_guard check-hal-device-provider-parity-v1.shs
           run_guard check-hal-process-socket-lifecycle-v4.shs
           run_guard check-hal-provider-launcher-v1.shs
@@ -561,6 +633,15 @@ jobs:
           run_guard check-mcdc-native-runtime-perf.shs
           run_guard check-native-build-focused-entry-scope.shs
           run_guard check-native-build-shard-admission.shs
+          # Pure text scan (no compiler, no runtime). Wired here rather than
+          # opted out because it CAN run on a hosted runner -- it is red for a
+          # REAL finding, not an environment gap: "FAIL - 48991 file(s)
+          # examined, 1729 offender file(s), 6642 hit(s); no baseline exists
+          # (run --generate-baseline once, reviewed)". This job is
+          # continue-on-error precisely so an honestly-red guard reports
+          # instead of blocking; generating that baseline needs a reviewed
+          # pass by an owner and is NOT done here.
+          run_guard check-no-windows-style-paths.shs
           run_guard check-pg-dispatch-port-prototype.shs
           run_guard check-pg-scalar-adapter-contract.shs
           run_guard check-pg-scalar-port-readiness.shs

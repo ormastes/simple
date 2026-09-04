@@ -3031,9 +3031,7 @@ impl Lowerer {
         let Expr::Call { callee, args } = expr else {
             return None;
         };
-        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
-            || args.len() != 1
-            || args[0].name.is_some()
+        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect") || args.len() != 1 || args[0].name.is_some()
         {
             return None;
         }
