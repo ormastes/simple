@@ -1776,6 +1776,13 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
     exit 1
   }
+  if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = msvc ]; then
+    # Stage 2/3 must use the compiler admitted above by exact path. Leaving
+    # CC/CXX unset makes the Rust seed perform a second PATH search; on hosts
+    # with MSYS2 before LLVM that selects an unauthorised clang-cl which may
+    # also fail native CreateProcess with STATUS_DLL_NOT_FOUND (0xc0000135).
+    bootstrap_windows_abi_env="${bootstrap_windows_abi_env} CC=${cc_abs} CXX=${cc_abs}"
+  fi
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
   windows_libpath="${LIBPATH:-}"
@@ -2445,6 +2452,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
+      ${bootstrap_windows_abi_env} \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
@@ -2501,6 +2509,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_NATIVE_BUILD_CACHE_DIR=${stage3_cache_absolute}" \
       "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
       "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" \
+      ${bootstrap_windows_abi_env} \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       ${stage3_diagnostic_env} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
