@@ -99,3 +99,17 @@ binary hash plus the aggregate-bound evidence manifest. On success, copy every
 physical input into a temporary publication, validate those copies, hash them,
 rename the set atomically, make it read-only, and swap the physical `current`
 link atomically.
+
+## C Vulkan parity gate
+
+`scripts/check/check-engine2d-vulkan-c-parity.shs` compares feature receipts
+only after both implementations identify the same workload hash, physical
+device, dimensions, warmup/sample counts, timing scope, and final checksum.
+Both sides must prove known completion, zero mismatches, no fallback, and zero
+timed readback. The gate passes only when Simple p95 is at most twice C p95.
+
+The existing mixed C benchmark is not interchangeable with the semantic A5
+row: its font atlas is synthetic and it has no PATH/EDGE workload. Each feature
+therefore needs matching C and Simple producers using
+`engine2d-vulkan-feature-perf-v1`; missing or drifted receipts fail closed and
+must never be reported as a parity result.
