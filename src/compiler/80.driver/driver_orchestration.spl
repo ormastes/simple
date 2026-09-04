@@ -233,48 +233,64 @@ impl CompilerDriver:
             if not rt_heap_ref_wellformed(self.ctx):
                 log_error("phase 3 FAILED with no surviving compile context")
                 return CompileResult.TypeError([])
-            # DIAGREAD (2026-09-01): this call site used to refuse to read the
-            # diagnostics at all, and unconditionally reported
-            # "diagnostics unreadable: error array did not survive transport".
+            # The historical refusal to read the diagnostics here is RETIRED,
+            # and the reason is that the hazard it was avoiding was fixed in the
+            # accessor rather than at this call site.
             #
-            # That refusal was correct WHEN IT WAS WRITTEN and is not any more,
-            # because the hazard it describes has since been fixed inside the
-            # accessors themselves. The old reasoning was: has_errors() reads
-            # `error_count_value` (a scalar) and succeeds, while
-            # error_message_at() reads `self.errors` at offset 0xb8 and faults,
-            # so the aggregate-returning method got a zeroed `self` on entry and
-            # the only safe move was not to call it.
+            # The measured defect was real: `errors` and `error_count_value` are
+            # transported SEPARATELY out of `lower_and_check_impl`'s staged
+            # native tuple, so has_errors() could read the intact SCALAR while
+            # `self.errors` arrived as a zeroed reference, faulting at offset
+            # 0xb8. The response at the time was to make no call at all.
             #
-            # `error_message_at` / `errors_safe` (driver_types.spl:1115/1131) now
-            # PROBE FORMATION FIRST -- `rt_heap_ref_wellformed(self.errors)` --
-            # and return "" / [] instead of dereferencing a zeroed reference. So
-            # the call is fail-safe at the callee, which is the right place for
-            # it, and the call site no longer has to buy safety by discarding
-            # every diagnostic.
+            # But `error_message_at` / `errors_safe`
+            # (driver_types.spl:1115-1134) now probe formation with
+            # `rt_heap_ref_wellformed(self.errors)` FIRST and return ""/[]
+            # instead of dereferencing a zeroed reference. The crash this
+            # branch was dodging can no longer happen, while the cost of
+            # dodging it was total: an unconditional "unreadable" line was
+            # printed WITHOUT EVER ATTEMPTING A READ, so every phase-3 failure
+            # lost its diagnostics -- including the overwhelmingly common case
+            # where the array survived perfectly well. The non-native sibling
+            # path in this same file (`:335-337`) has always read them.
             #
-            # Measured, not assumed: on the x86_64 WM host-GPU-daemon closure the
-            # SIMPLE_BOOTSTRAP_DEBUG block twenty lines above ALREADY called
-            # error_message_at on this exact failure and printed
-            #   [bootstrap-phase3-errors] count=1
-            #   [bootstrap-phase3-error] index=0 len=156 text=HIR lowering error
-            #     in ...: untyped function returns a value ...
-            # without faulting. The message was readable the whole time; only
-            # this branch declined to read it, which is why a precise, actionable
-            # HIR error surfaced to the operator as "native-build failed without
-            # diagnostics". A build that knows why it failed must say so.
-            #
-            # The unreadable case is still handled -- it is now DETECTED rather
-            # than presumed: an empty list out of errors_safe() means formation
-            # really did not survive, and only then is the old message printed.
-            val phase3_errors = self.ctx.errors_safe()
-            if phase3_errors.len() == 0:
-                log_error("phase 3 FAILED (diagnostics unreadable: error array did not survive transport)")
-                return CompileResult.TypeError([])
-            var phase3_report_index = 0
-            while phase3_report_index < phase3_errors.len():
-                log_error("phase 3 error: {phase3_errors[phase3_report_index]}")
-                phase3_report_index = phase3_report_index + 1
-            return CompileResult.TypeError(phase3_errors)
+            # So: attempt the guarded read, report whatever survived, and emit
+            # the "no readable diagnostics" line only when nothing came back -- with
+            # the surviving scalar count in it, so an operator can tell "N
+            # diagnostics were lost in transport" apart from "there were none".
+            # Read through the TEXT projection `error_message_at`, not the
+            # aggregate-returning `errors_safe`. Both are guarded identically,
+            # but driver_hir_pipeline_lowering.spl:806-808 records that owner
+            # methods returning only scalar/text projections are the shape that
+            # survives this ABI, and `error_message_at` already has proven call
+            # sites in this file (`:335`, `:356`) whereas `errors_safe` has
+            # none. The reporting list is assembled locally from those reads.
+            val phase3_recorded_count: i64 = self.ctx.error_count()
+            val phase3_show_cap = if phase3_recorded_count < 20: phase3_recorded_count else: 20
+            var phase3_surviving_errors: [text] = []
+            var phase3_report_idx = 0
+            while phase3_report_idx < phase3_show_cap:
+                val phase3_message: text = self.ctx.error_message_at(phase3_report_idx)
+                if phase3_message.len() > 0:
+                    log_error("  {phase3_message}")
+                    phase3_surviving_errors.push(phase3_message)
+                phase3_report_idx = phase3_report_idx + 1
+            if phase3_surviving_errors.len() > 0:
+                if phase3_recorded_count > phase3_show_cap:
+                    val phase3_hidden = phase3_recorded_count - phase3_show_cap
+                    log_error("  ... and {phase3_hidden} further phase 3 error(s)")
+                # Restores the ResolveError/TypeError distinction that the
+                # no-read branch had to give up.
+                if phase3_surviving_errors[0].contains("Method resolution"):
+                    return CompileResult.ResolveError(phase3_surviving_errors)
+                return CompileResult.TypeError(phase3_surviving_errors)
+            # Reached only when nothing readable came back. The recorded scalar
+            # count is included deliberately: count>0 here means N diagnostics
+            # were lost in transport, count==0 means the phase failed without
+            # recording any -- two very different bugs that the old fixed
+            # string conflated.
+            log_error("phase 3 FAILED (no readable diagnostics; recorded error_count={phase3_recorded_count}; per-module root causes were emitted above as [hir-fatal])")
+            return CompileResult.TypeError([])
         log_debug("phase 3 done")
         # SIMPLE_RESOLVE_METHODS=1 (default OFF): quiet method-resolution
         # experiment over the assembled HIR modules. Placed HERE — after

@@ -1,7 +1,30 @@
 # Interpreter: `static fn new` hijacks named-argument class construction
 
 Date: 2026-07-02
-Status: OPEN (P1)
+Status: RESOLVED 2026-09-02 — including the worst case the 2026-08-08
+"Correction" reopened this row for.
+
+Differential probe on aarch64-apple-darwin, covering both shapes the record
+distinguishes. `Widget`/`Font` declare fields `id, size` plus
+`static fn new(path, size)`:
+
+| shape | deployed 2026-07-25 seed | seed from `origin/main` `1b76db1d6c3` |
+|---|---|---|
+| `Widget(id: 3, size: 4)` — field names | `id=3 size=4` (correct) | `id=3 size=4` (correct) |
+| `Font(path: "x", size: 8)` — a name from `new`'s PARAMETER list, not a field | `rc=0`, silently builds **`id=3 size=8`** | `rc=1`, ``error: semantic: class `Font` has no field named `path` `` |
+
+The second row is this record's own worst case, and it is the one the
+2026-08-08 correction said still reached `static fn new` on both seed lanes.
+It no longer does: the named form binds against class FIELDS, and a non-field
+name is a loud error instead of silent nil/garbage-field construction. (Note
+the old binary's `id=3` — neither a field value it was given nor the `99` its
+`new` would have set — which is the corruption this row was filed for.)
+Lane caveat: only the interpreter lane was reachable on the verifying host.
+Guarded by `scripts/check/check-named-ctor-and-val-scope.shs`, which FAILs
+naming `nonfield_ctor_accepted(built id=3 size=8)` on the old binary and
+PASSes on the fixed one.
+
+**Previous status:** OPEN (P1)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 2026-08-08 RESOLVED verdict was WRONG on its central claim. Field-named
 construction is fixed, but the report's own *worst* case — an argument name

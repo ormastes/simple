@@ -1,7 +1,8 @@
 # Class reference semantics diverge: interpreter value-copies class fields; JIT crashes on optional class field
 
 - **Filed:** 2026-08-06
-- Status: OPEN (P1)
+- Status: OPEN (P1) — **defect 1 re-reproduced by EXECUTION 2026-09-02, and the
+  repro fixture no longer runs to completion. See "Re-reproduction 2026-09-02".**
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
   localized to the out-of-scope Rust seed; every reachable pure-Simple candidate interpreter was
   checked and does not share this defect, but none is buildable/runnable in this tree today, so no
@@ -45,6 +46,47 @@ Two distinct defects:
    dies with "field access on nil receiver" and dumps core. This crashes even
    when the read is hoisted to a local first. Separate defect; filed here
    because the same fixture exposes it.
+
+## Re-reproduction 2026-09-02 (aarch64-apple-darwin) — plus a NEW blocker
+
+Binary: `bin/release/aarch64-apple-darwin/simple`, 29,315,096 bytes, mtime
+2026-07-25 14:15:52, sha256 prefix `f2c216a660da83da1a253d2e8191a305`,
+`--version` -> `Simple v1.0.0-beta`; prints the Rust-seed banner on `run`, so
+this attributes to the **seed** engine. (`bin/simple` is the bootstrap CLI and
+has no `run` at all — probing it proves nothing about this defect.)
+
+Running the fixture this record names:
+
+```
+$ <binary> run test/fixtures/repro/compiler/class_identity/class_field_reference_semantics_repro.spl
+[INFO] JIT compilation failed, falling back to interpreter: HIR lowering error:
+  Memory safety error [W1006]: mutation without mut capability (field_0):
+  mutation requires `mut` capability on the receiver while lowering bump at 31:9
+1 field<-original      = COPY(n=10)
+1b original<-field     = COPY(n=20)
+error: semantic: invalid assignment: deeply nested field access requires intermediate variables
+```
+
+Two things, one confirming and one new:
+
+1. **Defect 1 still reproduces.** Cases 1 and 1b both report `COPY`, i.e. the
+   interpreter still value-copies a class reference stored into a field, exactly
+   as the truth table says. Localization is unchanged and still points at
+   `src/compiler_rust/**` (`class_instantiation.rs` building instances as
+   `fields: Arc::new(fields.clone())`), which is out of scope by policy — that
+   is the reason this stays open, not a missing reproduction.
+
+2. **NEW — the fixture no longer runs to completion, so the truth table above
+   cannot currently be regenerated.** It aborts at case 2 (nested
+   `Outer.inner.cell`) with `semantic: invalid assignment: deeply nested field
+   access requires intermediate variables`. Cases 2, 3, 4, 6 and 5 are therefore
+   unmeasured as of this date — the rows for them in the table are historical.
+   Note the JIT lane is also not being exercised: the W1006 memory-safety error
+   above forces a fallback to the interpreter before any JIT measurement happens,
+   so "the JIT crashes on an optional class field" (defect 2) was likewise not
+   re-observed. Whoever resumes this must first repair the fixture (split the
+   nested access into intermediate variables, and give case 1's receiver the
+   `mut` capability W1006 demands) before any engine comparison is meaningful.
 
 ## Repro commands
 

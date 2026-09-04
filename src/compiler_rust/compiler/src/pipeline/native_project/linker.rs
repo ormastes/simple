@@ -14,9 +14,8 @@ use super::tools::{
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
-    find_msvc_compiler_rt_builtins, find_objcopy_tool,
-    is_system_symbol, nm_command, strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
-    validate_stage4_cli_c_provider_archive_disjointness,
+    find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, nm_command, strip_llvm_constructors,
+    target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
 };
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
@@ -849,13 +848,7 @@ int main(int argc, char** argv) {
         let output = std::process::Command::new(&cxx)
             .args(argv)
             .output()
-            .map_err(|e| {
-                format!(
-                    "compile main stub: failed to spawn `{} {}`: {e}",
-                    cxx,
-                    argv.join(" ")
-                )
-            })?;
+            .map_err(|e| format!("compile main stub: failed to spawn `{} {}`: {e}", cxx, argv.join(" ")))?;
         if !output.status.success() {
             // clang-cl (like cl.exe) writes diagnostics to STDOUT, not stderr --
             // capturing only stderr here previously produced a message ending
@@ -2360,6 +2353,12 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
             c.arg("--gc-sections");
+            // Report EVERY undefined symbol, not lld's default first 20. This
+            // only ever emits MORE diagnostics -- it never relaxes what is an
+            // error -- and without it a freestanding link with a long tail of
+            // missing runtime symbols reports "too many errors emitted,
+            // stopping now" and hides the rest, forcing a link-patch-link loop.
+            c.arg("--error-limit=0");
             if let Some(ref ls) = effective_linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }

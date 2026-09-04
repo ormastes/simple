@@ -103,6 +103,53 @@ run_selftest() {
     check_drive_case "MSYS form" "/c/Users/ormas/dev/simple" "c"
     check_drive_case "Windows drive-letter form, D drive" "D:/repos/other" "D"
 
+    compiler_fixture=$(mktemp -d) || return 1
+    cat >"$compiler_fixture/where.exe" <<EOF
+#!/bin/sh
+printf '%s\n' '$compiler_fixture/broken-clang-cl.exe' '$compiler_fixture/working-clang-cl.exe'
+EOF
+    cat >"$compiler_fixture/broken-clang-cl.exe" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+    cat >"$compiler_fixture/working-clang-cl.exe" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$compiler_fixture/where.exe" \
+        "$compiler_fixture/broken-clang-cl.exe" \
+        "$compiler_fixture/working-clang-cl.exe"
+    selected_compiler=$(
+        PATH="$compiler_fixture:$PATH" \
+            sh -c '. scripts/check/lib/bootstrap-stage3/authority.shs; bootstrap_stage3_windows_runnable_compiler clang-cl.exe --version'
+    ) || selected_compiler=""
+    total=$((total + 1))
+    if [ "$selected_compiler" != "$compiler_fixture/working-clang-cl.exe" ]; then
+        echo "$SELF: SELFTEST FAIL - runnable compiler selection: expected working second candidate, got '$selected_compiler'" >&2
+        fails=$((fails + 1))
+    fi
+    authority_compiler=$(
+        PATH="$compiler_fixture:$PATH" sh -c \
+            '. scripts/check/lib/bootstrap-stage3/authority.shs; bootstrap_stage3_tool_requested_path clang-cl clang-cl "$1"' \
+            sh "$compiler_fixture/working-clang-cl.exe"
+    ) || authority_compiler=""
+    total=$((total + 1))
+    if [ "$authority_compiler" != "$compiler_fixture/working-clang-cl.exe" ]; then
+        echo "$SELF: SELFTEST FAIL - compiler authority rebinding: expected selected working candidate, got '$authority_compiler'" >&2
+        fails=$((fails + 1))
+    fi
+    rm -rf "$compiler_fixture"
+
+    link_fixture=$(mktemp -d) || return 1
+    mkdir -p "$link_fixture/target"
+    total=$((total + 1))
+    if ! sh -c '. scripts/check/lib/bootstrap-stage3/authority.shs; bootstrap_stage3_create_compatibility_link target "$1/link"' sh "$link_fixture" ||
+       [ ! -L "$link_fixture/link" ]; then
+        echo "$SELF: SELFTEST FAIL - compatibility pointer was not a real symbolic link" >&2
+        fails=$((fails + 1))
+    fi
+    rm -rf "$link_fixture"
+
     if [ "$fails" -ne 0 ]; then
         echo "$SELF: selftest FAILED ($fails/$total cases wrong)" >&2
         return 1

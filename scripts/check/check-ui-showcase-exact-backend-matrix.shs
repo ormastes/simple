@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+fail() {
+    echo "ui-showcase-exact-backend-matrix: FAIL — $*" >&2
+    exit 1
+}
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+BUILD_DIR=${BUILD_DIR:-build/check-ui-showcase-exact-backend-matrix}
+CACHE_DIR=${CACHE_DIR:-$BUILD_DIR/cache}
+NATIVE_BIN=$BUILD_DIR/ui-showcase-exact-engine
+BUILD_LOG=$BUILD_DIR/native-build.log
+VULKAN_BIN=$BUILD_DIR/ui-showcase-vulkan
+VULKAN_BUILD_LOG=$BUILD_DIR/vulkan-native-build.log
+
+[ -x "$SIMPLE_BIN" ] || fail "admitted SIMPLE_BIN is missing or not executable: $SIMPLE_BIN"
+mkdir -p "$BUILD_DIR" "$CACHE_DIR"
+
+if [ -n "${SIMPLE_SHOWCASE_BACKENDS:-}" ]; then
+    BACKENDS=$SIMPLE_SHOWCASE_BACKENDS
+elif [ "$(uname -s)" = Darwin ]; then
+    BACKENDS="software,cpu,cpu_simd,metal,vulkan"
+else
+    BACKENDS="software,cpu,cpu_simd,vulkan"
+fi
+
+if ! env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src "$SIMPLE_BIN" native-build \
+    --source src/compiler --source src/app --source src/lib --entry-closure \
+    --entry src/app/ui_showcase/hosts/main_2d_engine.spl \
+    --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive \
+    --cache-dir "$CACHE_DIR" --output "$NATIVE_BIN" >"$BUILD_LOG" 2>&1; then
+    fail "strict native build failed (see $BUILD_LOG)"
+fi
+[ -x "$NATIVE_BIN" ] || fail "native build produced no executable"
+if grep -Eqi 'generating [0-9]+ stub|weak empty extern|stub fallback' "$BUILD_LOG"; then
+    fail "native build log contains fabricated-stub evidence"
+fi
+
+case ",$BACKENDS," in
+    *,vulkan,*)
+        if ! sh scripts/check/build-vulkan-drawir-showcase-native.shs \
+            "$SIMPLE_BIN" "$VULKAN_BIN" "$CACHE_DIR/vulkan" \
+            >"$VULKAN_BUILD_LOG" 2>&1; then
+            fail "strict Vulkan native build failed (see $VULKAN_BUILD_LOG)"
+        fi
+        [ -x "$VULKAN_BIN" ] || fail "Vulkan native build produced no executable"
+        if grep -Eqi 'generating [0-9]+ stub|weak empty extern|stub fallback|stub functions for unresolved symbols' "$VULKAN_BUILD_LOG"; then
+            fail "Vulkan native build log contains fabricated-stub evidence"
+        fi
+        ;;
+esac
+
+EVIDENCE=$BUILD_DIR/evidence.env
+: >"$EVIDENCE"
+echo "ui_showcase_exact_backend_matrix_status=running" >>"$EVIDENCE"
+echo "ui_showcase_exact_backend_matrix_backends=$BACKENDS" >>"$EVIDENCE"
+
+old_ifs=$IFS
+IFS=,
+for backend in $BACKENDS; do
+    IFS=$old_ifs
+    capture=$BUILD_DIR/$backend.ppm
+    log=$BUILD_DIR/$backend.log
+    run_bin=$NATIVE_BIN
+    if [ "$backend" = vulkan ]; then
+        run_bin=$VULKAN_BIN
+    fi
+    if ! SIMPLE_SHOWCASE_BACKEND=$backend SIMPLE_SHOWCASE_W=320 \
+        SIMPLE_SHOWCASE_H=240 SIMPLE_SHOWCASE_FRAMES=1 \
+        SIMPLE_SHOWCASE_SCRIPT='click 10,10;wheel 10,80,1' \
+        SIMPLE_SHOWCASE_CAPTURE=$capture "$run_bin" >"$log" 2>&1; then
+        fail "$backend showcase execution failed (see $log)"
+    fi
+    grep -Fq "showcase status=pass" "$log" || fail "$backend did not report PASS"
+    grep -Fq "renderer=$backend" "$log" || fail "$backend receipt identity mismatch"
+    if [ "$backend" != vulkan ]; then
+        grep -Fq "fallback=false" "$log" || fail "$backend reported fallback"
+    fi
+    [ -s "$capture" ] || fail "$backend capture is missing or empty"
+    first_line=$(sed -n '1p' "$capture")
+    [ "$first_line" = P6 ] || fail "$backend capture is not binary PPM"
+    if [ "$backend" = cpu_simd ]; then
+        grep -Eq 'native_simd_hits=[1-9][0-9]*' "$log" ||
+            fail "cpu_simd did not prove native SIMD execution"
+    fi
+    if [ "$backend" = metal ]; then
+        grep -Fq 'source=device_readback' "$log" || fail "Metal device readback missing"
+        grep -Eq 'backend_handle=[1-9][0-9]*' "$log" || fail "Metal backend handle missing"
+        grep -Eq 'device_identity=[1-9][0-9]*' "$log" || fail "Metal device identity missing"
+    fi
+    if [ "$backend" = vulkan ]; then
+        grep -Fq 'source=device_readback' "$log" || fail "Vulkan device readback missing"
+        grep -Eq 'backend_handle=[1-9][0-9]*' "$log" || fail "Vulkan backend handle missing"
+        grep -Eq 'device_identity=[1-9][0-9]*' "$log" || fail "Vulkan device identity missing"
+        grep -Fq 'font_target=vulkan' "$log" || fail "Vulkan text execution receipt missing"
+    fi
+    bytes=$(wc -c <"$capture" | tr -d ' ')
+    echo "ui_showcase_exact_backend_${backend}_status=pass" >>"$EVIDENCE"
+    echo "ui_showcase_exact_backend_${backend}_capture=$capture" >>"$EVIDENCE"
+    echo "ui_showcase_exact_backend_${backend}_capture_bytes=$bytes" >>"$EVIDENCE"
+    IFS=,
+done
+IFS=$old_ifs
+
+echo "ui_showcase_exact_backend_matrix_status=pass" >>"$EVIDENCE"
+echo "ui-showcase-exact-backend-matrix: PASS — $BACKENDS"

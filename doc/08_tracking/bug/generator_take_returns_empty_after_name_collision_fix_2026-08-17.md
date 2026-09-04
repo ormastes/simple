@@ -1,6 +1,15 @@
 # `std.generator` take() returns an empty array (2026-08-17)
 
-Status: OPEN (P1)
+Status: OPEN (P1) — **NOT REPRODUCIBLE on aarch64-apple-darwin, 2026-09-02.**
+This is recorded as a measurement, not as a closure: the record's exact repro
+prints `len=2` / `[0, 1]` (i.e. correct) on BOTH the deployed 2026-07-25 seed
+and a seed freshly built from `origin/main` `1b76db1d6c3`. Both runs took the
+INTERPRETER lane — the fresh local build has no working JIT (every module drops
+to the interpreter on an unresolved `rt_struct_alloc`), and the JIT is the lane
+the original `[]` may have come from. So the JIT lane is still unmeasured here
+and the row stays OPEN for a JIT-capable host to settle. Guard added meanwhile:
+`test/01_unit/lib/nogc_async_mut/generator_take_spec.spl` (asserts contents and
+length, so an empty array fails rather than passing vacuously).
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Status:** OPEN. Found while verifying the fix for
 `generator_identifier_collides_with_builtin_construct_name_2026-08-11.md`.

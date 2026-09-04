@@ -8,6 +8,7 @@ export use compiler.common.driver_core_types.*
 
 use compiler.hir.hir.*
 use std.env.{env_get}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Formation probe for the diagnostics array. `== nil` is NOT usable here: the
 # nil sentinel is raw 3, so a ZEROED array reports "present" to every `!= nil`
@@ -68,8 +69,8 @@ class FrozenStorageModuleSnapshotV1:
     reason: text
 
     fn identity_valid() -> bool:
-        self.ok and self.module_identity
-            == frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
+        self.ok and self.module_identity ==
+            frozen_storage_module_identity_v1(self.module_name, self.sites, self.evidence)
 
 class FrozenNativeModuleCapsuleV1:
     ok: bool
@@ -425,8 +426,8 @@ fn frozen_storage_module_identity_v1(
         val row = evidence[index]
         if site.function_symbol_id != row.site.function_symbol_id
             or site.base_local_id != row.site.base_local_id
-            or frozen_storage_site_identity_v1(site, row)
-                != frozen_storage_site_identity_v1(row.site, row):
+            or frozen_storage_site_identity_v1(site, row) !=
+                frozen_storage_site_identity_v1(row.site, row):
             return "invalid"
         rows.push(frozen_storage_site_identity_v1(site, row))
         index = index + 1
@@ -710,8 +711,8 @@ class CompileContext:
             if self.storage_binding_module_names[index] != self.storage_evidence_module_names[index]
                 or site.function_symbol_id != evidence.site.function_symbol_id
                 or site.base_local_id != evidence.site.base_local_id
-                or frozen_storage_site_identity_v1(site, evidence)
-                    != frozen_storage_site_identity_v1(evidence.site, evidence):
+                or frozen_storage_site_identity_v1(site, evidence) !=
+                    frozen_storage_site_identity_v1(evidence.site, evidence):
                 return false
             index = index + 1
         true
@@ -889,8 +890,8 @@ class CompileContext:
             val site = self.frozen_storage_sites[index]
             val evidence = self.frozen_storage_evidence[index]
             if self.frozen_storage_module_names[index] == ""
-                or frozen_storage_site_identity_v1(site, evidence)
-                    != frozen_storage_site_identity_v1(evidence.site, evidence):
+                or frozen_storage_site_identity_v1(site, evidence) !=
+                    frozen_storage_site_identity_v1(evidence.site, evidence):
                 return false
             index = index + 1
         true
@@ -1087,6 +1088,13 @@ class CompileContext:
             capsules: capsules, reason: "ok")
 
     me add_error(message: text):
+        # Level-gated (SIMPLE_DUMP_COMPILE_ERRORS=1, default off). Phase 3 loses
+        # its diagnostics entirely — see driver_orchestration.spl:235-260, where
+        # error_message_at() gets a zeroed `self` — so "native-build failed
+        # without diagnostics" is otherwise UNDIAGNOSABLE. This dump is the only
+        # way to read a phase-3 error; it recovered the mcp_server_init one.
+        if (env_get("SIMPLE_DUMP_COMPILE_ERRORS")) == "1":
+            eprint("[compile-error] {message}")
         self.errors.push(message)
         self.error_count_value = self.error_count_value + 1
 

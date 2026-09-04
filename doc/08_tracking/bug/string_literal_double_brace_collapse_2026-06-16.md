@@ -3,7 +3,11 @@
 - **ID:** string_literal_double_brace_collapse_2026-06-16
 - **Severity:** P2 (silently corrupts any literal building JSON/braces; root cause of broken LSP code-action edits)
 - **Area:** language / interpreter (string-literal lexing)
-- **Status:** open — minimal repro confirmed
+- **Status:** RESOLVED-NOT-A-BUG (2026-08-25, re-verified 2026-09-02) — see
+  "Reclassification" section below: this is the documented `{{`/`}}` -> `{`/`}`
+  escape contract applying to every double-quoted literal, not a defect.
+  Re-verified 2026-09-02 by running `test/01_unit/compiler/lexer_brace_escape_spec.spl`
+  with `bin/release/macos-arm64/simple test <path>`: `Passed: 8, Failed: 0`.
 - **Found while:** isolating the "substring off-by-one" suspected during reliable-mode P1/R3 (turns out NOT substring — see below)
 
 ## Summary

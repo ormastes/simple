@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12,6 +12,11 @@
 # ScreenHost host adapters — 2d / gui / web / wm
 
 Four `ScreenHost` implementations share one showcase reducer, so the only thing that can differ between targets is the adapter. This spec exercises the parts of those adapters that can actually be wrong WITHOUT a display, a window manager or a listening socket:
+
+The exact Engine2D adapter additionally admits only `software`, `cpu`,
+`cpu_simd`, and `metal`. It rejects fallback, requires native SIMD hit
+advancement for `cpu_simd`, and requires device readback plus positive device
+identity for Metal.
 
 ## At a Glance
 
@@ -72,6 +77,21 @@ clicks=1 and typed="ab" and a frame whose command count is nonzero; a
 GuiRenderer mouse-button event becomes a `Pointer` with HOST_BTN_LEFT.
 
 ## Scenarios
+
+### Exact Engine2D showcase backend admission
+
+#### admits only software CPU SIMD and Metal showcase backends
+
+- The allowlist accepts `software`, `cpu`, `cpu_simd`, and `metal`.
+- `vulkan` remains owned by the strict Vulkan host; `auto` is rejected because
+  it cannot attest an exact requested backend.
+
+#### keeps Metal and CPU SIMD receipts fail closed
+
+- The production host checks exact `engine.backend_name()` selection.
+- Metal requires `device_readback`, backend handle, and device identity.
+- CPU SIMD requires the native SIMD hit counter to advance.
+- The launcher reports blocked/fail rather than relabeling fallback as PASS.
 
 ### 2d host — script ingress
 
