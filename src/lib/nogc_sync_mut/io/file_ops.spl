@@ -41,6 +41,10 @@ extern fn rt_file_fsync(path: text) -> bool
 # extern fn rt_file_write(path: text, content: text) -> bool  # Disabled - not in runtime extern registry
 @unsafe(reason: "raw atomic file-write status ABI; false is provider failure", capabilities: [ffi])
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
+@unsafe(reason: "creates an OS-owned private staging directory", capabilities: [ffi])
+extern fn rt_secure_temp_dir(parent: text, prefix: text) -> text
+@unsafe(reason: "atomically transfers ownership of a staged file path", capabilities: [ffi])
+extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 @unsafe(reason: "raw file-size ABI; negative status is the provider failure sentinel", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> i64
 @unsafe(reason: "raw file-stat ABI; zero and negative values are provider-defined failure states", capabilities: [ffi])
@@ -124,6 +128,32 @@ fn file_write_bytes(path: text, data: [u8]) -> bool:
 fn file_atomic_write(path: text, content: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_file_atomic_write(host_path_native(path), content)
+
+fn secure_temp_dir_raw(parent: text, prefix: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_secure_temp_dir(parent, prefix)
+
+fn file_publish_noreplace_raw(staged_path: text, destination: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_file_publish_noreplace(staged_path, destination)
+
+fn secure_temp_dir(parent: text, prefix: text) -> Result<text, text>:
+    if parent == "" or prefix == "" or prefix.contains("/") or prefix.contains("\\"):
+        return Err("secure temporary directory requires a parent and a leaf-name prefix")
+    val path = secure_temp_dir_raw(parent, prefix)
+    if path == "":
+        return Err("secure temporary directory creation failed")
+    Ok(path)
+
+fn file_publish_noreplace(staged_path: text, destination: text) -> Result<bool, text>:
+    if staged_path == "" or destination == "":
+        return Err("publish paths must be non-empty")
+    val status = file_publish_noreplace_raw(staged_path, destination)
+    if status == 1:
+        return Ok(true)
+    if status == 0:
+        return Ok(false)
+    Err("publish without replacement failed")
 
 fn _timestamp_str() -> text:
     val micros = _time_now_unix_micros()

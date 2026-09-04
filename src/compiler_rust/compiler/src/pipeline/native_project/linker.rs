@@ -22,6 +22,25 @@ fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
 }
 
+/// The native entry stub initializes argc/argv through the core-C ABI.  These
+/// getters must therefore be exported by that same capsule.  Leaving them out
+/// of the C roots localizes their weak core-C definitions and lets the Rust
+/// staticlib's unrelated process-global argv implementation win the final
+/// link.  The setter then populates core-C state while reads observe Rust
+/// state, so every command appears to have no arguments.
+pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
+    "spl_init_args",
+    "spl_arg_count",
+    "spl_get_arg",
+    "rt_set_args",
+    "rt_get_argc",
+    "rt_get_args",
+    "sys_get_args",
+    "rt_cli_get_args",
+    "rt_cli_arg_count",
+    "rt_cli_arg_at",
+];
+
 /// The whole-archive argument for the **clang-cl** driver, WITHOUT `/link`.
 ///
 /// clang-cl is an MSVC-compatible driver and rejects both GNU spellings.
@@ -1243,12 +1262,20 @@ int main(int argc, char** argv) {
             // CLI invocation fell through to the empty-args REPL path,
             // 2026-07-25) and runtime init/shutdown never run. Keep every
             // stub-contract symbol the core C runtime actually defines global.
-            for contract in [
-                "rt_set_args",
-                "__simple_runtime_init",
-                "__simple_runtime_shutdown",
-                "__simple_call_module_inits",
-            ] {
+            // Keep the complete argv family with `rt_set_args`, rather than
+            // merely keeping the setter.  The adjacent Rust projection has
+            // strong argv exports; any getter localized from this C capsule
+            // would otherwise resolve to that foreign state.  The core-C
+            // setter and getters are one initialized provider contract.
+            for contract in STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS
+                .iter()
+                .copied()
+                .chain([
+                    "__simple_runtime_init",
+                    "__simple_runtime_shutdown",
+                    "__simple_call_module_inits",
+                ])
+            {
                 if c_defined.contains(contract) && !c_requested.iter().any(|s| s == contract) {
                     c_requested.push(contract.to_string());
                 }

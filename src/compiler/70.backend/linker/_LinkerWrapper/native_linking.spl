@@ -69,6 +69,7 @@ struct NativeLinkConfig:
     allow_cc_fallback: bool
     retained_symbols: [text]
     extra_flags: [text]
+    runtime_bundle: text = "" # Named runtime authority selected by the bootstrap owner
 
 impl NativeLinkConfig:
     static fn default() -> NativeLinkConfig:
@@ -84,7 +85,8 @@ impl NativeLinkConfig:
             retained_symbols: [],
             extra_flags: [],
             target_triple: "",
-            linker_abi: ""
+            linker_abi: "",
+            runtime_bundle: ""
         )
 
 # ponytail: CrtFiles has ONE terminal declaration, in
@@ -190,6 +192,15 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
     val arch = host_arch()
     if not hosted_native_link_arch_supported(os, arch):
         return Err(hosted_native_link_unsupported_arch_error(os, arch))
+
+    # Validate named runtime authority before SMF or platform dispatch. SMF
+    # ultimately materializes native objects and re-enters this linker; doing
+    # the check here also prevents Windows MinGW/MSVC from bypassing it.
+    val msvc_runtime = os == "windows" and not _is_mingw_env()
+    val provider_error = native_runtime_provider_selection_error_for_config_platform(
+        config, msvc_runtime)
+    if provider_error != "":
+        return Err(provider_error)
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
@@ -323,16 +334,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         runtime_dir = find_runtime_lib_dir()
     var runtime_archives: [text] = []
     if runtime_dir != "" and runtime_dir != "none":
-        runtime_archives = native_runtime_archive_inputs(runtime_dir)
-        if runtime_archives.is_empty():
-            args.push("-L")
-            args.push(runtime_dir)
-            args.push("-lsimple_compiler")
-        else:
-            for archive in runtime_archives:
-                args.push(archive)
-        args.push("-rpath")
-        args.push(runtime_dir)
+        runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+        for arg in native_runtime_archive_link_args(
+                runtime_dir, config.runtime_bundle, runtime_archives, false, true, true):
+            args.push(arg)
 
     # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
     # On Linux/FreeBSD wrap optional libs with --as-needed so they are only
@@ -584,17 +589,98 @@ fn _cc_fallback_runtime_lib_args(config: NativeLinkConfig) -> [text]:
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir == "" or runtime_dir == "none":
         return []
-    val archives = native_runtime_archive_inputs(runtime_dir)
-    var args: [text] = []
+    val archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+    native_runtime_archive_link_args(runtime_dir, config.runtime_bundle, archives, true, true, true)
+
+fn native_runtime_archive_link_args(runtime_dir: text, runtime_bundle: text,
+        archives: [text], cc_fallback: bool, rescan_core_pair: bool,
+        emit_rpath: bool) -> [text]:
+    """Render only validated runtime-provider arguments for the final command."""
     if not archives.is_empty():
+        var selected: [text] = []
         for archive in archives:
-            args.push(archive)
-    else:
-        args.push("-L")
-        args.push(runtime_dir)
-        args.push("-lsimple_compiler")
-        args.push("-Wl,-rpath,{runtime_dir}")
-    args
+            selected.push(archive)
+        # The admitted aggregate pair has references in both directions. A second
+        # scan of the first archive resolves members first requested while the
+        # native-all archive is scanned, without platform-specific group flags.
+        if rescan_core_pair and archives.len() == 2:
+            selected.push(archives[0])
+        if emit_rpath:
+            if cc_fallback:
+                selected.push("-Wl,-rpath," + runtime_dir)
+            else:
+                selected.push("-rpath")
+                selected.push(runtime_dir)
+        return selected
+    if runtime_bundle != "" and runtime_bundle != "auto":
+        return []
+    if cc_fallback:
+        var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+        if emit_rpath:
+            fallback.push("-Wl,-rpath," + runtime_dir)
+        return fallback
+    var fallback = ["-L", runtime_dir, "-lsimple_compiler"]
+    if emit_rpath:
+        fallback.push("-rpath")
+        fallback.push(runtime_dir)
+    fallback
+
+fn native_runtime_archive_inputs(runtime_dir: text, runtime_bundle: text) -> [text]:
+    native_runtime_archive_inputs_for_platform(runtime_dir, runtime_bundle, false)
+
+fn native_runtime_archive_inputs_for_platform(runtime_dir: text, runtime_bundle: text,
+        msvc: bool) -> [text]:
+    if runtime_dir == "" or runtime_dir == "none":
+        return []
+    val compiler_name = if msvc: "simple_compiler.lib" else: "libsimple_compiler.a"
+    val backfill_name = if msvc: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a"
+    val native_all_name = if msvc: "simple_native_all.lib" else: "libsimple_native_all.a"
+    val names = native_runtime_archive_names_for_platform(
+        runtime_bundle,
+        msvc,
+        file_exists(runtime_dir + "/" + compiler_name),
+        file_exists(runtime_dir + "/" + backfill_name),
+        file_exists(runtime_dir + "/" + native_all_name)
+    )
+    var inputs: [text] = []
+    for name in names:
+        inputs.push(runtime_dir + "/" + name)
+    inputs
+
+fn native_runtime_provider_selection_error(runtime_dir: text, runtime_bundle: text) -> text:
+    "runtime bundle '{runtime_bundle}' has no complete admitted provider set in '{runtime_dir}'"
+
+fn native_runtime_provider_selection_error_for(runtime_dir: text, runtime_bundle: text,
+        has_compiler: bool, has_backfill: bool, has_native_all: bool) -> text:
+    if runtime_bundle == "" or runtime_bundle == "auto":
+        return ""
+    if not native_runtime_bundle_is_known(runtime_bundle):
+        return "unknown runtime bundle '" + runtime_bundle + "'"
+    if runtime_dir == "":
+        return "runtime bundle '" + runtime_bundle + "' requires a discovered runtime directory"
+    if runtime_dir == "none":
+        return "runtime bundle '" + runtime_bundle + "' cannot use runtime path 'none'"
+    if native_runtime_archive_names(runtime_bundle, has_compiler, has_backfill, has_native_all).is_empty():
+        return native_runtime_provider_selection_error(runtime_dir, runtime_bundle)
+    ""
+
+fn native_runtime_provider_selection_error_for_config(config: NativeLinkConfig) -> text:
+    native_runtime_provider_selection_error_for_config_platform(config, false)
+
+fn native_runtime_provider_selection_error_for_config_platform(
+        config: NativeLinkConfig, msvc: bool) -> text:
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    val compiler_name = if msvc: "simple_compiler.lib" else: "libsimple_compiler.a"
+    val backfill_name = if msvc: "simple_compiler_backfill.lib" else: "libsimple_compiler_backfill.a"
+    val native_all_name = if msvc: "simple_native_all.lib" else: "libsimple_native_all.a"
+    native_runtime_provider_selection_error_for(
+        runtime_dir, config.runtime_bundle,
+        file_exists(runtime_dir + "/" + compiler_name),
+        file_exists(runtime_dir + "/" + backfill_name),
+        file_exists(runtime_dir + "/" + native_all_name)
+    )
 
 fn native_runtime_archive_inputs(runtime_dir: text) -> [text]:
     if runtime_dir == "" or runtime_dir == "none":
@@ -614,6 +700,43 @@ fn cc_fallback_object_args(object_files: [text]) -> [text]:
     for obj in object_files:
         args.push(obj)
     args
+
+fn native_msvc_runtime_libraries(configured: [text], selected: [text]) -> [text]:
+    """Append selected MSVC providers once, comparing normalized basenames."""
+    var result = configured
+    for archive in selected:
+        val normalized = archive.replace("\\", "/")
+        val parts = normalized.split("/")
+        val name = parts[parts.len() - 1].lower()
+        var present = false
+        for existing in result:
+            val existing_normalized = existing.replace("\\", "/")
+            val existing_parts = existing_normalized.split("/")
+            if existing_parts[existing_parts.len() - 1].lower() == name:
+                present = true
+        if not present:
+            result.push(archive)
+    result
+
+fn native_msvc_configured_libraries(existing: [text], configured: [text]) -> [text]:
+    """Preserve configured paths/case; append .lib only when truly absent."""
+    var rendered = existing
+    for library in configured:
+        val value = if library.lower().ends_with(".lib"):
+            library
+        else:
+            library + ".lib"
+        rendered = native_msvc_runtime_libraries(rendered, [value])
+    rendered
+
+fn native_msvc_runtime_selection(runtime_bundle: text, archives: [text]) -> [text]:
+    """Render MSVC providers without Unix archive rescans."""
+    if not archives.is_empty():
+        return native_runtime_archive_link_args(
+            "", runtime_bundle, archives, true, false, false)
+    if runtime_bundle == "" or runtime_bundle == "auto":
+        return ["simple_compiler.lib"]
+    []
 
 fn cc_fallback_extra_flags(extra_flags: [text]) -> [text]:
     # NativeLinkConfig uses direct-linker rpath pairs because the normal Unix
@@ -661,6 +784,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     # the log backend before the fallback command is assembled.
     if object_files.len() == 0:
         return Err("cc fallback requires at least one object file")
+
+    val provider_error = native_runtime_provider_selection_error_for_config(config)
+    if provider_error != "":
+        return Err(provider_error)
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val os_name = host_os()
@@ -822,12 +949,10 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     for lp in config.library_paths:
         msvc_config.lib_paths.push(lp)
 
-    # Add user libraries
-    for lib in config.libraries:
-        if lib.ends_with(".lib"):
-            msvc_config.libs.push(lib)
-        else:
-            msvc_config.libs.push("{lib}.lib")
+    # Add user libraries. Suffix recognition is case-insensitive while the
+    # caller's raw path and spelling remain intact for link.exe diagnostics.
+    msvc_config.libs = native_msvc_configured_libraries(
+        msvc_config.libs, config.libraries)
 
     # Add essential Windows libraries
     # SDL2.lib is deliberately ABSENT. src/runtime/runtime_sdl2.c binds every
@@ -857,8 +982,16 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
+        val runtime_archives = native_runtime_archive_inputs_for_platform(
+            runtime_dir, config.runtime_bundle, true)
         msvc_config.lib_paths.push(runtime_dir)
-        msvc_config.libs.push("simple_compiler.lib")
+        val selected_runtime_libs = native_msvc_runtime_selection(
+            config.runtime_bundle, runtime_archives)
+        msvc_config.libs = native_msvc_runtime_libraries(
+            msvc_config.libs, selected_runtime_libs)
+        for wlib in native_all_msvc_support_libraries(msvc_config.libs):
+            if not msvc_config.libs.contains(wlib):
+                msvc_config.libs.push(wlib)
 
     # Extra flags
     var extra = native_retained_symbol_msvc_args(config.retained_symbols)

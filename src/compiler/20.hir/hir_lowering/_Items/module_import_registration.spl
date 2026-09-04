@@ -825,41 +825,28 @@ impl HirLowering:
         # surface name scans) each, charged to whichever profile slot the
         # caller was in (`sigtype`, `project`, `field_dep`).
         #
-        # The importer key is derived from `self.module_filename` by three
-        # string rewrites; cache the resolved index so a repeat name in the
-        # same module does not rebuild and re-resolve it.
+        # The importer key is derived from `self.module_filename`; cache the
+        # resolved index so a repeat name in the same module does not rebuild
+        # and re-resolve it. Use the same owner rule as source discovery and
+        # native symbol naming (`module_logical_name_from_path`), so absolute
+        # positional paths with host punctuation resolve too.
         if self.glob_reachable_importer_owner != self.module_filename:
-            var derived_key = self.module_filename
-            if derived_key.ends_with(".spl"):
-                derived_key = derived_key[0:derived_key.len() - 4]
-            derived_key = derived_key.replace("/", ".")
-            if derived_key.starts_with("src."):
-                derived_key = derived_key.substring(4)
-            var derived_index = self.surface_index_for_name(derived_key)
+            var derived_index = self.surface_index_for_name(
+                module_logical_name_from_path(self.module_filename))
             if derived_index < 0:
                 # SILENT TWIN of the `missing importing module surface` bug
-                # fixed at module_import_resolution.spl:254-275. The three
-                # rewrites above drop `.spl`, `/`->`.` and a leading `src.`,
-                # but NOT the all-digit tier segment, and the registry keys
+                # fixed at module_import_resolution.spl. The registry keys
                 # surfaces with `module_surface_canonical_module_name`
                 # (module_surface_source_identity.spl:11, called from
-                # module_surface_registry.spl:79), which also elides tier
-                # segments and folds `std.` -> `lib.`.
-                # `self.module_filename` is a repo-relative PATH on every lane
-                # (driver_hir_pipeline_lowering.spl:615 assigns `src_path`), so
+                # module_surface_registry.spl:79), which elides all-digit tier
+                # segments and folds `std.` -> `lib.`, so
                 # `src/compiler/60.mir_opt/mir_opt/mod.spl` derives
                 # `compiler.60.mir_opt.mir_opt.mod` while the surface is
                 # registered as `compiler.mir_opt.mir_opt.mod`.
                 # `module_surface_registry_index` is exact-match with no
-                # canonical fallback (module_surface_registry_index.spl:78-95),
-                # so the probe misses and this method returns false at the
-                # guard below WITHOUT any diagnostic -- the glob re-export
-                # rescue is simply never attempted for any numbered-path file,
-                # and the unbound name surfaces later as a plain
-                # `unresolved name`/`unresolved type` with no hint that a route
-                # existed. Additive fallback only: the primary key is
-                # unchanged, and the canonical alias is registered on every
-                # lane, so this cannot change a currently-hitting lookup.
+                # canonical fallback, so the probe misses and the glob
+                # re-export rescue is never attempted for numbered-path files.
+                # Additive fallback only: the primary key is unchanged.
                 derived_index = self.surface_index_for_name(
                     hir_pkg_canonical_module_name(self.module_filename))
             self.glob_reachable_importer_index = derived_index

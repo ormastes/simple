@@ -1117,6 +1117,8 @@ static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
 static _Thread_local uint32_t rt_core_transient_array_scope_id = 0;
 static _Thread_local int rt_core_transient_array_scope_active = 0;
 static _Thread_local int rt_core_transient_array_scope_paused = 0;
+static _Thread_local uint8_t rt_core_transient_scope_thread_token = 0;
+static _Atomic uintptr_t rt_core_transient_scope_owner = 0;
 static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
 static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
 static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
@@ -1346,6 +1348,11 @@ int64_t rt_heap_registry_count(void) {
 int8_t rt_transient_array_scope_begin(void) {
     if (rt_core_transient_array_scope_active || rt_core_transient_heap_scope_object_len != 0 ||
         rt_core_transient_raw_alloc_len != 0) return 0;
+    uintptr_t thread_token = (uintptr_t)&rt_core_transient_scope_thread_token;
+    uintptr_t expected_owner = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &rt_core_transient_scope_owner, &expected_owner, thread_token,
+            memory_order_acq_rel, memory_order_acquire)) return 0;
     uint32_t next_id =
         atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
     while (next_id != 0) {
@@ -1356,7 +1363,10 @@ int8_t rt_transient_array_scope_begin(void) {
             break;
         }
     }
-    if (next_id == 0) return 0;
+    if (next_id == 0) {
+        atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
+        return 0;
+    }
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
@@ -1364,19 +1374,24 @@ int8_t rt_transient_array_scope_begin(void) {
 }
 
 int8_t rt_transient_array_scope_pause(void) {
-    if (!rt_core_transient_array_scope_active) return 0;
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     rt_core_transient_array_scope_paused = 1;
     return 1;
 }
 
 int8_t rt_transient_array_scope_end(void) {
-    if (!rt_core_transient_array_scope_active) return 0;
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     const uint32_t scope_id = rt_core_transient_array_scope_id;
     rt_core_transient_array_scope_active = 0;
     rt_core_transient_array_scope_paused = 0;
 
     rt_core_reclaim_transient_immortal(scope_id);
     rt_core_reclaim_transient_raw();
+    atomic_store_explicit(&rt_core_transient_scope_owner, 0, memory_order_release);
     return 1;
 }
 
@@ -1533,6 +1548,34 @@ static void rt_core_transient_raw_erase(void* ptr) {
     entry->bytes = 0;
     rt_core_transient_raw_alloc_len--;
     rt_core_transient_raw_alloc_tombs++;
+}
+
+int8_t rt_transient_raw_owner_register(void* ptr, uint64_t bytes) {
+    if (bytes > (uint64_t)RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
+    return rt_core_transient_raw_register(ptr, (size_t)bytes) ? 1 : 0;
+}
+
+int8_t rt_transient_raw_owner_register_state(void* ptr, uint64_t bytes, int8_t owned) {
+    if (bytes > (uint64_t)RT_CORE_TRANSIENT_RAW_SIZE_MASK) return 0;
+    return rt_core_transient_raw_register_state(ptr, (size_t)bytes, owned != 0) ? 1 : 0;
+}
+
+int8_t rt_transient_raw_owner_query(void* ptr, uint64_t* bytes, int8_t* owned) {
+    RtCoreTransientRawAlloc* entry = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    if (!entry) return 0;
+    if (bytes) *bytes = (uint64_t)(entry->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK);
+    if (owned) *owned = (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
+    return 1;
+}
+
+void rt_transient_raw_owner_unregister(void* ptr) {
+    rt_core_transient_raw_erase(ptr);
+}
+
+int8_t rt_transient_raw_owner_thread_allows(void) {
+    uintptr_t owner = atomic_load_explicit(
+        &rt_core_transient_scope_owner, memory_order_acquire);
+    return owner == 0 || owner == (uintptr_t)&rt_core_transient_scope_thread_token;
 }
 
 static void rt_core_transient_raw_clear(void) {
@@ -5498,6 +5541,18 @@ void rt_eprintln_value(int64_t value) {
     fflush(stderr);
 }
 
+__attribute__((weak)) bool rt_math_is_nan(double value) {
+    return isnan(value);
+}
+
+__attribute__((weak)) bool rt_math_is_inf(double value) {
+    return isinf(value);
+}
+
+__attribute__((weak)) bool rt_math_is_finite(double value) {
+    return isfinite(value);
+}
+
 static int rt_core_argc = 0;
 static char** rt_core_argv = NULL;
 static char** rt_core_filtered_argv = NULL;
@@ -8054,17 +8109,11 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
-/* Formation probe for heap-typed enum/Option payloads at fail-closed
- * handoffs. The 2026-08-22 stage-3 streaming-owner incident read back a
- * Some-tagged Option whose payload word was 0: every discriminant/nil guard
- * passed and the first field load SIGSEGV'd at 0x0. A heap payload must be a
- * tagged pointer outside the zero page; this answers exactly that, with no
- * registry probe -- a FORMATION check, not a liveness proof, so it can never
- * false-reject a live object. Call sites own the payload-type contract
- * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
- * design and report 0 here). */
+/* Formation-only check for a plausible object reference. Native class
+ * references may be raw untagged pointers, so requiring RT_VALUE_TAG_HEAP
+ * false-rejects live objects. Masking tags while retaining the zero-page
+ * floor catches the original zero-payload incident without that false red. */
 int8_t rt_heap_ref_wellformed(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
     return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 
@@ -11451,6 +11500,52 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
     return rename(old_path, new_path) == 0;
 }
 
+int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
+                           const uint8_t* prefix_ptr, uint64_t prefix_len) {
+    char parent[RT_TEXT_PATH_MAX], prefix[128], path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(parent_ptr, parent_len, parent, sizeof(parent)) || !rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    typedef LONG (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    typedef BOOL (WINAPI *ConvertSddlFn)(const char*, DWORD, PSECURITY_DESCRIPTOR*, ULONG*);
+    HMODULE lib = LoadLibraryA("bcrypt.dll"); unsigned char random[16];
+    BCryptGenRandomFn fill = lib ? (BCryptGenRandomFn)GetProcAddress(lib, "BCryptGenRandom") : NULL;
+    if (!fill || fill(NULL, random, sizeof(random), 2) < 0) { if (lib) FreeLibrary(lib); return rt_string_new(NULL, 0); }
+    FreeLibrary(lib); char suffix[33];
+    for (size_t i = 0; i < sizeof(random); i++) snprintf(suffix + i * 2, 3, "%02x", random[i]);
+    int n = snprintf(path, sizeof(path), "%s\\%s-%s", parent, prefix, suffix);
+    HMODULE advapi = LoadLibraryA("advapi32.dll"); PSECURITY_DESCRIPTOR descriptor = NULL;
+    ConvertSddlFn convert = advapi ? (ConvertSddlFn)GetProcAddress(advapi, "ConvertStringSecurityDescriptorToSecurityDescriptorA") : NULL;
+    if (n < 0 || (size_t)n >= sizeof(path) || !convert || !convert("D:P(A;;FA;;;SY)(A;;FA;;;OW)", 1, &descriptor, NULL)) { if (advapi) FreeLibrary(advapi); return rt_string_new(NULL, 0); }
+    SECURITY_ATTRIBUTES attributes = { sizeof(attributes), descriptor, FALSE };
+    BOOL created = CreateDirectoryA(path, &attributes);
+    LocalFree(descriptor); FreeLibrary(advapi);
+    if (!created) return rt_string_new(NULL, 0);
+#else
+    int n = snprintf(path, sizeof(path), "%s/%s-XXXXXX", parent, prefix);
+    if (n < 0 || (size_t)n >= sizeof(path) || !mkdtemp(path)) return rt_string_new(NULL, 0);
+    if (chmod(path, 0700) != 0) { rmdir(path); return rt_string_new(NULL, 0); }
+#endif
+    return rt_string_new((const uint8_t*)path, (uint64_t)strlen(path));
+}
+
+int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len, const uint8_t* destination_ptr, uint64_t destination_len) {
+    char staged[RT_TEXT_PATH_MAX], destination[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(staged_ptr, staged_len, staged, sizeof(staged)) || !rt_text_arg_to_path(destination_ptr, destination_len, destination, sizeof(destination))) return -1;
+#if defined(_WIN32)
+    if (MoveFileExA(staged, destination, MOVEFILE_WRITE_THROUGH)) return 1;
+    DWORD error = GetLastError(); return (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) ? 0 : -1;
+#else
+#if defined(__linux__) && defined(SYS_renameat2)
+    if (syscall(SYS_renameat2, AT_FDCWD, staged, AT_FDCWD, destination, 1) == 0) return 1;
+    if (errno == EEXIST) return 0;
+    if (errno != ENOSYS && errno != EINVAL) return -1;
+#endif
+    if (link(staged, destination) != 0) return errno == EEXIST ? 0 : -1;
+    (void)unlink(staged);
+    return 1;
+#endif
+}
+
 /* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
 int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
@@ -12957,7 +13052,7 @@ void __simple_runtime_shutdown(void) {
  * plausible-looking value for the third case:
  *
  *   (1) Real semantics, taken from the Rust runtime (`src/compiler_rust/
- *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/*.spl`.
+ *       runtime/src/value/objects.rs`) or `src/runtime/simple_core/<module>.spl`.
  *   (2) A NAMED LOUD TRAP -- `rt_trap_unimplemented("rt_x")` prints the symbol
  *       to stderr and aborts. This is a STUB, not an implementation. It is
  *       strictly better than address 0 (you learn WHICH call died) and strictly

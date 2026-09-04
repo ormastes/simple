@@ -12,7 +12,8 @@ use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
     _driver_resolve_entry_import, _driver_text_bucket_set_new,
-    _driver_cached_entry_source_scan, _driver_entry_import_dirname
+    _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
+    _driver_entry_import_dirname
 }
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
@@ -190,11 +191,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
         result.append(f)
+        # A start marker must precede the cached scan: completion-only timing
+        # cannot identify the physical source when that scan itself times out.
+        driver_closure_scan_phase_trace("closure_node:start", f)
         if not _nb_file_exists_raw(f):
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure entry missing {f}")
             continue
         val (content, imports, siblings, _) = _driver_cached_entry_source_scan(f)
+        driver_closure_scan_phase_trace("closure_node:scanned", f)
         if trace_closure and f == entry:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
