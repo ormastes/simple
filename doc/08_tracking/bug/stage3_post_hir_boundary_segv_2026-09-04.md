@@ -39,6 +39,15 @@ execution order, preventing the blind region from returning during refactors.
 The dispatcher now also brackets value-struct, layer-equality, effect, aspect,
 and weave passes independently; the same spec requires that ordered evidence.
 
+The second admitted replay emitted `phase3:validation:value-struct:start`, then
+exited from signal 11 without `phase3:validation:value-struct:done`. The selected
+repair introduces the concrete `ValueStructLayoutErrors` owner and
+`validate_value_struct_layouts_into(...)`. The Stage 3 dispatcher fills and
+reads that owner instead of consuming an aggregate `[text]` function return;
+the original value-returning function remains as a compatibility wrapper for
+focused callers and unit specs. This preserves validation rather than skipping
+the failing pass.
+
 ## Next bounded action
 
 After rebuilding and re-admitting Stage 2 for this source identity, run Stage 3

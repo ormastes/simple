@@ -75,7 +75,11 @@ use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTab
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
-use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
+use compiler.semantics.value_struct_layout.{
+    ValueStructLayoutErrors,
+    validate_value_struct_layouts,
+    validate_value_struct_layouts_into
+}
 
 fn mk_span() -> Span:
     Span(start: 0, end: 0, line: 1, col: 1, file: "synthetic", length: 0)
@@ -292,6 +296,17 @@ describe "validate_value_struct_layouts and generic-mediated recursion (document
         val errors = validate_value_struct_layouts(["vsl_generic_gap"], [hir])
 
 describe "validate_value_struct_layouts aligned input boundary":
+    it "fills a concrete error owner without aggregate return transport":
+        step("Verify: fills a concrete error owner without aggregate return transport")
+        var table = SymbolTable.new()
+        val node_sym = table.define("VslOwnerNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val node_struct = mk_struct(node_sym, "VslOwnerNode", [mk_field("self", named_type(node_sym))], [])
+        val hir = mk_module("vsl_owner_cycle", table, [node_struct])
+        val output = ValueStructLayoutErrors.new()
+        validate_value_struct_layouts_into(["vsl_owner_cycle"], [hir], output)
+        expect(output.errors).to_equal([
+            "recursive by-value struct layout: VslOwnerNode.self -> VslOwnerNode"])
+
     it "rejects misaligned module key and value arrays":
         step("Verify: rejects misaligned module key and value arrays")
         val errors = validate_value_struct_layouts(["vsl_orphan_key"], [])

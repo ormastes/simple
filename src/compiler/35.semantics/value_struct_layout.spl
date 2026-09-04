@@ -7,6 +7,12 @@ struct ValueStructLayoutWalk:
     node_key: text
     path: text
 
+pub class ValueStructLayoutErrors:
+    errors: [text]
+
+    static fn new() -> ValueStructLayoutErrors:
+        ValueStructLayoutErrors(errors: [])
+
 fn value_layout_named_symbol(type_: HirType) -> SymbolId?:
     match type_.kind:
         case HirTypeKind.Named(symbol, args):
@@ -27,10 +33,11 @@ fn value_layout_node_key(module_name: text, struct_name: text) -> text:
     # boundary after full-closure HIR allocation.
     module_name + "|" + struct_name
 
-fn validate_value_struct_layouts(
+pub fn validate_value_struct_layouts_into(
     module_keys: [text],
-    module_values: [HirModule]
-) -> [text]:
+    module_values: [HirModule],
+    output: ValueStructLayoutErrors
+):
     """Return the first resolved direct by-value struct cycle, if any.
 
     The validator accepts a deliberately aligned, physical-module view instead
@@ -40,7 +47,8 @@ fn validate_value_struct_layouts(
     Callers must deduplicate registry aliases before constructing this view.
     """
     if module_keys.len() != module_values.len():
-        return ["internal error: value struct layout module keys and values are misaligned"]
+        output.errors.push("internal error: value struct layout module keys and values are misaligned")
+        return
     var structs: Dict<text, HirStruct> = {}
     var owner_module_indices: Dict<text, i64> = {}
     var roots: [text] = []
@@ -91,7 +99,8 @@ fn validate_value_struct_layouts(
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
             if owner_module_index < 0 or owner_module_index >= module_values.len():
-                return ["internal error: value struct layout owner module index is invalid"]
+                output.errors.push("internal error: value struct layout owner module index is invalid")
+                return
             val owner_module_key = module_keys[owner_module_index]
             val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
@@ -114,10 +123,20 @@ fn validate_value_struct_layouts(
                 val edge = struct_.name + "." + field.name
                 val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
                 if target == root:
-                    return ["recursive by-value struct layout: " + next_path + " -> " + structs[root].name]
+                    output.errors.push(
+                        "recursive by-value struct layout: " + next_path + " -> " + structs[root].name)
+                    return
                 if not visited.has(target):
                     pending.push(ValueStructLayoutWalk(node_key: target, path: next_path))
-    []
 
-export validate_value_struct_layouts
+fn validate_value_struct_layouts(
+    module_keys: [text],
+    module_values: [HirModule]
+) -> [text]:
+    """Compatibility value wrapper for focused callers and unit specs."""
+    val output = ValueStructLayoutErrors.new()
+    validate_value_struct_layouts_into(module_keys, module_values, output)
+    output.errors
+
+export validate_value_struct_layouts, validate_value_struct_layouts_into, ValueStructLayoutErrors
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
