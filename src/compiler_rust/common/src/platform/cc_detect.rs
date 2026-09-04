@@ -11,7 +11,7 @@ const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["g++", "clang++"];
 const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
 const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
-const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang", "cl.exe"];
+const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
 fn compiler_matches_flavor(compiler: &str, flavor: LinkerFlavor) -> bool {
     match flavor {
@@ -57,8 +57,10 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
     }
     if flavor == LinkerFlavor::Msvc {
         for cc in MSVC_C_COMPILERS {
-            if command_exists(cc) && compiler_matches_flavor(cc, flavor) {
-                return cc.to_string();
+            if let Some(resolved) = resolve_working_command(cc) {
+                if compiler_matches_flavor(&resolved, flavor) {
+                    return resolved;
+                }
             }
         }
         return "cl.exe".to_string();
@@ -99,12 +101,14 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
         return WINDOWS_GNU_CROSS_CXX_COMPILERS[0].to_string();
     }
     for cxx in cxx_candidates(target, flavor) {
-        if command_exists(cxx) && compiler_matches_flavor(cxx, flavor) {
-            return cxx.to_string();
+        if let Some(resolved) = resolve_working_command(cxx) {
+            if compiler_matches_flavor(&resolved, flavor) {
+                return resolved;
+            }
         }
     }
     if flavor == LinkerFlavor::Msvc {
-        "cl.exe".to_string()
+        "clang-cl".to_string()
     } else {
         "g++".to_string()
     }
@@ -210,7 +214,7 @@ pub fn is_msvc_linker_flavor() -> bool {
 /// Verifies both that the process can be spawned AND that it exits
 /// successfully (exit code 0). This catches cases like a clang++
 /// that exists on PATH but crashes due to missing shared libraries.
-pub fn command_exists(name: &str) -> bool {
+fn command_works(name: &str) -> bool {
     std::process::Command::new(name)
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -218,6 +222,36 @@ pub fn command_exists(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn windows_where_candidates(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Resolve the first runnable installation of a command. Windows `where.exe`
+/// can report several PATH hits; invoking only the bare name retries the first
+/// broken installation forever and never reaches a later healthy compiler.
+fn resolve_working_command(name: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    if let Ok(output) = std::process::Command::new("where.exe").arg(name).output() {
+        if output.status.success() {
+            for candidate in windows_where_candidates(&output.stdout) {
+                if command_works(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    command_works(name).then(|| name.to_string())
+}
+
+pub fn command_exists(name: &str) -> bool {
+    resolve_working_command(name).is_some()
 }
 
 #[cfg(test)]
@@ -243,10 +277,26 @@ mod tests {
         assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang", "cl.exe"]);
         assert_eq!(
             cxx_candidates(&target, LinkerFlavor::Msvc),
-            &["clang-cl", "clang++", "clang", "cl.exe"]
+            &["clang-cl", "clang++", "clang"]
         );
         assert!(compiler_matches_flavor("clang-cl", LinkerFlavor::Msvc));
         assert_eq!(target.linker_flavor(), LinkerFlavor::Msvc);
         assert_eq!(target.triple_str(), "x86_64-pc-windows-msvc");
+        if cfg!(target_os = "windows") {
+            let resolved = detect_cxx_compiler_for_target(&target);
+            assert!(command_works(&resolved), "resolved compiler is not runnable: {resolved}");
+            assert!(is_msvc_target(&resolved), "resolved compiler has the wrong ABI: {resolved}");
+        }
+    }
+
+    #[test]
+    fn windows_where_candidates_preserve_all_installations_in_order() {
+        assert_eq!(
+            windows_where_candidates(b"C:\\broken\\clang-cl.exe\r\nC:\\healthy\\clang-cl.exe\r\n"),
+            vec![
+                "C:\\broken\\clang-cl.exe".to_string(),
+                "C:\\healthy\\clang-cl.exe".to_string(),
+            ]
+        );
     }
 }
