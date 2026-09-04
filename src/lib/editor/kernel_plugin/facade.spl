@@ -1,0 +1,345 @@
+use common.kernel_plugin.ids.KpfId128
+use std.editor.extensions.api.{Disposable, ExtensionActivationEvent, ExtensionLifetime}
+use std.editor.extensions.contract.{ExtensionId, ExtensionHostPlacement, extension_host_placement_known, extension_host_placement_parse, extension_id_parse}
+use std.editor.extensions.manifest.{ExtensionManifest, ExtensionPermissions}
+use std.editor.extensions.registry.{CommandRegistry, EventListenerRegistry}
+use std.nogc_async_mut.kernel_plugin.runtime.{KpfQueueStatus, KpfRequestHandleV1, KpfRequestTableV1, KpfSessionHandleV1, KpfSessionTableV1}
+use os.smf.kernel_plugin.worker_process.KpfWorkerProcessFacadeV1
+use os.smf.kernel_plugin.worker_protocol.{KPF_WORKER_PROTOCOL_V1, KpfWorkerFrameKind, KpfWorkerFrameV1, KpfWorkerOutcome}
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+
+pub const EDITOR_KPF_CAP_WORKSPACE_READ: u64 = 1
+pub const EDITOR_KPF_CAP_WORKSPACE_WRITE: u64 = 2
+pub const EDITOR_KPF_CAP_PROCESS_SPAWN: u64 = 4
+pub const EDITOR_KPF_CAP_NETWORK_CLIENT: u64 = 8
+pub const EDITOR_KPF_CAP_SECRETS: u64 = 16
+pub const EDITOR_KPF_CAP_NATIVE_FFI: u64 = 32
+
+pub enum EditorKpfFacadeStatus:
+    Accepted
+    Pending
+    NotFound
+    NotActive
+    InvalidExtensionId
+    UnknownPlacement
+    UnknownCapability
+    UnknownActivationEvent
+    CapabilityDenied
+    WorkerCrashed
+    WorkerTimedOut
+    WouldBlock
+    Quiescing
+    Disabled
+    DispatchFailed
+
+pub struct EditorKpfAdmissionV1:
+    status: EditorKpfFacadeStatus
+    extension_id: KpfId128
+    generation: i64
+    capability_bits: u64
+
+pub struct EditorKpfDispatchV1:
+    status: EditorKpfFacadeStatus
+    output: text
+    request: KpfRequestHandleV1
+
+struct EditorKpfExtensionState:
+    name: text
+    id: KpfId128
+    placement: ExtensionHostPlacement
+    activation_events: [text]
+    capability_bits: u64
+    generation: i64
+    session: KpfSessionHandleV1
+    lifetime: ExtensionLifetime
+    worker: KpfWorkerTransportV1
+    active: bool
+    consecutive_failures: i64
+    disabled: bool
+
+fn _empty_request() -> KpfRequestHandleV1:
+    KpfRequestHandleV1(generation: 0, session_slot: -1, request_slot: -1, request_epoch: 0)
+
+fn _empty_session() -> KpfSessionHandleV1:
+    KpfSessionHandleV1(generation: 0, slot: -1, epoch: 0)
+
+pub fn editor_kpf_extension_id(id: ExtensionId) -> KpfId128:
+    var hi: u64 = 1469598103934665603
+    var lo: u64 = 1099511628211
+    for byte in id.value.bytes():
+        hi = (hi ^ (byte as u64)) * 1099511628211
+        lo = (lo + (byte as u64) + 1) * 16777619
+    KpfId128(hi: hi, lo: lo)
+
+pub fn editor_kpf_capability_bit(name: text) -> Result<u64, EditorKpfFacadeStatus>:
+    if name == "workspace_read": return Ok(EDITOR_KPF_CAP_WORKSPACE_READ)
+    if name == "workspace_write": return Ok(EDITOR_KPF_CAP_WORKSPACE_WRITE)
+    if name == "process_spawn": return Ok(EDITOR_KPF_CAP_PROCESS_SPAWN)
+    if name == "network_client": return Ok(EDITOR_KPF_CAP_NETWORK_CLIENT)
+    if name == "secrets": return Ok(EDITOR_KPF_CAP_SECRETS)
+    if name == "native_ffi": return Ok(EDITOR_KPF_CAP_NATIVE_FFI)
+    Err(EditorKpfFacadeStatus.UnknownCapability)
+
+pub fn editor_kpf_permission_bits(permissions: ExtensionPermissions) -> u64:
+    var bits: u64 = 0
+    if permissions.workspace_read: bits = bits | EDITOR_KPF_CAP_WORKSPACE_READ
+    if permissions.workspace_write: bits = bits | EDITOR_KPF_CAP_WORKSPACE_WRITE
+    if permissions.process_spawn: bits = bits | EDITOR_KPF_CAP_PROCESS_SPAWN
+    if permissions.network_client: bits = bits | EDITOR_KPF_CAP_NETWORK_CLIENT
+    if permissions.secrets: bits = bits | EDITOR_KPF_CAP_SECRETS
+    if permissions.native_ffi: bits = bits | EDITOR_KPF_CAP_NATIVE_FFI
+    bits
+
+pub fn editor_kpf_activation_event(raw: text) -> Result<ExtensionActivationEvent, EditorKpfFacadeStatus>:
+    if raw == "onStartup": return Ok(ExtensionActivationEvent.OnStartup)
+    if raw.starts_with("onLanguage:"):
+        return Ok(ExtensionActivationEvent.OnLanguage(language_id: raw.slice(11, raw.len())))
+    if raw.starts_with("onCommand:"):
+        return Ok(ExtensionActivationEvent.OnCommand(command_id: raw.slice(10, raw.len())))
+    if raw.starts_with("onFilePattern:"):
+        return Ok(ExtensionActivationEvent.OnFilePattern(pattern: raw.slice(14, raw.len())))
+    Err(EditorKpfFacadeStatus.UnknownActivationEvent)
+
+fn _status_from_worker(outcome: KpfWorkerOutcome) -> EditorKpfFacadeStatus:
+    match outcome:
+        case Accepted: EditorKpfFacadeStatus.Accepted
+        case WouldBlock: EditorKpfFacadeStatus.WouldBlock
+        case CapabilityDenied: EditorKpfFacadeStatus.CapabilityDenied
+        case WorkerCrashed: EditorKpfFacadeStatus.WorkerCrashed
+        case TimedOut: EditorKpfFacadeStatus.WorkerTimedOut
+        case Quiescing: EditorKpfFacadeStatus.Quiescing
+        case _: EditorKpfFacadeStatus.DispatchFailed
+
+pub class EditorKpfFacadeV1:
+    generation: i64
+    states: [EditorKpfExtensionState]
+    sessions: KpfSessionTableV1
+    requests: KpfRequestTableV1
+    commands: CommandRegistry
+    listeners: EventListenerRegistry
+
+impl EditorKpfFacadeV1:
+    pub static fn create(generation: i64, capacity: i64) -> EditorKpfFacadeV1:
+        EditorKpfFacadeV1(generation: generation, states: [],
+            sessions: KpfSessionTableV1.create(capacity),
+            requests: KpfRequestTableV1.create(capacity),
+            commands: CommandRegistry.new(), listeners: EventListenerRegistry.new())
+
+    me admit(manifest: ExtensionManifest) -> EditorKpfAdmissionV1:
+        match extension_id_parse(manifest.name):
+            case Err(_):
+                return EditorKpfAdmissionV1(status: EditorKpfFacadeStatus.InvalidExtensionId,
+                    extension_id: KpfId128(hi: 0, lo: 0), generation: 0, capability_bits: 0)
+            case Ok(extension_id):
+                if not extension_host_placement_known(manifest.host):
+                    return EditorKpfAdmissionV1(status: EditorKpfFacadeStatus.UnknownPlacement,
+                        extension_id: editor_kpf_extension_id(extension_id), generation: 0, capability_bits: 0)
+                val placement = extension_host_placement_parse(manifest.host)
+                val bits = editor_kpf_permission_bits(manifest.permissions)
+                if placement == ExtensionHostPlacement.Worker and (bits & EDITOR_KPF_CAP_PROCESS_SPAWN) == 0:
+                    return EditorKpfAdmissionV1(status: EditorKpfFacadeStatus.CapabilityDenied,
+                        extension_id: editor_kpf_extension_id(extension_id), generation: 0, capability_bits: bits)
+                val session = self.sessions.open(self.generation)
+                if session.slot < 0:
+                    return EditorKpfAdmissionV1(status: EditorKpfFacadeStatus.WouldBlock,
+                        extension_id: editor_kpf_extension_id(extension_id), generation: 0, capability_bits: bits)
+                val process = KpfWorkerProcessFacadeV1.create(8)
+                val worker = KpfWorkerTransportV1.create(process, self.generation,
+                    session.slot, session.epoch, 65536, bits, 1000000000)
+                self.states.push(EditorKpfExtensionState(name: manifest.name,
+                    id: editor_kpf_extension_id(extension_id), placement: placement,
+                    activation_events: manifest.activation_events, capability_bits: bits,
+                    generation: self.generation, session: session,
+                    lifetime: ExtensionLifetime.new(manifest.name), worker: worker,
+                    active: false, consecutive_failures: 0, disabled: false))
+                EditorKpfAdmissionV1(status: EditorKpfFacadeStatus.Accepted,
+                    extension_id: editor_kpf_extension_id(extension_id),
+                    generation: self.generation, capability_bits: bits)
+
+    me activate(name: text, now_ns: i64) -> EditorKpfFacadeStatus:
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                if state.disabled: return EditorKpfFacadeStatus.Disabled
+                if state.active: return EditorKpfFacadeStatus.Accepted
+                if state.placement == ExtensionHostPlacement.Worker:
+                    val outcome = state.worker.handshake(EDITOR_KPF_CAP_PROCESS_SPAWN, now_ns)
+                    self.states[index] = state
+                    if outcome == KpfWorkerOutcome.Accepted:
+                        return EditorKpfFacadeStatus.Pending
+                    return _status_from_worker(outcome)
+                state.active = true
+                self.states[index] = state
+                return EditorKpfFacadeStatus.Accepted
+            index = index + 1
+        EditorKpfFacadeStatus.NotFound
+
+    me activate_event(event: text, now_ns: i64) -> i64:
+        var activated = 0
+        var index = 0
+        while index < self.states.len():
+            var matches = false
+            for declared in self.states[index].activation_events:
+                if declared == event: matches = true
+            if matches and not self.states[index].active:
+                val status = self.activate(self.states[index].name, now_ns)
+                if status == EditorKpfFacadeStatus.Accepted or status == EditorKpfFacadeStatus.Pending:
+                    activated = activated + 1
+            index = index + 1
+        activated
+
+    me accept_worker_handshake(name: text, now_ns: i64) -> EditorKpfFacadeStatus:
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                if state.placement != ExtensionHostPlacement.Worker:
+                    return EditorKpfFacadeStatus.DispatchFailed
+                state.worker.process.inject_from_worker(KpfWorkerFrameV1(
+                    protocol_version: KPF_WORKER_PROTOCOL_V1,
+                    kind: KpfWorkerFrameKind.HandshakeAccepted,
+                    generation: state.generation, session_epoch: state.session.epoch,
+                    request_slot: -1, request_epoch: 0,
+                    capability_bits: state.capability_bits, payload_length: 0, payload: []))
+                val result = state.worker.poll(now_ns)
+                if result.outcome == KpfWorkerOutcome.Accepted: state.active = true
+                self.states[index] = state
+                return _status_from_worker(result.outcome)
+            index = index + 1
+        EditorKpfFacadeStatus.NotFound
+
+    me register_command(name: text, command_id: text, title: text,
+            handler: fn(text) -> Result<text, text>) -> Disposable:
+        val disposable = self.commands.register(name, command_id, title, handler)
+        self._own_disposable(name, disposable)
+        disposable
+
+    me on_event(name: text, event: text, handler: fn(text)) -> Disposable:
+        val disposable = self.listeners.add(name, event, handler)
+        self._own_disposable(name, disposable)
+        disposable
+
+    me dispatch_command(command_id: text, payload: text, now_ns: i64) -> EditorKpfDispatchV1:
+        val owner = self.commands.owner_of(command_id)
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == owner:
+                var state = self.states[index]
+                if state.disabled:
+                    return EditorKpfDispatchV1(status: EditorKpfFacadeStatus.Disabled, output: "", request: _empty_request())
+                if not state.active:
+                    return EditorKpfDispatchV1(status: EditorKpfFacadeStatus.NotActive, output: "", request: _empty_request())
+                if state.placement == ExtensionHostPlacement.Worker:
+                    val request = self.requests.reserve(state.session)
+                    if request.request_slot < 0:
+                        return EditorKpfDispatchV1(status: EditorKpfFacadeStatus.WouldBlock, output: "", request: request)
+                    val outcome = state.worker.submit(request, EDITOR_KPF_CAP_PROCESS_SPAWN, payload.bytes(), now_ns)
+                    if outcome != KpfWorkerOutcome.Accepted: self.requests.release(request)
+                    if outcome == KpfWorkerOutcome.WorkerCrashed:
+                        state.consecutive_failures = state.consecutive_failures + 1
+                        if state.consecutive_failures >= 3: state.disabled = true
+                    self.states[index] = state
+                    return EditorKpfDispatchV1(status: _status_from_worker(outcome), output: "", request: request)
+                match self.commands.run(command_id, payload):
+                    case Ok(output):
+                        state.consecutive_failures = 0
+                        self.states[index] = state
+                        return EditorKpfDispatchV1(status: EditorKpfFacadeStatus.Accepted, output: output, request: _empty_request())
+                    case Err(_):
+                        state.consecutive_failures = state.consecutive_failures + 1
+                        if state.consecutive_failures >= 3: state.disabled = true
+                        self.states[index] = state
+                        return EditorKpfDispatchV1(status: EditorKpfFacadeStatus.DispatchFailed, output: "", request: _empty_request())
+            index = index + 1
+        EditorKpfDispatchV1(status: EditorKpfFacadeStatus.NotFound, output: "", request: _empty_request())
+
+    me crash_worker(name: text):
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                state.worker.process.crash()
+                self.states[index] = state
+                return
+            index = index + 1
+
+    me accept_worker_completion(name: text, request: KpfRequestHandleV1,
+            now_ns: i64) -> EditorKpfFacadeStatus:
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                state.worker.process.inject_from_worker(KpfWorkerFrameV1(
+                    protocol_version: KPF_WORKER_PROTOCOL_V1,
+                    kind: KpfWorkerFrameKind.Completion,
+                    generation: request.generation, session_epoch: state.session.epoch,
+                    request_slot: request.request_slot, request_epoch: request.request_epoch,
+                    capability_bits: 0, payload_length: 0, payload: []))
+                val result = state.worker.poll(now_ns)
+                if result.outcome == KpfWorkerOutcome.Accepted:
+                    self.requests.release(result.request)
+                    state.consecutive_failures = 0
+                self.states[index] = state
+                return _status_from_worker(result.outcome)
+            index = index + 1
+        EditorKpfFacadeStatus.NotFound
+
+    me deactivate(name: text) -> EditorKpfFacadeStatus:
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                for disposable in state.lifetime.dispose_all():
+                    if disposable.kind == "command": self.commands.dispose(disposable.id)
+                    elif disposable.kind == "listener": self.listeners.dispose(disposable.id)
+                self.commands.dispose_owner(name)
+                self.listeners.dispose_owner(name)
+                if state.placement == ExtensionHostPlacement.Worker:
+                    state.worker.quiesce()
+                    if state.worker.inflight != 0:
+                        state.active = false
+                        self.states[index] = state
+                        return EditorKpfFacadeStatus.Quiescing
+                    state.worker.close()
+                self.sessions.close(state.session)
+                state.active = false
+                self.states[index] = state
+                return EditorKpfFacadeStatus.Accepted
+            index = index + 1
+        EditorKpfFacadeStatus.NotFound
+
+    fn is_active(self, name: text) -> bool:
+        for state in self.states:
+            if state.name == name: return state.active
+        false
+
+    fn owned_disposable_count(self, name: text) -> i64:
+        for state in self.states:
+            if state.name == name: return state.lifetime.count()
+        0
+
+    fn command_registered(self, command_id: text) -> bool:
+        self.commands.has(command_id)
+
+    fn listener_count(self) -> i64:
+        self.listeners.count()
+
+    me emit_event(event: text, payload: text) -> i64:
+        self.listeners.deliver(event, payload)
+
+    fn session_is_live(self, name: text) -> bool:
+        for state in self.states:
+            if state.name == name:
+                return self.sessions.validate(state.session) == KpfQueueStatus.Accepted
+        false
+
+    me _own_disposable(name: text, disposable: Disposable):
+        var index = 0
+        while index < self.states.len():
+            if self.states[index].name == name:
+                var state = self.states[index]
+                state.lifetime.add(disposable)
+                self.states[index] = state
+                return
+            index = index + 1

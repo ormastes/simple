@@ -1,0 +1,127 @@
+# Purpose: deterministic worker transport safety and lifecycle acceptance.
+# @req REQ-KPF-WORKER-TRANSPORT
+# @cover src/os/smf/kernel_plugin/worker_*.spl 85%
+
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.kernel_plugin.runtime.KpfRequestHandleV1
+use os.smf.kernel_plugin.worker_protocol.*
+use os.smf.kernel_plugin.worker_process.KpfWorkerProcessFacadeV1
+use os.smf.kernel_plugin.worker_transport.KpfWorkerTransportV1
+
+fn request(slot: i64, epoch: i64) -> KpfRequestHandleV1:
+    KpfRequestHandleV1(generation: 7, session_slot: 2,
+        request_slot: slot, request_epoch: epoch)
+
+fn completion(generation: i64, session_epoch: i64,
+        slot: i64, epoch: i64, payload: [u8]) -> KpfWorkerFrameV1:
+    KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+        kind: KpfWorkerFrameKind.Completion, generation: generation,
+        session_epoch: session_epoch, request_slot: slot, request_epoch: epoch,
+        capability_bits: 0, payload_length: payload.len, payload: payload)
+
+fn transport(capacity: i64, timeout_ns: i64) -> KpfWorkerTransportV1:
+    KpfWorkerTransportV1.create(KpfWorkerProcessFacadeV1.create(capacity),
+        7, 2, 3, 8, 5, timeout_ns)
+
+fn handshake_accepted(capabilities: u64) -> KpfWorkerFrameV1:
+    KpfWorkerFrameV1(protocol_version: KPF_WORKER_PROTOCOL_V1,
+        kind: KpfWorkerFrameKind.HandshakeAccepted, generation: 7,
+        session_epoch: 3, request_slot: -1, request_epoch: 0,
+        capability_bits: capabilities, payload_length: 0, payload: [])
+
+fn complete_handshake(worker: KpfWorkerTransportV1):
+    worker.process.take_sent()
+    assert_equal(worker.process.inject_from_worker(handshake_accepted(1)), KpfWorkerOutcome.Accepted)
+    assert_equal(worker.poll(1).outcome, KpfWorkerOutcome.Accepted)
+
+describe "bounded KPF worker transport":
+    it "negotiates protocol and projects only granted capabilities":
+        step("admit a compatible handshake and deny excess authority")
+        val worker = transport(2, 100)
+        assert_equal(worker.handshake(5, 0), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.process.take_sent().1.kind, KpfWorkerFrameKind.Handshake)
+        assert_equal(worker.process.inject_from_worker(handshake_accepted(5)), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll(1).outcome, KpfWorkerOutcome.Accepted)
+        assert_true(worker.handshaken)
+        val denied = transport(2, 100)
+        assert_equal(denied.handshake(8, 0), KpfWorkerOutcome.CapabilityDenied)
+
+    it "fails closed on malformed oversized and wrong-version frames":
+        step("inject frame mutations without invoking a real process")
+        val malformed_worker = transport(2, 100)
+        assert_equal(malformed_worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(malformed_worker)
+        var malformed = completion(7, 3, 0, 1, [1u8])
+        malformed.payload_length = 2
+        assert_equal(malformed_worker.process.inject_from_worker(malformed), KpfWorkerOutcome.Accepted)
+        assert_equal(malformed_worker.poll(1).outcome, KpfWorkerOutcome.MalformedFrame)
+
+        val oversized_worker = transport(2, 100)
+        assert_equal(oversized_worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(oversized_worker)
+        val oversized = completion(7, 3, 0, 1,
+            [1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8])
+        assert_equal(oversized_worker.process.inject_from_worker(oversized), KpfWorkerOutcome.Accepted)
+        assert_equal(oversized_worker.poll(1).outcome, KpfWorkerOutcome.FrameTooLarge)
+
+        val wrong_version_worker = transport(2, 100)
+        assert_equal(wrong_version_worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(wrong_version_worker)
+        var wrong_version = completion(7, 3, 0, 1, [])
+        wrong_version.protocol_version = 99
+        assert_equal(wrong_version_worker.process.inject_from_worker(wrong_version), KpfWorkerOutcome.Accepted)
+        assert_equal(wrong_version_worker.poll(1).outcome, KpfWorkerOutcome.ProtocolMismatch)
+
+    it "reports crash and timeout as distinct typed outcomes":
+        step("observe a crashed worker and terminate a live timed-out worker")
+        val crashed = transport(2, 100)
+        assert_equal(crashed.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        crashed.process.crash()
+        assert_equal(crashed.poll(1).outcome, KpfWorkerOutcome.WorkerCrashed)
+        val timed_out = transport(2, 10)
+        assert_equal(timed_out.handshake(1, 5), KpfWorkerOutcome.Accepted)
+        assert_equal(timed_out.poll(15).outcome, KpfWorkerOutcome.TimedOut)
+        assert_true(timed_out.process.terminated)
+
+    it "rejects stale completions and preserves request epochs":
+        step("submit one request and mutate completion generation and epoch")
+        val worker = transport(3, 100)
+        assert_equal(worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        assert_equal(worker.submit(request(4, 9), 1, [2u8], 1), KpfWorkerOutcome.Accepted)
+        worker.process.take_sent()
+        assert_equal(worker.process.inject_from_worker(completion(8, 3, 4, 9, [])), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll(2).outcome, KpfWorkerOutcome.StaleCompletion)
+        assert_equal(worker.inflight, 1)
+        assert_equal(worker.process.inject_from_worker(completion(7, 3, 4, 9, [3u8])), KpfWorkerOutcome.Accepted)
+        val accepted = worker.poll(3)
+        assert_equal(accepted.outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(accepted.request.request_epoch, 9)
+
+    it "returns backpressure without growing the bounded facade":
+        step("fill the one-frame outbound queue")
+        val worker = transport(1, 100)
+        assert_equal(worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        assert_equal(worker.submit(request(1, 1), 1, [], 1), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.submit(request(2, 1), 1, [], 1), KpfWorkerOutcome.WouldBlock)
+        assert_equal(worker.process.capacity, 1)
+
+    it "cancels then quiesces and closes only after clean completion":
+        step("drain one request before close")
+        val worker = transport(3, 100)
+        assert_equal(worker.handshake(1, 0), KpfWorkerOutcome.Accepted)
+        complete_handshake(worker)
+        val handle = request(5, 11)
+        assert_equal(worker.submit(handle, 1, [4u8], 1), KpfWorkerOutcome.Accepted)
+        worker.process.take_sent()
+        assert_equal(worker.cancel(handle), KpfWorkerOutcome.Accepted)
+        worker.process.take_sent()
+        assert_equal(worker.quiesce(), KpfWorkerOutcome.Accepted)
+        worker.process.take_sent()
+        assert_equal(worker.close(), KpfWorkerOutcome.Quiescing)
+        assert_equal(worker.process.inject_from_worker(completion(7, 3, 5, 11, [])), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.poll(2).outcome, KpfWorkerOutcome.Accepted)
+        assert_equal(worker.close(), KpfWorkerOutcome.Accepted)
+        assert_equal(worker.close(), KpfWorkerOutcome.Closed)

@@ -1,0 +1,65 @@
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.backend.static_backend_registry.{
+    BackendLinkClass, StaticBackendEntryV1, installed_k1_static_backend_policy_v1,
+    installed_k1_static_backend_table_v1, install_full_static_backend_table_v1}
+use compiler.backend.backend_port.{BackendPortV1, backend_plugin_from_port_v1}
+use plugins.backend_registry.full_static_backend_ports.*
+# Optional compiler extensions are loaded only by this P-static composition
+# root. Kernel driver modules never import their plugin implementation closure.
+use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*
+
+fn _entry(kind: BackendKind, port: BackendPortV1, output_kind: CodegenOutputKind) -> StaticBackendEntryV1:
+    StaticBackendEntryV1(kind, BackendLinkClass.PluginStatic, backend_plugin_from_port_v1(port), output_kind)
+
+pub fn plugin_static_backend_table_v1() -> [StaticBackendEntryV1]:
+    [
+        _entry(BackendKind.Byl, byl_backend_port_v1(), CodegenOutputKind.TextSource),
+        _entry(BackendKind.CCodegen, c_backend_port_v1(), CodegenOutputKind.TextSource),
+        _entry(BackendKind.Cuda, cuda_backend_port_v1(), CodegenOutputKind.GpuCode),
+        _entry(BackendKind.Hip, hip_backend_port_v1(), CodegenOutputKind.GpuCode),
+        _entry(BackendKind.IrTc, irtc_backend_port_v1(), CodegenOutputKind.ObjectCode),
+        _entry(BackendKind.Lean, lean_backend_port_v1(), CodegenOutputKind.TextSource),
+        _entry(BackendKind.LlvmLib, llvm_lib_backend_port_v1(), CodegenOutputKind.ObjectCode),
+        _entry(BackendKind.Lua, lua_backend_port_v1(), CodegenOutputKind.TextSource),
+        _entry(BackendKind.Native, native_backend_port_v1(), CodegenOutputKind.ObjectCode),
+        _entry(BackendKind.OpenCl, opencl_backend_port_v1(), CodegenOutputKind.GpuCode),
+        _entry(BackendKind.Vhdl, vhdl_backend_port_v1(), CodegenOutputKind.TextSource),
+        _entry(BackendKind.Vulkan, vulkan_backend_port_v1(), CodegenOutputKind.GpuCode),
+        _entry(BackendKind.Wasm, wasm_backend_port_v1(), CodegenOutputKind.TextSource)
+    ]
+
+fn _merge_backend_tables_v1(k1: [StaticBackendEntryV1],
+        plugins: [StaticBackendEntryV1]) -> [StaticBackendEntryV1]:
+    var merged: [StaticBackendEntryV1] = []
+    var k1_index = 0
+    var plugin_index = 0
+    while k1_index < k1.len() or plugin_index < plugins.len():
+        if plugin_index >= plugins.len():
+            merged.push(k1[k1_index])
+            k1_index = k1_index + 1
+        else if k1_index >= k1.len():
+            merged.push(plugins[plugin_index])
+            plugin_index = plugin_index + 1
+        else:
+            val k1_name = k1[k1_index].plugin.describe().name
+            val plugin_name = plugins[plugin_index].plugin.describe().name
+            if k1_name == plugin_name:
+                return []
+            if k1_name < plugin_name:
+                merged.push(k1[k1_index])
+                k1_index = k1_index + 1
+            else:
+                merged.push(plugins[plugin_index])
+                plugin_index = plugin_index + 1
+    merged
+
+pub fn full_static_backend_table_for_k1_policy_v1(policy: text) -> [StaticBackendEntryV1]:
+    if policy == "" or policy != installed_k1_static_backend_policy_v1():
+        return []
+    _merge_backend_tables_v1(installed_k1_static_backend_table_v1(),
+        plugin_static_backend_table_v1())
+
+pub fn install_full_static_backends_for_k1_policy_v1(policy: text) -> bool:
+    val table = full_static_backend_table_for_k1_policy_v1(policy)
+    table.len() > 0 and install_full_static_backend_table_v1(policy, table)

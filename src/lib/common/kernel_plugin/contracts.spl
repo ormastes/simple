@@ -1,0 +1,165 @@
+use common.kernel_plugin.status.KpfStatus
+
+pub enum KpfLifecycleState:
+    Discovered
+    Loaded
+    Admitted
+    Active
+    Quiescing
+    Retired
+    Unloaded
+    Failed
+
+pub enum KpfMemoryClass:
+    StaticNoAlloc
+    ArenaOnly
+    NoGcBounded
+    NoGcGeneral
+    IsolatedManaged
+
+pub enum KpfConcurrencyMode:
+    SingleThreaded
+    Serialized
+    SnapshotReadParallel
+
+pub enum KpfReentrancyPolicy:
+    Forbidden
+    SignalOnly
+    Allowed
+
+pub enum KpfTrustLevel:
+    SealedFirstParty
+    SignedTrusted
+    WorkspaceTrusted
+    UntrustedIsolated
+
+pub const KPF_LIFECYCLE_DISCOVERED: u32 = 1
+pub const KPF_LIFECYCLE_LOADED: u32 = 2
+pub const KPF_LIFECYCLE_ADMITTED: u32 = 3
+pub const KPF_LIFECYCLE_ACTIVE: u32 = 4
+pub const KPF_LIFECYCLE_QUIESCING: u32 = 5
+pub const KPF_LIFECYCLE_RETIRED: u32 = 6
+pub const KPF_LIFECYCLE_UNLOADED: u32 = 7
+pub const KPF_LIFECYCLE_FAILED: u32 = 8
+
+pub const KPF_FLAG_FALSE: u32 = 0
+pub const KPF_FLAG_TRUE: u32 = 1
+
+pub const KPF_MEMORY_STATIC_NOALLOC: u32 = 1
+pub const KPF_MEMORY_ARENA_ONLY: u32 = 2
+pub const KPF_MEMORY_NOGC_BOUNDED: u32 = 3
+pub const KPF_MEMORY_NOGC_GENERAL: u32 = 4
+pub const KPF_MEMORY_ISOLATED_MANAGED: u32 = 5
+
+pub const KPF_CONCURRENCY_SINGLE_THREADED: u32 = 1
+pub const KPF_CONCURRENCY_SERIALIZED: u32 = 2
+pub const KPF_CONCURRENCY_SNAPSHOT_READ_PARALLEL: u32 = 3
+
+pub const KPF_REENTRANCY_FORBIDDEN: u32 = 1
+pub const KPF_REENTRANCY_SIGNAL_ONLY: u32 = 2
+pub const KPF_REENTRANCY_ALLOWED: u32 = 3
+
+pub const KPF_TRUST_SEALED_FIRST_PARTY: u32 = 1
+pub const KPF_TRUST_SIGNED_TRUSTED: u32 = 2
+pub const KPF_TRUST_WORKSPACE_TRUSTED: u32 = 3
+pub const KPF_TRUST_UNTRUSTED_ISOLATED: u32 = 4
+
+pub struct KpfMemoryContractV1:
+    memory_class: u32
+    initialization_bytes: u64
+    persistent_bytes_per_instance: u64
+    bytes_per_session: u64
+    bytes_per_inflight_request: u64
+    input_alignment: u32
+    output_alignment: u32
+    maximum_sessions: u32
+    maximum_inflight_per_session: u32
+    maximum_batch_items: u32
+    may_allocate_after_activation: u32
+    reserved0: u32
+
+pub struct KpfConcurrencyContractV1:
+    mode: u32
+    reentrancy: u32
+    maximum_concurrent_calls: u32
+    deterministic_completion: u32
+    reserved0: u32
+
+pub struct KpfTrustContractV1:
+    trust_level: u32
+    required_capability_bits: u64
+    isolation_required: u32
+    signature_required: u32
+    workspace_trust_required: u32
+    reserved0: u32
+
+fn _kpf_power_of_two(value: u32) -> bool:
+    value != 0 and (value & (value - 1)) == 0
+
+pub fn kpf_validate_memory_contract_v1(contract: KpfMemoryContractV1) -> KpfStatus:
+    if contract.memory_class < KPF_MEMORY_STATIC_NOALLOC or contract.memory_class > KPF_MEMORY_ISOLATED_MANAGED:
+        return KpfStatus.ContractCodeUnknown
+    if contract.reserved0 != 0:
+        return KpfStatus.ReservedFieldNonzero
+    if contract.may_allocate_after_activation > KPF_FLAG_TRUE:
+        return KpfStatus.ContractCodeUnknown
+    if not _kpf_power_of_two(contract.input_alignment) or not _kpf_power_of_two(contract.output_alignment):
+        return KpfStatus.ContractInvalid
+    if contract.input_alignment > 4096 or contract.output_alignment > 4096:
+        return KpfStatus.ContractInvalid
+    if contract.maximum_sessions == 0 or contract.maximum_inflight_per_session == 0 or contract.maximum_batch_items == 0:
+        return KpfStatus.ContractInvalid
+    if (contract.memory_class == KPF_MEMORY_STATIC_NOALLOC or contract.memory_class == KPF_MEMORY_ARENA_ONLY) and contract.may_allocate_after_activation == KPF_FLAG_TRUE:
+        return KpfStatus.ContractInvalid
+    KpfStatus.Ok
+
+pub fn kpf_validate_concurrency_contract_v1(contract: KpfConcurrencyContractV1) -> KpfStatus:
+    if contract.mode < KPF_CONCURRENCY_SINGLE_THREADED or contract.mode > KPF_CONCURRENCY_SNAPSHOT_READ_PARALLEL:
+        return KpfStatus.ContractCodeUnknown
+    if contract.reentrancy < KPF_REENTRANCY_FORBIDDEN or contract.reentrancy > KPF_REENTRANCY_ALLOWED:
+        return KpfStatus.ContractCodeUnknown
+    if contract.reserved0 != 0:
+        return KpfStatus.ReservedFieldNonzero
+    if contract.deterministic_completion > KPF_FLAG_TRUE:
+        return KpfStatus.ContractCodeUnknown
+    if contract.maximum_concurrent_calls == 0:
+        return KpfStatus.ContractInvalid
+    if (contract.mode == KPF_CONCURRENCY_SINGLE_THREADED or contract.mode == KPF_CONCURRENCY_SERIALIZED) and contract.maximum_concurrent_calls != 1:
+        return KpfStatus.ContractInvalid
+    KpfStatus.Ok
+
+pub fn kpf_validate_trust_contract_v1(contract: KpfTrustContractV1) -> KpfStatus:
+    if contract.trust_level < KPF_TRUST_SEALED_FIRST_PARTY or contract.trust_level > KPF_TRUST_UNTRUSTED_ISOLATED:
+        return KpfStatus.ContractCodeUnknown
+    if contract.reserved0 != 0:
+        return KpfStatus.ReservedFieldNonzero
+    if contract.isolation_required > KPF_FLAG_TRUE or contract.signature_required > KPF_FLAG_TRUE or contract.workspace_trust_required > KPF_FLAG_TRUE:
+        return KpfStatus.ContractCodeUnknown
+    if contract.trust_level == KPF_TRUST_SIGNED_TRUSTED and contract.signature_required != KPF_FLAG_TRUE:
+        return KpfStatus.ContractInvalid
+    if contract.trust_level == KPF_TRUST_WORKSPACE_TRUSTED and contract.workspace_trust_required != KPF_FLAG_TRUE:
+        return KpfStatus.ContractInvalid
+    if contract.trust_level == KPF_TRUST_UNTRUSTED_ISOLATED and contract.isolation_required != KPF_FLAG_TRUE:
+        return KpfStatus.ContractInvalid
+    KpfStatus.Ok
+
+pub fn kpf_lifecycle_transition_status(from_state: u32, to_state: u32) -> KpfStatus:
+    if from_state < KPF_LIFECYCLE_DISCOVERED or from_state > KPF_LIFECYCLE_FAILED:
+        return KpfStatus.ContractCodeUnknown
+    if to_state < KPF_LIFECYCLE_DISCOVERED or to_state > KPF_LIFECYCLE_FAILED:
+        return KpfStatus.ContractCodeUnknown
+    if from_state == KPF_LIFECYCLE_DISCOVERED and to_state == KPF_LIFECYCLE_LOADED:
+        return KpfStatus.Ok
+    if from_state == KPF_LIFECYCLE_LOADED and to_state == KPF_LIFECYCLE_ADMITTED:
+        return KpfStatus.Ok
+    if from_state == KPF_LIFECYCLE_ADMITTED and to_state == KPF_LIFECYCLE_ACTIVE:
+        return KpfStatus.Ok
+    if from_state == KPF_LIFECYCLE_ACTIVE and to_state == KPF_LIFECYCLE_QUIESCING:
+        return KpfStatus.Ok
+    if from_state == KPF_LIFECYCLE_QUIESCING and to_state == KPF_LIFECYCLE_RETIRED:
+        return KpfStatus.Ok
+    if from_state == KPF_LIFECYCLE_RETIRED and to_state == KPF_LIFECYCLE_UNLOADED:
+        return KpfStatus.Ok
+    if to_state == KPF_LIFECYCLE_FAILED and from_state != KPF_LIFECYCLE_RETIRED and from_state != KPF_LIFECYCLE_UNLOADED:
+        return KpfStatus.Ok
+    KpfStatus.LifecycleTransitionInvalid

@@ -1,0 +1,62 @@
+use std.spec.*
+use std.common.build_progress.*
+use std.nogc_sync_mut.build_progress.{encode_build_progress, decode_build_progress, render_build_progress}
+use app.build_progress.cli.{run_build_progress_cli}
+
+fn sample(build_id: text, sequence: i64, elapsed_ms: i64, state: BuildProgressState) -> BuildProgressSnapshot:
+    BuildProgressSnapshot(
+        schema: BUILD_PROGRESS_SCHEMA_V1, build_id: build_id, sequence: sequence,
+        phase: "native_compile", subphase: "files", state: state,
+        verdict: build_progress_state_text(state), total_files: 10,
+        discovered_files: 10, planned_files: 10, queued_files: 4,
+        compiling_files: 1, compiled_files: 5, cached_files: 1,
+        failed_files: 0, remaining_files: 4,
+        current_files: ["src/a.spl"], last_completed_file: "src/b.spl",
+        error_count: 0, error_summary: "", link_state: BuildLinkState.NotStarted,
+        link_input_count: 0, link_output: "", elapsed_ms: elapsed_ms,
+        heartbeat_ms: elapsed_ms, files_per_second_milli: 2500,
+        eta_ms: 1600, eta_confidence: "medium", cancellation_requested: false,
+        receipt_path: ".simple/storage/evidence/build.receipt",
+        evidence_path: ".simple/storage/build/progress/events.log",
+    )
+
+describe "LLM-friendly build progress surface":
+    it "round trips every required progress field":
+        step("encode and decode one bounded machine-readable snapshot")
+        val decoded = decode_build_progress(encode_build_progress(sample("b1", 1, 100, BuildProgressState.Running))).unwrap()
+        expect(decoded.build_id).to_equal("b1")
+        expect(decoded.total_files).to_equal(10)
+        expect(decoded.current_files.len()).to_equal(1)
+        expect(decoded.link_state).to_equal(BuildLinkState.NotStarted)
+
+    it "rejects a stale writer while the current build is running":
+        step("try to replace a live build snapshot with another build id")
+        val result = validate_build_progress_successor(
+            sample("live", 3, 300, BuildProgressState.Running),
+            sample("stale", 4, 400, BuildProgressState.Running))
+        expect(result).to_equal(Err(BuildProgressPublishError.StaleBuild))
+
+    it "rejects sequence and elapsed-time regression":
+        step("submit an older update for the same build")
+        val result = validate_build_progress_successor(
+            sample("b1", 3, 300, BuildProgressState.Running),
+            sample("b1", 2, 200, BuildProgressState.Running))
+        expect(result).to_equal(Err(BuildProgressPublishError.NonMonotonic))
+
+    it "rejects implicit build identity replacement even after a phase completes":
+        step("require the build manager to initialize ownership explicitly")
+        val result = validate_build_progress_successor(
+            sample("old", 9, 900, BuildProgressState.Complete),
+            sample("new", 0, 0, BuildProgressState.Running))
+        expect(result).to_equal(Err(BuildProgressPublishError.StaleBuild))
+
+    it "renders one concise line without parsing the event log":
+        step("render the current snapshot for an LLM or operator")
+        val line = render_build_progress(sample("b1", 1, 100, BuildProgressState.Running))
+        expect(line).to_contain("files=5/10")
+        expect(line).to_contain("remaining=4")
+        expect(line).to_contain("link=not_started")
+
+    it "exposes a bounded CLI instead of accepting ambiguous arguments":
+        step("reject an unknown reader option with usage status")
+        expect(run_build_progress_cli(["build-progress", "--unknown"])).to_equal(2)

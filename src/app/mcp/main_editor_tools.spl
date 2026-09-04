@@ -1,9 +1,15 @@
 use .main_lazy_json
 use .main_session_state
-use std.io_runtime.{file_read, file_write}
+use std.io_runtime.{file_read, file_write, dir_create_all}
+use std.nogc_sync_mut.sffi.io.{path_parent}
+use std.nogc_sync_mut.storage_roots.tooling_paths.{tooling_workspace_path}
 
 fn editor_mcp_state_path() -> text:
-    "/tmp/simple_mcp_editor_session_state.txt"
+    val path = tooling_workspace_path("mcp-editor", "shared", "active-buffer.txt")
+    if path.is_err():
+        return ""
+    dir_create_all(path_parent(path.unwrap().value))
+    path.unwrap().value
 
 fn editor_mcp_argument(body: text, name: text) -> text:
     val params = extract_field_raw(body, "params")
@@ -18,17 +24,26 @@ fn handle_editor_mcp_open_file(id: text, body: text) -> text:
     val path = editor_mcp_argument(body, "path")
     if path == "":
         return make_tool_error(id, -32602, "missing path argument")
-    val _ = file_write(editor_mcp_state_path(), path)
+    val state_path = editor_mcp_state_path()
+    if state_path == "":
+        return make_tool_error(id, -32603, "centralized worktree storage is unavailable")
+    val _ = file_write(state_path, path)
     mcp_record_last_read(path)
     make_tool_result(id, "opened " + path)
 
 fn handle_editor_mcp_read_buffer(id: text, body: text) -> text:
-    val path = file_read(editor_mcp_state_path()).trim()
+    val state_path = editor_mcp_state_path()
+    if state_path == "":
+        return make_tool_error(id, -32603, "centralized worktree storage is unavailable")
+    val path = file_read(state_path).trim()
     if path == "":
         return make_tool_error(id, -32602, "no active buffer")
     mcp_record_last_read(path)
     make_tool_result(id, file_read(path))
 
 fn handle_editor_mcp_list_open_files(id: text, body: text) -> text:
-    val path = file_read(editor_mcp_state_path()).trim()
+    val state_path = editor_mcp_state_path()
+    if state_path == "":
+        return make_tool_error(id, -32603, "centralized worktree storage is unavailable")
+    val path = file_read(state_path).trim()
     make_tool_result(id, path)

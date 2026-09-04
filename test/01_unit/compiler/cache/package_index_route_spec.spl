@@ -1,0 +1,38 @@
+use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
+use compiler.driver.cache.package_module_index.{package_module_index_decode_v1}
+use std.io_runtime.{env_get, env_set}
+
+describe "production package-index routing":
+    it "fails closed when the persistent index is unavailable":
+        val old_cache = env_get("SIMPLE_CACHE") ?? ""
+        env_set("SIMPLE_CACHE", "/tmp/simple-package-index-route-missing")
+        val route = package_index_route_current_v1(
+            "src/app/main.spl", "/tmp/simple-package-index-route-snapshot",
+            "revision", "tree", "inventory", "producer", "root",
+            "variant", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_start_with("index-")
+        env_set("SIMPLE_CACHE", old_cache)
+
+    it "rejects routing without immutable SCV authority":
+        val route = package_index_route_current_v1(
+            "", "", "", "", "", "", "", "", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_equal("scv-authority-missing")
+
+    it "rejects routing without producer and configuration compatibility":
+        val route = package_index_route_current_v1(
+            "", "/tmp/simple-package-index-route-snapshot",
+            "revision", "tree", "inventory", "", "", "", [], false)
+        expect(route.valid).to_equal(false)
+        expect(route.reason).to_equal("index-compatibility-missing")
+
+    it "rejects corrupt and incompatible persistent index payloads":
+        val corrupt = package_module_index_decode_v1("not-an-index")
+        expect(corrupt.valid).to_equal(false)
+        expect(corrupt.reason).to_equal("corrupt-header")
+        val incompatible = package_module_index_decode_v1(
+            "simple-package-module-index-v1\nschema=2\nproducer=x\nroot=x\n" +
+            "scv-revision=x\nscv-commit=x\nscv-tree=x\ninventory=x\ncount=0")
+        expect(incompatible.valid).to_equal(false)
+        expect(incompatible.reason).to_equal("unsupported-schema")

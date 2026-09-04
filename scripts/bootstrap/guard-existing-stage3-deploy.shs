@@ -1,0 +1,225 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+source_root=$root
+pid=
+output=
+planner_receipt=
+action=observe
+
+fail() {
+  echo "stage3-deploy-gate: REJECTED — $1" >&2
+  exit 1
+}
+
+usage() {
+  echo "usage: $0 --pid=N --source-root=PATH --output-dir=PATH [--observe]" >&2
+  echo "       $0 --pid=N --source-root=PATH --output-dir=PATH --admit-deploy --planner-receipt=PATH" >&2
+  echo "       $0 --self-test" >&2
+}
+
+canonical_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  (CDPATH= cd -- "$1" && pwd -P)
+}
+
+canonical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  directory=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P) || return 1
+  printf '%s/%s\n' "$directory" "$(basename -- "$1")"
+}
+
+contained_file() {
+  expected=$1 base=$2
+  actual=$(canonical_file "$expected") || return 1
+  case "$actual" in "$base"/*) ;; *) return 1 ;; esac
+  [ "$actual" = "$expected" ] || return 1
+  printf '%s\n' "$actual"
+}
+
+platform() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64|Darwin:aarch64) echo aarch64-apple-darwin ;;
+    Darwin:x86_64) echo x86_64-apple-darwin ;;
+    Linux:x86_64) echo x86_64-unknown-linux-gnu ;;
+    Linux:aarch64|Linux:arm64) echo aarch64-unknown-linux-gnu ;;
+    *) return 1 ;;
+  esac
+}
+
+self_test() {
+  fixture="$root/build/bootstrap/stage3-deploy-gate-selftest.$$"
+  trap 'rm -rf "$fixture" "${fixture}.link"' EXIT HUP INT TERM
+  mkdir -p "$fixture/stage3/$(platform)"
+  candidate="$fixture/stage3/$(platform)/simple"
+  manifest="$fixture/stage3/$(platform)/provenance.env"
+  printf '#!/bin/sh\nexit 0\n' >"$candidate"
+  chmod 755 "$candidate"
+  {
+    echo schema=simple-bootstrap-stage3-provenance-v4
+    echo status=pass
+    echo artifact_kind=pure-simple-bootstrap-compiler
+    echo full_cli_status=separate-not-proven
+    echo stage3_path="$candidate"
+    echo stage3_sha256=forged
+  } >"$manifest"
+  if "$0" --pid=99999999 --output-dir="$fixture" --observe \
+      >"$fixture/out" 2>"$fixture/err"; then
+    fail synthetic-forged-manifest-was-admitted
+  fi
+  grep -q 'REJECTED' "$fixture/err" || fail synthetic-rejection-not-diagnostic
+  ln -s "$fixture" "${fixture}.link"
+  if "$0" --pid=99999999 --output-dir="${fixture}.link" --observe \
+      >"$fixture/symlink.out" 2>"$fixture/symlink.err"; then
+    fail synthetic-symlink-output-was-admitted
+  fi
+  grep -Eq 'output-dir-(not-canonical|symlink-or-noncanonical)' "$fixture/symlink.err" ||
+    fail synthetic-symlink-rejection-not-diagnostic
+  rm -f "${fixture}.link"
+  [ ! -e "$root/bin/release/$(platform)/.bootstrap-deploy-locks/stage3-gate-selftest" ] ||
+    fail synthetic-test-touched-deployment
+  echo 'stage3-deploy-gate-self-test: PASS — forged candidate rejected without deployment'
+}
+
+if [ "${1:-}" = --self-test ]; then
+  [ "$#" -eq 1 ] || { usage; exit 2; }
+  self_test
+  exit 0
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --pid=*) pid=${1#*=} ;;
+    --source-root=*) source_root=${1#*=} ;;
+    --output-dir=*) output=${1#*=} ;;
+    --planner-receipt=*) planner_receipt=${1#*=} ;;
+    --observe) action=observe ;;
+    --admit-deploy) action=admit-deploy ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage; exit 2 ;;
+  esac
+  shift
+done
+
+case "$pid" in ''|*[!0-9]*|0) fail invalid-pid ;; esac
+[ -n "$output" ] || fail output-dir-required
+source_root_input=$source_root
+output_input=$output
+source_root=$(canonical_dir "$source_root") || fail source-root-not-canonical
+output=$(canonical_dir "$output") || fail output-dir-not-canonical
+[ "$source_root" = "$source_root_input" ] || fail source-root-symlink-or-noncanonical
+root_common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+  fail observer-repository-unavailable
+source_common=$(git -C "$source_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+  fail source-root-is-not-a-worktree
+[ "$source_common" = "$root_common" ] || fail source-root-is-not-this-repository
+[ "$output" = "$output_input" ] || fail output-dir-symlink-or-noncanonical
+case "$output" in "$source_root"/build/*) ;; *) fail output-dir-outside-source-root-build ;; esac
+
+# A live producer owns this lane. Never inspect a partially written candidate,
+# mint receipts, start Stage 4, or acquire the deployment lock while it runs.
+if kill -0 "$pid" 2>/dev/null; then
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  producer_cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  producer_cwd=$(canonical_dir "$producer_cwd" 2>/dev/null || true)
+  output_arg=${output#"$source_root"/}
+  case "$command" in
+    *"$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*"--output=$output_arg"*) ;;
+    *"$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*"--output $output_arg"*) ;;
+    *"$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*--output*)
+      fail live-producer-output-mismatch ;;
+    *"$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*)
+      [ "$output" = "$source_root/build/bootstrap" ] || fail live-producer-output-mismatch ;;
+    *"scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*--output*)
+      [ "$producer_cwd" = "$source_root" ] || fail live-producer-cwd-mismatch
+      case "$command" in
+        *--output="$output_arg"*|*--output\ "$output_arg"*) ;;
+        *) fail live-producer-output-mismatch ;;
+      esac ;;
+    *"scripts/bootstrap/bootstrap-from-scratch.sh"*--stop-after-stage3*)
+      [ "$producer_cwd" = "$source_root" ] || fail live-producer-cwd-mismatch
+      [ "$output" = "$source_root/build/bootstrap" ] || fail live-producer-output-mismatch ;;
+    *)
+    fail live-pid-is-not-the-expected-stage3-producer ;;
+  esac
+  echo "stage3_deploy_gate_status=pending"
+  echo "producer_pid=$pid"
+  echo "output_dir=$output"
+  exit 3
+fi
+
+host_platform=$(platform) || fail unsupported-host
+stage3_dir="$output/stage3/$host_platform"
+[ -d "$stage3_dir" ] && [ ! -L "$stage3_dir" ] || fail stage3-directory-invalid
+candidate=$(contained_file "$stage3_dir/simple" "$output") || fail stage3-candidate-missing-or-unconfined
+manifest=$(contained_file "$stage3_dir/provenance.env" "$output") || fail stage3-provenance-missing-or-unconfined
+
+BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$source_root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+bootstrap_stage3_verify_manifest "$manifest" "$source_root" "$candidate" ||
+  fail stage3-provenance-invalid
+[ "$(bootstrap_stage3_manifest_value schema "$manifest")" = simple-bootstrap-stage3-provenance-v4 ] ||
+  fail stage3-schema-mismatch
+[ "$(bootstrap_stage3_manifest_value status "$manifest")" = pass ] || fail stage3-status-not-pass
+[ "$(bootstrap_stage3_manifest_value artifact_kind "$manifest")" = pure-simple-bootstrap-compiler ] ||
+  fail stage3-not-pure-simple
+[ "$(bootstrap_stage3_manifest_value full_cli_status "$manifest")" = separate-not-proven ] ||
+  fail stage3-full-cli-state-invalid
+[ "$(bootstrap_stage3_manifest_value stage3_sha256 "$manifest")" = \
+  "$(bootstrap_stage3_hash_file "$candidate")" ] || fail stage3-digest-mismatch
+
+# These bound fields collectively identify source revision, selected backend
+# provider, runtime provider, and admitted Stage-2 parent. The canonical
+# verifier above re-hashes every referenced authority and Stage-2 receipt.
+for field in git_head source_fingerprint backend runtime_path native_all_sha256 \
+  stage2_sha256 stage2_admission_receipt_sha256 stage3_build_args_sha256; do
+  value=$(bootstrap_stage3_manifest_value "$field" "$manifest" 2>/dev/null || true)
+  [ -n "$value" ] || fail "stage3-bound-field-missing:$field"
+done
+
+echo "stage3_deploy_gate_status=stage3-admitted"
+echo "stage3_candidate=$candidate"
+echo "stage3_sha256=$(bootstrap_stage3_hash_file "$candidate")"
+echo "stage3_provenance=$manifest"
+echo "source_revision=$(bootstrap_stage3_manifest_value git_head "$manifest")"
+echo "provider_identity=backend:$(bootstrap_stage3_manifest_value backend "$manifest");runtime:$(bootstrap_stage3_manifest_value native_all_sha256 "$manifest")"
+
+[ "$action" = admit-deploy ] || {
+  echo 'next_action=provide-stage4-planner-receipt-and-run-with---admit-deploy'
+  exit 0
+}
+
+[ -n "$planner_receipt" ] || fail stage4-planner-receipt-required
+planner_receipt=$(canonical_file "$planner_receipt") || fail stage4-planner-receipt-not-canonical
+case "$planner_receipt" in "$source_root"/build/*) ;; *) fail stage4-planner-receipt-unconfined ;; esac
+. "$source_root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+bootstrap_planner_v2_verify "$planner_receipt" "$source_root" || fail stage4-planner-receipt-invalid
+[ "$(bootstrap_planner_v2_field target "$planner_receipt")" = //bootstrap:stage4 ] ||
+  fail stage4-planner-target-mismatch
+[ "$(bootstrap_planner_v2_field platform "$planner_receipt")" = "$host_platform" ] ||
+  fail stage4-planner-platform-mismatch
+
+planner_sha=$(bootstrap_stage3_hash_file "$planner_receipt")
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+source_sha=$(bootstrap_stage3_manifest_value source_fingerprint "$manifest")
+backend_name=$(bootstrap_stage3_manifest_value backend "$manifest")
+stage4_binding=$(printf '%s\n' \
+  "planner_sha256=$planner_sha" \
+  "candidate_sha256=$candidate_sha" \
+  "source_fingerprint=$source_sha" \
+  "backend=$backend_name" | bootstrap_stage3_hash_stdin)
+
+# The canonical continuation builds a quarantined full CLI from this admitted
+# Stage 3, verifies source `check`, executes the non-vacuous essential-tools
+# smoke (`test` requires a Results line), re-verifies immutable Stage2/3, then
+# atomically swaps the deployment with a retained `.pre_deploy` rollback copy.
+# It restores the old binary if post-swap smoke or setup fails.
+exec env SIMPLE_BOOTSTRAP_REASON_RECEIPT="$planner_receipt" \
+  SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256="$stage4_binding" \
+  sh "$source_root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --resume-stage4-from-admitted="${output#$source_root/}" \
+    --bootstrap-receipt="$planner_receipt" --backend="$(bootstrap_stage3_manifest_value backend "$manifest")" \
+    --mode=dynload --full-cli --deploy --no-mcp

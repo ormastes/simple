@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+SOURCE="$ROOT/test/01_unit/os/smf/kernel_plugin/signature_policy_native_test.c"
+POLICY_SOURCE="$ROOT/src/os/smf/kernel_plugin/signature_policy.spl"
+BUILD_DIR="${TMPDIR:-/tmp}/simple-kpf-signature-policy-native-$$"
+mkdir -p "$BUILD_DIR"
+trap 'rm -rf "$BUILD_DIR"' EXIT HUP INT TERM
+
+cc -std=c11 -Wall -Wextra -Werror "$SOURCE" -o "$BUILD_DIR/clean"
+"$BUILD_DIR/clean"
+
+cc -std=c11 -Wall -Wextra -Werror -DKPF_MUTATE_SKIP_VERIFICATION \
+    "$SOURCE" -o "$BUILD_DIR/mutated"
+set +e
+"$BUILD_DIR/mutated" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 12 ]; then
+    echo "KPF_SIGNATURE_TRUST_MUTATION: FAIL expected=12 actual=$status" >&2
+    exit 1
+fi
+echo "KPF_SIGNATURE_TRUST_MUTATION: PASS status=$status"
+
+check_policy_source() {
+    source_file=$1
+    grep -F 'if evidence.artifact_digest != policy.expected_artifact_digest:' "$source_file" >/dev/null &&
+    grep -F 'if evidence.publisher_id != policy.trusted_publisher_id:' "$source_file" >/dev/null &&
+    grep -F 'if policy.publisher_revoked:' "$source_file" >/dev/null &&
+    grep -F 'if not evidence.signature_present:' "$source_file" >/dev/null &&
+    grep -F 'if not evidence.signature_verified:' "$source_file" >/dev/null
+}
+
+check_policy_source "$POLICY_SOURCE"
+sed '/if not evidence.signature_verified:/d' "$POLICY_SOURCE" > "$BUILD_DIR/mutated-policy.spl"
+if check_policy_source "$BUILD_DIR/mutated-policy.spl"; then
+    echo "KPF_SIGNATURE_TRUST_SOURCE_MUTATION: FAIL" >&2
+    exit 1
+fi
+echo "KPF_SIGNATURE_TRUST_SOURCE_MUTATION: PASS"

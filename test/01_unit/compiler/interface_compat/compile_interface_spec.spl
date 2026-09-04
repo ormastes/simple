@@ -1,6 +1,7 @@
 """
 ## Purpose and audience
 Purpose: Verify compile_interface_digest acceptance properties.
+Requirements: KPM-REQ-002, KPM-REQ-003, KPM-REQ-009.
 Audience: compiler and tooling engineers who maintain this spec.
 ## Operator workflow
 Run this spec with the test runner and read the per-scenario verdict lines;
@@ -31,17 +32,29 @@ body-only / comment-only / private-decl changes keep the
 compile_interface_digest stable; public signature changes and the
 implementation digest move; declaration insertion order never matters.
 
-Limitation (stated per plan): digests are computed over ApiSurface
-structures directly, not by driving the full parse+semantic pipeline
-from this unit spec.
+The legacy compile digest fixtures use ApiSurface. ABI fixtures additionally
+drive real source through the production parser and HIR lowering before
+calling the typed-HIR extractor.
 """
 
 use std.spec.step
 
 use std.spec.*
-use compiler.tools.api_surface.{ApiSurface, FunctionSignature, ParamSignature}
+use compiler.common.api_surface_contract.{
+    ApiSurface, FunctionSignature, ParamSignature, FieldSignature, StructSignature}
 use compiler.semantics.interface.compile_interface.{compile_interface_digest}
 use compiler.semantics.interface.module_identity.{compute_module_identity}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+
+fn typed_hir_abi_digest(source: text, name: text) -> Result<text, text>:
+    val parsed = parse_full_frontend(source, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    val module = lowering.lower_module(parsed)
+    hir_abi_interface_digest_v1(module)
 
 fn fn_sig(name: text, ptype: text, ret: text, vis: text?) -> FunctionSignature:
     var params: [ParamSignature] = []
@@ -55,6 +68,27 @@ fn surface_a() -> ApiSurface:
     var s = ApiSurface.create("fixture.mod_a")
     s.add_function(fn_sig("alpha", "i64", "i64", nil))
     s.add_function(fn_sig("beta", "text", "bool", nil))
+    s
+
+fn field_sig_with_visibility(name: text, type_name: text, vis: text?) -> FieldSignature:
+    FieldSignature(name: name, type_name: Some(type_name), is_public: true,
+        visibility_display: vis, declared_visibility: vis)
+
+fn field_sig(name: text, type_name: text) -> FieldSignature:
+    field_sig_with_visibility(name, type_name, nil)
+
+fn packet_surface(second_name: text, second_type: text, include_second: bool) -> ApiSurface:
+    var fields: [FieldSignature] = []
+    fields.push(field_sig("tag", "i64"))
+    if include_second:
+        fields.push(field_sig(second_name, second_type))
+    var s = ApiSurface.create("fixture.packet")
+    s.add_struct(StructSignature(name: "Packet", fields: fields))
+    s
+
+fn packet_caller_surface() -> ApiSurface:
+    var s = ApiSurface.create("fixture.packet_caller")
+    s.add_function(fn_sig("send", "Packet", "bool", nil))
     s
 
 val source_a: text = "fn alpha(x: i64) -> i64:\n    x + 1\n\nfn beta(x: text) -> bool:\n    x.len() > 0\n"
@@ -81,6 +115,7 @@ describe "compile_interface_digest acceptance properties":
         val id1 = compute_module_identity(surface_a(), source_a)
         val id2 = compute_module_identity(surface_a(), source_a_body_changed)
         expect id1.compile_interface_digest == id2.compile_interface_digest
+        expect id1.abi_interface_digest == id2.abi_interface_digest
         expect id1.implementation_digest != id2.implementation_digest
         expect id1.source_digest != id2.source_digest
 
@@ -133,10 +168,100 @@ describe "compile_interface_digest acceptance properties":
         expect id1.implementation_digest != id2.implementation_digest
         expect id1.source_digest != id2.source_digest
 
-    it "placeholder abi/semantic digests are domain-separated from compile digest":
+    it "ABI and placeholder semantic digests are domain-separated from compile digest":
         # @req: REQ-COMPILER-INTERFACECOM-001
         step("Verify: placeholder abi/semantic digests are domain-separated from compile digest")
         val id = compute_module_identity(surface_a(), source_a)
         expect id.abi_interface_digest != id.compile_interface_digest
         expect id.compile_semantic_digest != id.compile_interface_digest
         expect id.link_export_digest != id.compile_interface_digest
+
+    it "field append changes provider ABI without changing caller compile interface":
+        val before = compute_module_identity(packet_surface("payload", "text", false), "")
+        val after = compute_module_identity(packet_surface("payload", "text", true), "")
+        val caller_before = compute_module_identity(packet_caller_surface(), "fn send(x: Packet) -> bool: true")
+        val caller_after = compute_module_identity(packet_caller_surface(), "fn send(x: Packet) -> bool: true")
+        expect before.abi_interface_digest != after.abi_interface_digest
+        expect caller_before.compile_interface_digest == caller_after.compile_interface_digest
+
+    it "field rename changes compile and ABI digests":
+        val before = compute_module_identity(packet_surface("payload", "text", true), "")
+        val after = compute_module_identity(packet_surface("body", "text", true), "")
+        expect before.compile_interface_digest != after.compile_interface_digest
+        expect before.abi_interface_digest != after.abi_interface_digest
+
+    it "field type participates in the ordinal ABI encoding":
+        val text_field = compute_module_identity(packet_surface("payload", "text", true), "")
+        val bytes_field = compute_module_identity(packet_surface("payload", "[u8]", true), "")
+        expect text_field.abi_interface_digest != bytes_field.abi_interface_digest
+
+    it "field reorder changes the ABI digest":
+        var first_fields: [FieldSignature] = []
+        first_fields.push(field_sig("tag", "i64"))
+        first_fields.push(field_sig("payload", "text"))
+        var second_fields: [FieldSignature] = []
+        second_fields.push(field_sig("payload", "text"))
+        second_fields.push(field_sig("tag", "i64"))
+        var first = ApiSurface.create("fixture.packet")
+        first.add_struct(StructSignature(name: "Packet", fields: first_fields))
+        var second = ApiSurface.create("fixture.packet")
+        second.add_struct(StructSignature(name: "Packet", fields: second_fields))
+        val first_id = compute_module_identity(first, "")
+        val second_id = compute_module_identity(second, "")
+        expect first_id.abi_interface_digest != second_id.abi_interface_digest
+
+    it "declaration iteration order does not change the ABI digest":
+        var reversed = ApiSurface.create("fixture.mod_a")
+        reversed.add_function(fn_sig("beta", "text", "bool", nil))
+        reversed.add_function(fn_sig("alpha", "i64", "i64", nil))
+        val original_id = compute_module_identity(surface_a(), "")
+        val reversed_id = compute_module_identity(reversed, "")
+        expect original_id.abi_interface_digest == reversed_id.abi_interface_digest
+
+    it "private record fields participate in exported value layout":
+        var public_only_fields: [FieldSignature] = []
+        public_only_fields.push(field_sig("tag", "i64"))
+        var with_private_fields: [FieldSignature] = []
+        with_private_fields.push(field_sig("tag", "i64"))
+        with_private_fields.push(field_sig_with_visibility("cache", "text", Some("private")))
+        var public_only = ApiSurface.create("fixture.packet")
+        public_only.add_struct(StructSignature(name: "Packet", fields: public_only_fields))
+        var with_private = ApiSurface.create("fixture.packet")
+        with_private.add_struct(StructSignature(name: "Packet", fields: with_private_fields))
+        val public_only_id = compute_module_identity(public_only, "")
+        val with_private_id = compute_module_identity(with_private, "")
+        expect public_only_id.compile_interface_digest == with_private_id.compile_interface_digest
+        expect public_only_id.abi_interface_digest != with_private_id.abi_interface_digest
+
+describe "typed-HIR ABI interface extraction":
+    it "ignores function body changes after real parsing and HIR lowering":
+        val first = typed_hir_abi_digest(
+            "pub fn answer(x: i64) -> i64:\n    x + 1\n", "typed_body")
+        val second = typed_hir_abi_digest(
+            "pub fn answer(x: i64) -> i64:\n    x + 2\n", "typed_body")
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        expect(first.unwrap()).to_equal(second.unwrap())
+        print("KPM_PHASE1_BODY_INSENSITIVE_RECEIPT=PASS")
+
+    it "changes when a typed exported field is appended renamed retyped or reordered":
+        val base = typed_hir_abi_digest(
+            "pub struct Packet:\n    tag: i64\n    payload: text\n", "typed_packet").unwrap()
+        val appended = typed_hir_abi_digest(
+            "pub struct Packet:\n    tag: i64\n    payload: text\n    flags: u32\n", "typed_packet").unwrap()
+        val renamed = typed_hir_abi_digest(
+            "pub struct Packet:\n    tag: i64\n    body: text\n", "typed_packet").unwrap()
+        val retyped = typed_hir_abi_digest(
+            "pub struct Packet:\n    tag: i64\n    payload: [u8]\n", "typed_packet").unwrap()
+        val reordered = typed_hir_abi_digest(
+            "pub struct Packet:\n    payload: text\n    tag: i64\n", "typed_packet").unwrap()
+        expect(appended == base).to_equal(false)
+        expect(renamed == base).to_equal(false)
+        expect(retyped == base).to_equal(false)
+        expect(reordered == base).to_equal(false)
+        print("KPM_PHASE1_FIELD_SENSITIVE_RECEIPT=PASS")
+
+    it "fails closed when an exported signature retains an unresolved HIR type":
+        val digest = typed_hir_abi_digest(
+            "pub fn broken(value: MissingType) -> i64:\n    0\n", "typed_unresolved")
+        expect(digest.is_err()).to_equal(true)

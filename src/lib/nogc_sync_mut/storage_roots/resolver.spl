@@ -1,0 +1,153 @@
+"""Pure centralized storage-root resolution and validation."""
+
+use std.common.storage_roots.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.storage_roots.model.*
+
+fn _slash(path: text) -> text:
+    path.replace("\\", "/")
+
+fn _is_windows_absolute(path: text) -> bool:
+    path.len() >= 3 and path.substring(1, 2) == ":" and path.substring(2, 3) == "/"
+
+fn _is_absolute(path: text) -> bool:
+    path.starts_with("/") or _is_windows_absolute(path)
+
+fn _lexical_canonical(path: text) -> text?:
+    val slashed = _slash(path.trim())
+    if slashed == "" or not _is_absolute(slashed):
+        return nil
+    val prefix = if _is_windows_absolute(slashed): slashed.substring(0, 3) else: "/"
+    val start = if _is_windows_absolute(slashed): 3 else: 1
+    val parts = slashed.substring(start).split("/")
+    var normalized: [text] = []
+    for part in parts:
+        if part == "" or part == ".":
+            continue
+        if part == "..":
+            if normalized.len() == 0:
+                return nil
+            normalized.pop()
+        else:
+            normalized.push(part)
+    if normalized.len() == 0:
+        return prefix
+    val body = normalized.join("/")
+    if prefix == "/": "/" + body else: prefix + body
+
+fn _join(base: text, suffix: text) -> text:
+    if base.ends_with("/"): base + suffix else: base + "/" + suffix
+
+fn _same_path(left: text, right: text, platform: StoragePlatform) -> bool:
+    if platform == StoragePlatform.Windows:
+        left.lower() == right.lower()
+    else:
+        left == right
+
+fn _hex_value(ch: text) -> u64:
+    val digits = "0123456789abcdef"
+    val index = digits.find(ch.lower())
+    if index < 0: 0u64 else: index.to_u64()
+
+fn _hex_word(hex: text, start: i64) -> u64:
+    var value = 0u64
+    var offset = 0
+    while offset < 16:
+        value = (value << 4u64) | _hex_value(hex.substring(start + offset, start + offset + 1))
+        offset = offset + 1
+    value
+
+fn _identity(worktree: text, metadata: text) -> Digest256:
+    val digest = sha256_text("storage-root-v1\n" + worktree + "\n" + metadata)
+    Digest256(
+        w0: _hex_word(digest, 0),
+        w1: _hex_word(digest, 16),
+        w2: _hex_word(digest, 32),
+        w3: _hex_word(digest, 48),
+    )
+
+fn _selected(cli: text?, environment: text?) -> (text?, text):
+    if cli != nil:
+        return (cli, "cli")
+    if environment != nil:
+        return (environment, "environment")
+    (nil, "platform-default")
+
+fn _default_user(input: StorageRootResolverInput) -> text?:
+    val environment = input.environment
+    if input.platform == StoragePlatform.MacOS:
+        if environment.home == nil or environment.home! == "": return nil
+        return _join(environment.home!, "Library/Caches/simple/storage")
+    if input.platform == StoragePlatform.Linux:
+        if environment.xdg_cache_home != nil and environment.xdg_cache_home! != "":
+            return _join(environment.xdg_cache_home!, "simple/storage")
+        if environment.home == nil or environment.home! == "": return nil
+        return _join(environment.home!, ".cache/simple/storage")
+    if input.platform == StoragePlatform.Windows:
+        if environment.local_app_data == nil or environment.local_app_data! == "": return nil
+        return _join(environment.local_app_data!, "Simple/storage")
+    "/simple/storage"
+
+fn _receipt(kind: StorageRootKind, path: text, source: text) -> StorageReceipt:
+    StorageReceipt(
+        kind: StorageReceiptKind.Resolved,
+        root_kind: kind,
+        path: CanonicalPath(value: path),
+        operation: OperationId(value: "storage-root-resolve-v1"),
+        detail: "source=" + source + ";policy=1",
+    )
+
+pub fn inspect_storage_roots(input: StorageRootResolverInput) -> Result<StorageRootResolution, StorageRootError>:
+    val selected_user = _selected(input.cli.user_root, input.environment.user_root)
+    val selected_worktree = _selected(input.cli.worktree_root, input.environment.worktree_root)
+    if selected_user[0] != nil and selected_user[0]! == "":
+        return Err(StorageRootError.EmptyExplicitRoot)
+    if selected_worktree[0] != nil and selected_worktree[0]! == "":
+        return Err(StorageRootError.EmptyExplicitRoot)
+
+    val default_user = _default_user(input)
+    val user_raw = if selected_user[0] != nil: selected_user[0] else: default_user
+    if user_raw == nil or user_raw! == "":
+        return Err(StorageRootError.UnsetDefaultUnavailable)
+    val canonical_worktree = _lexical_canonical(input.canonical_worktree)
+    if canonical_worktree == nil:
+        return Err(StorageRootError.InvalidWorktreeIdentity)
+    val worktree_raw = if selected_worktree[0] != nil:
+        selected_worktree[0]
+    else:
+        Some(_join(canonical_worktree!, ".simple/storage"))
+    val user_path = _lexical_canonical(user_raw!)
+    val worktree_path = _lexical_canonical(worktree_raw!)
+    if user_path == nil or worktree_path == nil:
+        return Err(StorageRootError.UnsafeRoot)
+    if user_path! == "/" or worktree_path! == "/":
+        return Err(StorageRootError.UnsafeRoot)
+    if _same_path(user_path!, worktree_path!, input.platform):
+        return Err(StorageRootError.RootsNotDistinct)
+    if _same_path(user_path!, canonical_worktree!, input.platform):
+        return Err(StorageRootError.UnsafeRoot)
+    val home = input.environment.home
+    if home != nil:
+        val canonical_home = _lexical_canonical(home!)
+        if canonical_home != nil and _same_path(user_path!, canonical_home!, input.platform):
+            return Err(StorageRootError.UnsafeRoot)
+
+    val user_source = if selected_user[0] != nil: RootSource.Explicit else: RootSource.PlatformDefault
+    val worktree_source = if selected_worktree[0] != nil: RootSource.Explicit else: RootSource.PlatformDefault
+    val roots = StorageRoots(
+        user_root: CanonicalPath(value: user_path!),
+        worktree_root: CanonicalPath(value: worktree_path!),
+        user_source: user_source,
+        worktree_source: worktree_source,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: _identity(canonical_worktree!, input.worktree_metadata),
+    )
+    val receipts = [
+        _receipt(StorageRootKind.User, user_path!, selected_user[1]),
+        _receipt(StorageRootKind.Worktree, worktree_path!, selected_worktree[1]),
+    ]
+    val inspection = StorageRootInspection(roots: roots, warnings: [], legacy_inputs: [])
+    Ok(StorageRootResolution(roots: roots, inspection: inspection, receipts: receipts))
+
+pub fn resolve_storage_roots(input: StorageRootResolverInput) -> Result<StorageRoots, StorageRootError>:
+    inspect_storage_roots(input).map(_.roots)

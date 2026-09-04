@@ -29,7 +29,11 @@ EOF
 }
 
 strategy=normal
-output_arg=build/bootstrap
+strategy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+strategy_repo_root=$(CDPATH= cd -- "${strategy_dir}/../.." && pwd -P) || exit 70
+. "${strategy_dir}/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "${strategy_repo_root}" || exit 70
+output_arg=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strategy=*) strategy=${1#*=} ;;

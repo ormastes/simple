@@ -1128,6 +1128,14 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+extern int32_t rt_transient_raw_scope_begin(void);
+extern int32_t rt_transient_raw_scope_pause(void);
+extern int64_t rt_transient_raw_words(
+    int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr);
+extern int32_t rt_transient_raw_promote(uintptr_t ptr);
+extern int32_t rt_transient_raw_scope_end(void);
+#endif
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -1357,6 +1365,9 @@ int8_t rt_transient_array_scope_begin(void) {
         }
     }
     if (next_id == 0) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_scope_begin()) return 0;
+#endif
     rt_core_transient_array_scope_id = next_id;
     rt_core_transient_array_scope_active = 1;
     rt_core_transient_array_scope_paused = 0;
@@ -1365,6 +1376,9 @@ int8_t rt_transient_array_scope_begin(void) {
 
 int8_t rt_transient_array_scope_pause(void) {
     if (!rt_core_transient_array_scope_active) return 0;
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_scope_pause()) return 0;
+#endif
     rt_core_transient_array_scope_paused = 1;
     return 1;
 }
@@ -1376,7 +1390,11 @@ int8_t rt_transient_array_scope_end(void) {
     rt_core_transient_array_scope_paused = 0;
 
     rt_core_reclaim_transient_immortal(scope_id);
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    if (!rt_transient_raw_scope_end()) return 0;
+#else
     rt_core_reclaim_transient_raw();
+#endif
     return 1;
 }
 
@@ -2043,6 +2061,16 @@ static int rt_core_transient_plan_push(
 
 /* 1 = tracked node, 0 = immediate or persistent string, -1 = invalid node. */
 static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    uintptr_t raw_ptr = 0;
+    int64_t word_count = rt_transient_raw_words(value, NULL, &raw_ptr);
+    if (word_count >= 0) {
+        *node = (RtCoreTransientNode){
+            (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
+            (size_t)word_count * sizeof(uintptr_t)};
+        return 1;
+    }
+#else
     uintptr_t raw = (uintptr_t)value;
     uintptr_t raw_ptr = raw & RT_VALUE_TAG_MASK ? raw & ~RT_VALUE_TAG_MASK : raw;
     RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
@@ -2052,6 +2080,7 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
             allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
         return 1;
     }
+#endif
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -2152,9 +2181,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
                 case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+                    if (!rt_transient_raw_promote((uintptr_t)node.ptr)) ok = 0;
+#else
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
                     if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+#endif
                     break;
                 }
             }
@@ -4076,19 +4109,32 @@ int64_t rt_string_to_upper(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
-/* rt_text_to_lower_ascii / rt_text_to_upper_ascii / rt_text_is_ascii are NOT
- * defined here.  They were added to this TU by 87b2aba58e3 to close NULL-GOT
- * slots at a time when runtime_simd_case.c was not an archive member; that TU
- * is now compiled unconditionally into every lane that compiles this one
- * (the seed core-C list in native_project/tools.rs, and the pure-Simple
- * backend list in 70.backend/backend/runtime_compiler.spl), so both copies
- * landed in the same archive.  That broke the Stage4 single-owner contract:
- * "Stage4 archive core defines `rt_text_is_ascii` 2 times".
- *
- * runtime_simd_case.c is the canonical owner -- it dispatches to the SIMD
- * kernels and caches the ASCII flag in the string's reserved field, whereas
- * these were plain scalar fallbacks.  Deleting the duplicates here removes no
- * ABI name from the tree; all three stay defined in runtime_simd_case.c. */
+/* Canonical RuntimeValue ASCII helpers used by std.sffi.system.  The Rust
+ * hosted runtime exposed these names while core-C only exposed the older
+ * rt_string_to_{lower,upper} spelling, leaving native tool closures with NULL
+ * GOT slots.  Keep both spellings on the same implementation. */
+int64_t rt_text_to_lower_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 1);
+}
+
+int64_t rt_text_to_upper_ascii(int64_t value) {
+    return rt_string_ascii_case(value, 0);
+}
+
+int64_t rt_text_is_ascii(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) {
+        int64_t promoted;
+        if (rt_string_promote_raw_receiver(value, &promoted)) {
+            return rt_text_is_ascii(promoted);
+        }
+        return 0;
+    }
+    for (uint64_t i = 0; i < s->len; i++) {
+        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    }
+    return 1;
+}
 
 int64_t rt_string_to_float(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
@@ -11474,6 +11520,90 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     return ok;
 }
 
+int rt_file_copy_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int output = open(dst,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) { close(input); return 0; }
+    int ok = 1;
+    unsigned char buffer[65536];
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            ok = 0; break;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(output, buffer + offset,
+                (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) { ok = 0; break; }
+            offset += written;
+        }
+        if (!ok) break;
+    }
+    if (ok && fsync(output) != 0) ok = 0;
+    if (close(output) != 0) ok = 0;
+    if (close(input) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    return ok;
+#endif
+}
+
+int rt_file_link_create_excl_no_follow(
+        const char* source, int64_t source_len,
+        const char* destination, int64_t destination_len) {
+#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    (void)source; (void)source_len; (void)destination; (void)destination_len;
+    return 0;
+#else
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    int input = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat source_stat;
+    if (input < 0 || fstat(input, &source_stat) != 0 ||
+            !S_ISREG(source_stat.st_mode)) {
+        if (input >= 0) close(input);
+        return 0;
+    }
+    int ok = link(src, dst) == 0;
+    struct stat destination_stat;
+    if (ok && (lstat(dst, &destination_stat) != 0 ||
+            !S_ISREG(destination_stat.st_mode) ||
+            destination_stat.st_dev != source_stat.st_dev ||
+            destination_stat.st_ino != source_stat.st_ino)) {
+        unlink(dst);
+        ok = 0;
+    }
+    close(input);
+    return ok;
+#endif
+}
+
 /* Lower-case hex SHA-256 of the file's bytes as a runtime string; nil when
  * the file cannot be read (Rust: `format!("{:x}", digest)`). Streams the file
  * through the same compressor rt_tls13_sha256 uses. */
@@ -11715,20 +11845,6 @@ double rt_pow(double a, double b) { return pow(a, b); }
 int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     if (addr <= 0 || offset < 0) abort();
     int64_t value;
-    memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
-    return value;
-}
-
-/* Mirrors runtime_memory.c:582 byte-for-byte.  This TU carries the whole
- * rt_ptr_* fallback family for lanes built WITHOUT
- * -DSIMPLE_RUNTIME_MEMORY_OWNER=1 (runtime_memory.c is the owner when that
- * macro is set, and the two are mutually exclusive by construction, so this
- * is a fallback rather than a divergent second implementation).  read_i32 was
- * simply omitted, leaving it the one member of the family with no core-C
- * provider at all -- core_defined.get("rt_ptr_read_i32") was None, not 2. */
-int32_t rt_ptr_read_i32(int64_t addr, int64_t offset) {
-    if (addr <= 0 || offset < 0) abort();
-    int32_t value;
     memcpy(&value, (char*)(uintptr_t)addr + offset, sizeof(value));
     return value;
 }

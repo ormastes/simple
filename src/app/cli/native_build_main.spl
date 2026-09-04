@@ -4,7 +4,7 @@ use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, file_delete}
 use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all}
@@ -118,6 +118,7 @@ fn resolve_simple_binary() -> text:
     "bin/simple"
 
 val OUTPUT_LIMIT = 12000
+var native_build_stderr_spill_seq: i64 = 0
 
 fn native_build_text_eq(a: text, b: text) -> bool:
     a.len() == b.len() and a.starts_with(b)
@@ -154,7 +155,7 @@ fn print_help():
     print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
     print "  --mode <name>        Build mode: dynload (default) or one-binary"
-    print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+    print "  --cache-dir <dir>    Native cache directory (default: SIMPLE_USER_STORAGE_ROOT/cache/compiler/native-build/v1)"
     print "  --timeout <secs>     Worker timeout in seconds (default 7200)"
     print "  --emit-object        Emit relocatable object output"
     print "  --emit-archive       Emit a static archive instead of an executable"
@@ -245,6 +246,18 @@ fn output_path_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+pub fn native_build_strict_stub_evidence(output: text) -> bool:
+    output.contains("stub functions for unresolved symbols") or
+        output.contains("Unresolved symbol preview:") or
+        output.contains("fabricated as weak stubs") or
+        output.contains("fabricated stub") or
+        output.contains("stub fallback")
+
+pub fn native_build_strict_stub_violation(strict_no_stub: bool, stdout: text, stderr: text) -> bool:
+    strict_no_stub and
+        (native_build_strict_stub_evidence(stdout) or
+            native_build_strict_stub_evidence(stderr))
+
 # Keep the front-end cache beside the explicitly selected native-build cache.
 # Parse shards inherit this environment, so an isolated bootstrap worktree can
 # reuse its warmed parser entries across parent/child processes.
@@ -266,6 +279,11 @@ fn native_build_line_is_diagnostic(line: text) -> bool:
     an extra kept line only costs a few bytes in the preserved block."""
     line.contains("error:") or line.contains("error :") or line.contains("[ERROR]")
         or line.contains("warning:") or line.contains("[WARN]")
+        or line.contains("[hir-fatal")
+        or line.contains("[post-hir-validation-fatal")
+        or line.contains("[bootstrap-phase3-error")
+        or line.contains("[mir-type-invariant]")
+        or line.contains("[mir-tag-probe]")
         or line.contains("undefined field") or line.contains("type 'nil'")
         or line.contains("MIR error") or line.contains("MIR lowering error")
         or line.contains("panic") or line.contains("Traceback")
@@ -311,19 +329,35 @@ fn eprint_bounded(output: text):
     # TEMP (or TMP). Falling through to "/tmp" there made file_write fail on
     # every truncated build, so the FULL stderr was lost and 1.3 MB of
     # diagnostics were dropped from the middle (measured 2026-08-31 on the
-    # lint_entry native-build). Order matters: TMPDIR first keeps POSIX
-    # behaviour byte-identical (TEMP/TMP are normally unset on Linux/macOS).
+    # lint_entry native-build). A provenance-bound native cache is preferred
+    # when available so cleanup of TMPDIR cannot erase the full stream; the
+    # platform temp variables remain the portable fallback.
+    val cache_dir_env = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     val tmpdir_env = env_get("TMPDIR") ?? ""
     val temp_env = env_get("TEMP") ?? ""
     val tmp_env = env_get("TMP") ?? ""
     var spill_root = "/tmp"
-    if tmpdir_env != "":
+    if cache_dir_env != "":
+        val durable_diagnostic_dir = "{cache_dir_env}/diagnostics"
+        if dir_create_all(durable_diagnostic_dir):
+            spill_root = durable_diagnostic_dir
+        elif tmpdir_env != "":
+            spill_root = tmpdir_env
+        elif temp_env != "":
+            spill_root = temp_env
+        elif tmp_env != "":
+            spill_root = tmp_env
+    elif tmpdir_env != "":
         spill_root = tmpdir_env
     elif temp_env != "":
         spill_root = temp_env
     elif tmp_env != "":
         spill_root = tmp_env
-    val spill_path = "{spill_root}/native-build-stderr-{getpid()}.log"
+    native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+    var spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
+    while file_exists(spill_path):
+        native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
+        spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
     if file_write(spill_path, output):
         eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
     else:
@@ -443,7 +477,10 @@ fn parse_shard_queue_dir() -> text:
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/frontend"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            return ""
+        root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/frontend"
     val dir = "{root}/queue-{getpid()}"
     if not dir_create_all(dir):
         return ""
@@ -546,7 +583,10 @@ fn hir_shard_queue_dir() -> text:
     if root == "":
         val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
         val lane_name = if lane == "": "default" else: lane
-        root = "build/bootstrap/native_cache/{lane_name}/hir"
+        val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+        if user_root == "":
+            return ""
+        root = "{user_root}/cache/compiler/native-build/v1/{lane_name}/hir"
     val dir = "{root}/queue-{getpid()}"
     if not dir_create_all(dir):
         return ""
@@ -651,6 +691,14 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
     val output_path = output_path_arg(args)
     val output_ok = output_path != "" and file_exists(output_path)
+    val strict_no_stub = (env_get("SIMPLE_NO_STUB_FALLBACK") ?? "") == "1"
+    if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
+        if output_ok:
+            file_delete(output_path)
+        env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+        eprint "error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence."
+        eprint "  The worker reported success, but strict mode forbids publishing or caching a fabricated binary."
+        return 1
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
     env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)

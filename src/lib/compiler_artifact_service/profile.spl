@@ -1,0 +1,59 @@
+use std.common.crypto.sha256.{sha256_text}
+
+struct ArtifactServiceProfileV1:
+    profile_name: text
+    compatibility_id: text
+    pools: [text]
+    foreground_priority: i64
+    daemon_optional: bool
+    cas_namespace: text
+    max_workers: i64
+    memory_budget_bytes: i64
+    frame_budget_bytes: i64
+
+fn artifact_service_profile_v1(
+    profile_name: text, compatibility_id: text, pools: [text],
+    foreground_priority: i64, daemon_optional: bool
+) -> ArtifactServiceProfileV1:
+    ArtifactServiceProfileV1(
+        profile_name, compatibility_id, pools, foreground_priority,
+        daemon_optional, "host-shared-project-cas-v1", 4,
+        512 * 1024 * 1024, 4 * 1024 * 1024)
+
+fn artifact_service_profile_validate_v1(profile: ArtifactServiceProfileV1) -> text:
+    if profile.profile_name == "" or profile.compatibility_id == "" or profile.cas_namespace == "":
+        return "profile-identity-missing"
+    if profile.profile_name.contains("|") or profile.profile_name.contains("\n") or
+            profile.compatibility_id.contains("|") or profile.compatibility_id.contains("\n") or
+            profile.cas_namespace.contains("|") or profile.cas_namespace.contains("\n"):
+        return "profile-identity-invalid"
+    if profile.pools.len() == 0:
+        return "profile-pools-missing"
+    var prior = ""
+    for pool in profile.pools.sorted():
+        if pool == "" or pool.contains("|") or pool.contains("\n") or pool == prior:
+            return "profile-pools-invalid"
+        prior = pool
+    if profile.foreground_priority < 0:
+        return "profile-priority-invalid"
+    if profile.max_workers <= 0:
+        return "profile-workers-invalid"
+    if profile.memory_budget_bytes <= 0:
+        return "profile-memory-budget-invalid"
+    if profile.frame_budget_bytes <= 0 or profile.frame_budget_bytes > 4 * 1024 * 1024:
+        return "profile-frame-budget-invalid"
+    "ok"
+
+fn artifact_service_profile_digest_v1(profile: ArtifactServiceProfileV1) -> text:
+    if artifact_service_profile_validate_v1(profile) != "ok":
+        return ""
+    sha256_text([
+        "simple-artifact-service-profile-v1", profile.profile_name,
+        profile.compatibility_id, profile.pools.sorted().join(","),
+        profile.foreground_priority.to_text(), profile.daemon_optional.to_text(),
+        profile.cas_namespace, profile.max_workers.to_text(),
+        profile.memory_budget_bytes.to_text(), profile.frame_budget_bytes.to_text(),
+    ].join("|"))
+
+export ArtifactServiceProfileV1, artifact_service_profile_v1
+export artifact_service_profile_validate_v1, artifact_service_profile_digest_v1

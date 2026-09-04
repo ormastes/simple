@@ -1,0 +1,93 @@
+#!/bin/sh
+# Publish the Stage2 parent receipts from an actual admitted producer.
+set -eu
+
+[ "$#" -eq 8 ] || {
+    echo "usage: $0 CANDIDATE ADMISSION SOURCE RUNTIME TOOL SANITY PROVENANCE AUTHORITY" >&2
+    exit 64
+}
+
+candidate=$1
+admission=$2
+source_snapshot=$3
+runtime_snapshot=$4
+tool_authority=$5
+sanity_receipt=$6
+provenance_receipt=$7
+authority=$8
+
+case "$authority" in
+    explicit-full-bootstrap-stage2-trust-root|\
+    admitted-pure-simple-runtime-stage2-trust-root) ;;
+    *) echo "error: unsupported Stage2 parent authority: $authority" >&2; exit 64 ;;
+esac
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+field() {
+    [ "$(grep -c "^$1=" "$admission" 2>/dev/null || true)" -eq 1 ] || return 1
+    sed -n "s/^$1=//p" "$admission"
+}
+
+for input in "$candidate" "$admission" "$source_snapshot" \
+    "$runtime_snapshot" "$tool_authority"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || exit 1
+    [ "$(bootstrap_stage3_canonical_file "$input")" = "$input" ] || exit 1
+done
+
+[ "$(field schema)" = simple-bootstrap-stage2-admission-v2 ]
+[ "$(field status)" = admitted ]
+[ "$(field candidate_path)" = "$candidate" ]
+[ "$(field source_snapshot_path)" = "$source_snapshot" ]
+[ "$(field runtime_snapshot_path)" = "$runtime_snapshot" ]
+[ "$(field tool_authority_path)" = "$tool_authority" ]
+
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+admission_sha=$(bootstrap_stage3_hash_file "$admission")
+source_sha=$(bootstrap_stage3_hash_file "$source_snapshot")
+runtime_sha=$(bootstrap_stage3_hash_file "$runtime_snapshot")
+tool_sha=$(bootstrap_stage3_hash_file "$tool_authority")
+
+[ "$(field candidate_sha256)" = "$candidate_sha" ]
+[ "$(field source_snapshot_sha256)" = "$source_sha" ]
+[ "$(field runtime_snapshot_sha256)" = "$runtime_sha" ]
+[ "$(field tool_authority_sha256)" = "$tool_sha" ]
+
+[ ! -L "$sanity_receipt" ] && [ ! -L "$provenance_receipt" ]
+sanity_tmp="${sanity_receipt}.tmp.$$"
+provenance_tmp="${provenance_receipt}.tmp.$$"
+published_provenance=0
+cleanup() {
+    rm -f "$sanity_tmp" "$provenance_tmp"
+    if [ "$published_provenance" -eq 1 ]; then rm -f "$provenance_receipt"; fi
+}
+trap cleanup EXIT HUP INT TERM
+umask 077
+{
+    echo 'schema=simple-bootstrap-stage2-parent-sanity-v1'
+    echo 'stage2-sanity: pass'
+    echo "candidate_sha256=$candidate_sha"
+    echo "admission_receipt_path=$admission"
+    echo "admission_receipt_sha256=$admission_sha"
+} >"$sanity_tmp"
+{
+    echo 'schema=simple-bootstrap-stage2-parent-provenance-v1'
+    echo 'stage2-provenance: pure-simple'
+    echo "authority=$authority"
+    echo "candidate_sha256=$candidate_sha"
+    echo "admission_receipt_path=$admission"
+    echo "source_snapshot_sha256=$source_sha"
+    echo "runtime_snapshot_sha256=$runtime_sha"
+    echo "tool_authority_sha256=$tool_sha"
+    echo "admission_receipt_sha256=$admission_sha"
+} >"$provenance_tmp"
+chmod 400 "$sanity_tmp" "$provenance_tmp"
+mv -f "$provenance_tmp" "$provenance_receipt"
+published_provenance=1
+mv -f "$sanity_tmp" "$sanity_receipt"
+published_provenance=0
+trap - EXIT HUP INT TERM

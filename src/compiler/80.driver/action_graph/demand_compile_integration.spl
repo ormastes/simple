@@ -1,0 +1,313 @@
+use compiler.driver.action_graph.build_action_v1.{
+    BuildActionPoolV1, BuildActionV1
+}
+use compiler.driver.action_graph.coordinator.{
+    BuildActionCoordinatorV1, BuildPoolBudgetV1,
+    coordinator_complete_v1, coordinator_diagnostics_v1, coordinator_new_v1
+}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1
+}
+use compiler.driver.backend.demand_backend_plan.{
+    DemandBackendIdentityV1, DemandBackendPlanV1, DemandBaselineBackendV1,
+    ForegroundBackendBudgetV1,
+    demand_backend_identity_digest_v1, demand_backend_plan_v1
+}
+use compiler.driver.backend.native_promotion_queue.{
+    NativePromotionQueueV1, NativePromotionRequestV1,
+    native_promotion_enqueue_v1
+}
+use compiler.driver.cache.package_index_route.{
+    PackageArchiveAdmissionV1, PackageIndexRouteV1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1
+}
+use compiler.driver.action_graph.scc_compile_outputs.{
+    SccCompileOutputsV1, scc_compile_outputs_publish_v1
+}
+use compiler.mir.admission.mir_admission_v1.{MirAdmissionV1}
+use compiler.driver.perf.demand_compile_counters.{
+    DemandCompileCountersV1, demand_compile_counter_add_phase_v1,
+    demand_compile_counter_add_phase_owned_v1,
+    demand_compile_counter_now_ns_v1,
+    demand_compile_counters_empty_v1
+}
+
+struct DemandCompileExecutionV1:
+    valid: bool
+    reason: text
+    coordinator: BuildActionCoordinatorV1?
+    backend_plan: DemandBackendPlanV1?
+    promotion_queue: NativePromotionQueueV1
+    baseline_action_id: text
+    counters: DemandCompileCountersV1
+    backend_identity: DemandBackendIdentityV1?
+    foreground_budget: ForegroundBackendBudgetV1?
+    build_ordinal: i64
+    mir_admission_digest: text
+    total_started_ns: i64
+    baseline_started_ns: i64
+
+struct DemandCompileCompletionV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
+    reason: text
+
+struct DemandCompileFinalizeV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
+
+struct DemandCompileSccCompletionV1:
+    execution: DemandCompileExecutionV1
+    accepted: bool
+    reason: text
+
+fn demand_archive_action_id_v1(package_identity: text) -> text:
+    "archive:{package_identity}"
+
+fn demand_source_action_id_v1(source_path: text) -> text:
+    "source:{source_path}"
+
+fn demand_compile_begin_v1(
+    route: PackageIndexRouteV1, identity: DemandBackendIdentityV1,
+    foreground_budget: ForegroundBackendBudgetV1,
+    bytecode_compatible: bool, cranelift_compatible: bool,
+    llvm_explicit: bool, build_ordinal: i64
+) -> DemandCompileExecutionV1:
+    val total_started_ns = demand_compile_counter_now_ns_v1()
+    var counters = demand_compile_counters_empty_v1()
+    val plan = demand_backend_plan_v1(
+        identity, foreground_budget, bytecode_compatible,
+        cranelift_compatible, llvm_explicit)
+    if not route.valid or not plan.valid or build_ordinal < 0:
+        return DemandCompileExecutionV1(
+            false, if not route.valid: route.reason else: plan.reason,
+            nil, nil, NativePromotionQueueV1([]), "", counters,
+            nil, nil, -1, "", total_started_ns, 0)
+    val started_ns = demand_compile_counter_now_ns_v1()
+    var actions: [BuildActionV1] = []
+    var dependencies: [text] = []
+    for admission in route.archive_admissions:
+        counters.cache_hit_count = counters.cache_hit_count + 1
+        val action_id = demand_archive_action_id_v1(admission.package_identity)
+        dependencies = dependencies.push(action_id)
+        actions = actions.push(BuildActionV1(
+            action_id, "pinned-archive-load", [admission.archive_path], [],
+            [admission.load.receipt!.archive_digest], BuildActionPoolV1.io,
+            foreground_budget.priority, identity.snapshot_revision,
+            foreground_budget.memory_bytes, admission.load.receipt!.archive_digest))
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
+    for source_path in route.source_paths:
+        counters.cache_miss_count = counters.cache_miss_count + 1
+        val action_id = demand_source_action_id_v1(source_path)
+        dependencies = dependencies.push(action_id)
+        actions = actions.push(BuildActionV1(
+            action_id, "frozen-source-scc", [source_path], [], [],
+            BuildActionPoolV1.semantic, foreground_budget.priority,
+            identity.snapshot_revision, foreground_budget.memory_bytes, ""))
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
+    val baseline_action_id = "baseline:{plan.baseline_action_digest}"
+    actions = actions.push(BuildActionV1(
+        baseline_action_id, plan.baseline_action_digest, [],
+        dependencies.sorted(), [plan.baseline_action_digest],
+        if plan.baseline_backend == DemandBaselineBackendV1.Cranelift:
+            BuildActionPoolV1.cranelift
+        else:
+            BuildActionPoolV1.mir,
+        foreground_budget.priority, identity.snapshot_revision,
+        foreground_budget.memory_bytes, ""))
+    counters.action_scheduled_count = counters.action_scheduled_count + 1
+    val provisional = PersistedBuildGraphV1(
+        "pending", "", identity.snapshot_revision, actions)
+    val graph = PersistedBuildGraphV1(
+        persisted_graph_digest_v1(provisional), "",
+        identity.snapshot_revision, actions)
+    val budgets = [
+        BuildPoolBudgetV1(BuildActionPoolV1.io, 8, foreground_budget.memory_bytes),
+        BuildPoolBudgetV1(BuildActionPoolV1.semantic, 4, foreground_budget.memory_bytes),
+        BuildPoolBudgetV1(BuildActionPoolV1.mir, 1, foreground_budget.memory_bytes),
+        BuildPoolBudgetV1(BuildActionPoolV1.cranelift, 1, foreground_budget.memory_bytes),
+        BuildPoolBudgetV1(BuildActionPoolV1.llvm, 1, foreground_budget.memory_bytes)]
+    _ = demand_compile_counter_add_phase_v1(
+        &mut counters, "action-graph", started_ns)
+    DemandCompileExecutionV1(
+        true, "ok", Some(coordinator_new_v1(graph, budgets)), Some(plan),
+        NativePromotionQueueV1([]), baseline_action_id, counters,
+        Some(identity), Some(foreground_budget), build_ordinal, "",
+        total_started_ns, demand_compile_counter_now_ns_v1())
+
+fn demand_compile_bind_mir_admission_v1(
+    execution: &mut DemandCompileExecutionV1,
+    admission: MirAdmissionV1
+) -> bool:
+    if (not execution.valid or execution.backend_plan == nil or
+            execution.backend_identity == nil or execution.foreground_budget == nil or
+            admission.snapshot_revision != execution.backend_identity!.snapshot_revision or
+            admission.snapshot_tree_digest != execution.backend_identity!.snapshot_tree_digest or
+            admission.snapshot_inventory_digest !=
+                execution.backend_identity!.snapshot_inventory_digest or
+            admission.demand_closure_digest == "" or
+            admission.dependency_set_digest == ""):
+        return false
+    execution.mir_admission_digest = admission.dependency_set_digest
+    val plan = execution.backend_plan!
+    val identity = execution.backend_identity!
+    val budget = execution.foreground_budget!
+    if plan.enqueue_llvm_promotion:
+        val promotion_started_ns = demand_compile_counter_now_ns_v1()
+        val promotion_queue = native_promotion_enqueue_v1(
+            execution.promotion_queue, NativePromotionRequestV1(
+                plan.promotion_action_digest, identity,
+                demand_backend_identity_digest_v1(identity), execution.build_ordinal,
+                budget.priority - 1, budget.memory_bytes, budget.cancelled))
+        var counters = execution.counters
+        counters.action_scheduled_count = counters.action_scheduled_count + 1
+        _ = demand_compile_counter_add_phase_v1(
+            &mut counters, "llvm-promotion", promotion_started_ns)
+        execution.promotion_queue = promotion_queue
+        execution.counters = counters
+    true
+
+fn demand_compile_complete_action_v1(
+    execution: DemandCompileExecutionV1, action_id: text,
+    owner_token: text, success: bool, cancelled: bool, output_identity: text,
+    diagnostics: [text], memory_peak_bytes: i64
+) -> DemandCompileCompletionV1:
+    var owned = execution
+    if not owned.valid or owned.coordinator == nil:
+        return DemandCompileCompletionV1(owned, false, "execution-invalid")
+    if (action_id == owned.baseline_action_id and
+            owned.mir_admission_digest == ""):
+        return DemandCompileCompletionV1(owned, false, "mir-admission-required")
+    val transfer = coordinator_complete_v1(
+        owned.coordinator!, action_id, owner_token, success, cancelled,
+        output_identity, diagnostics, memory_peak_bytes)
+    owned.coordinator = Some(transfer.coordinator)
+    if transfer.commit.accepted:
+        var counters = owned.counters
+        counters.action_completed_count = counters.action_completed_count + 1
+        owned.counters = counters
+    DemandCompileCompletionV1(
+        owned, transfer.commit.accepted, transfer.commit.reason)
+
+fn demand_compile_source_open_v1(execution: &mut DemandCompileExecutionV1):
+    var counters = execution.counters
+    counters.source_open_count = counters.source_open_count + 1
+    execution.counters = counters
+
+fn demand_compile_section_reads_v1(
+    execution: DemandCompileExecutionV1, count: i64
+) -> DemandCompileExecutionV1:
+    var owned = execution
+    var remaining = count
+    while remaining > 0:
+        var counters = owned.counters
+        counters.section_read_count = counters.section_read_count + 1
+        owned.counters = counters
+        remaining = remaining - 1
+    owned
+
+fn demand_compile_phase_finish_v1(
+    execution: &mut DemandCompileExecutionV1, phase: text, started_ns: i64
+) -> bool:
+    var counters = execution.counters
+    val accepted = demand_compile_counter_add_phase_v1(
+        &mut counters, phase, started_ns)
+    execution.counters = counters
+    accepted
+
+fn demand_compile_phase_begin_v1() -> i64:
+    demand_compile_counter_now_ns_v1()
+
+fn demand_compile_finalize_baseline_v1(
+    execution: DemandCompileExecutionV1, success: bool,
+    output_identity: text
+) -> DemandCompileFinalizeV1:
+    var owned = execution
+    if owned.baseline_started_ns <= 0:
+        return DemandCompileFinalizeV1(owned, false)
+    val baseline_action_id = owned.baseline_action_id
+    val baseline_started_ns = owned.baseline_started_ns
+    val total_started_ns = owned.total_started_ns
+    if success:
+        if owned.mir_admission_digest == "":
+            return DemandCompileFinalizeV1(owned, false)
+        val completion = demand_compile_complete_action_v1(
+            owned, baseline_action_id, "driver-baseline-owner",
+            true, false, output_identity, [], 0)
+        owned = completion.execution
+        if not completion.accepted:
+            return DemandCompileFinalizeV1(owned, false)
+    var counters = owned.counters
+    val baseline_counter = demand_compile_counter_add_phase_owned_v1(
+        counters, "baseline-backend", baseline_started_ns)
+    counters = baseline_counter.counters
+    val total_counter = demand_compile_counter_add_phase_owned_v1(
+        counters, "total", total_started_ns)
+    counters = total_counter.counters
+    owned.counters = counters
+    owned.baseline_started_ns = 0
+    DemandCompileFinalizeV1(owned, true)
+
+fn demand_compile_diagnostics_v1(execution: DemandCompileExecutionV1) -> [text]:
+    if execution.coordinator == nil:
+        return []
+    var result: [text] = []
+    for frame in coordinator_diagnostics_v1(execution.coordinator!):
+        result = result.push("{frame.action_id}:{frame.ordinal}:{frame.payload}")
+    result
+
+fn demand_compile_complete_scc_outputs_v1(
+    execution: DemandCompileExecutionV1, cache_root: text,
+    authority: PackageArchiveAuthorityV1,
+    admission: MirAdmissionV1,
+    outputs: SccCompileOutputsV1,
+    baseline_artifact_identity: text,
+    baseline_artifact_digest: text
+) -> DemandCompileSccCompletionV1:
+    val started_ns = demand_compile_counter_now_ns_v1()
+    var owned = execution
+    if not owned.valid or owned.coordinator == nil or
+            cache_root == "" or outputs.modules.len() == 0:
+        return DemandCompileSccCompletionV1(
+            owned, false, "publication-input-invalid")
+    if (admission.snapshot_revision != authority.scv_revision_id or
+            admission.snapshot_tree_digest != authority.scv_tree_id or
+            admission.snapshot_inventory_digest != authority.inventory_digest or
+            admission.demand_closure_digest == "" or
+            admission.dependency_set_digest == ""):
+        return DemandCompileSccCompletionV1(
+            owned, false, "publication-authority-mismatch")
+    for output in outputs.modules:
+        val action_id = output.compiler_action_identity
+        var completed = false
+        for runtime in owned.coordinator!.runtime:
+            if runtime.action_id == action_id and runtime.result != nil and
+                    runtime.result!.success:
+                completed = true
+        if not completed:
+            return DemandCompileSccCompletionV1(
+                owned, false, "compiler-action-incomplete")
+    val published = scc_compile_outputs_publish_v1(
+        cache_root, authority, outputs, admission.dependency_set_digest,
+        baseline_artifact_identity, baseline_artifact_digest)
+    if published.is_ok():
+        var counters = owned.counters
+        _ = demand_compile_counter_add_phase_v1(
+            &mut counters, "link", started_ns)
+        owned.counters = counters
+        return DemandCompileSccCompletionV1(owned, true, "ok")
+    DemandCompileSccCompletionV1(owned, false, "publication-rejected")
+
+export DemandCompileExecutionV1, DemandCompileCompletionV1
+export DemandCompileFinalizeV1, DemandCompileSccCompletionV1
+export demand_archive_action_id_v1, demand_source_action_id_v1
+export demand_compile_begin_v1, demand_compile_complete_action_v1
+export demand_compile_bind_mir_admission_v1
+export demand_compile_diagnostics_v1
+export demand_compile_complete_scc_outputs_v1
+export demand_compile_source_open_v1
+export demand_compile_section_reads_v1
+export demand_compile_phase_begin_v1, demand_compile_phase_finish_v1
+export demand_compile_finalize_baseline_v1

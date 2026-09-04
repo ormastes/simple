@@ -2194,48 +2194,11 @@ impl MirLowering:
         # construction site writes under the bare name -- qualifying it here
         # would turn every payload-struct lookup into a miss.
         var enum_key = ""
-        # Or-pattern expansion (bug: enum_match_or_pattern_unsupported_2026-09-01):
-        # `case A | B:` on an enum scrutinee used to hit the catch-all
-        # "enum match: unsupported arm pattern" below, because this function's
-        # main loop only ever recognised Enum/Wildcard/Binding at the TOP
-        # level of an arm's pattern -- an Or wrapping multiple Enum
-        # alternatives fell to the `case _` diagnostic. Expand every Or arm
-        # whose alternatives are ALL Enum patterns into that many independent
-        # arms sharing the original arm's body/guard/span, before the main
-        # loop below runs, mirroring how lower_match_case's Phase 2a already
-        # expands an int-literal Or into multiple int_cases entries. An Or
-        # with a non-Enum alternative (e.g. a bare identifier that never got
-        # reclassified from Binding, since that reclassification only scans
-        # top-level arm patterns) is left untouched and still reaches the
-        # existing diagnostic unchanged -- this is a narrow, additive
-        # widening, not a rewrite of the unsupported-pattern path.
-        var lowered_arms: [HirMatchArm] = []
-        for arm0 in arms:
-            match arm0.pattern.kind:
-                case Or(or_patterns):
-                    var all_enum_alts = true
-                    for or_pat in or_patterns:
-                        match or_pat.kind:
-                            case Enum(_, _, _): ()
-                            case _: all_enum_alts = false
-                    if all_enum_alts and or_patterns.len() > 0:
-                        for or_pat in or_patterns:
-                            lowered_arms.push(HirMatchArm(
-                                pattern: or_pat,
-                                has_guard: arm0.has_guard,
-                                guard: arm0.guard,
-                                body: arm0.body,
-                                span: arm0.span
-                            ))
-                    else:
-                        lowered_arms.push(arm0)
-                case _:
-                    lowered_arms.push(arm0)
         var ai = 0
-        while ai < lowered_arms.len():
+        while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
             # required before any composite field access.
-            val arm: HirMatchArm = lowered_arms[ai]
+            val arm: HirMatchArm = arms[ai]
             match arm.pattern.kind:
                 case Enum(etype, variant, epayload):
                     if enum_name == "":
@@ -2367,29 +2330,7 @@ impl MirLowering:
                     has_default = true
                     default_body = arm.body
                 case _:
-                    # Diagnostic-only widening (2026-09-01): name the actual
-                    # unsupported HirPatternKind and fall back to the whole
-                    # arm's span when the pattern's own span carries no file
-                    # (e.g. a synthetic/desugared pattern), so this error can
-                    # be attributed to a source location instead of printing
-                    # bare "enum match: unsupported arm pattern" with no
-                    # file/line at all. No behavior change otherwise.
-                    val unsupported_kind_name = match arm.pattern.kind:
-                        case HirPatternKind.Literal(_): "Literal"
-                        case HirPatternKind.Tuple(_): "Tuple"
-                        case HirPatternKind.Array(_, _): "Array"
-                        case HirPatternKind.Struct(_, _): "Struct"
-                        case HirPatternKind.Or(_): "Or"
-                        case HirPatternKind.Range(_, _, _): "Range"
-                        case HirPatternKind.Error: "Error"
-                        case HirPatternKind.CompleteRegion(_): "CompleteRegion"
-                        case HirPatternKind.DynRegion(_): "DynRegion"
-                        case HirPatternKind.TypeTest(_, _): "TypeTest"
-                        case _: "unknown"
-                    var diag_span = arm.pattern.span
-                    if diag_span.file == "":
-                        diag_span = arm.span
-                    self.error("enum match: unsupported arm pattern (kind={unsupported_kind_name})", Some(diag_span))
+                    self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
             ai = ai + 1
 
         # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
@@ -2546,7 +2487,7 @@ impl MirLowering:
                 # (typed arm rebind + match on the copy's field) — see the
                 # enum_deep_flags declaration comment for why the pattern is
                 # not stored in a pushed array instead.
-                val deep_arm: HirMatchArm = lowered_arms[enum_arm_srcidx[ci]]
+                val deep_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
                 var arm_payload: HirPatternPayload? = nil
                 match deep_arm.pattern.kind:
                     case Enum(_, _, deep_ep):
@@ -4444,6 +4385,7 @@ impl MirLowering:
                 # Lift the body in a FRESH lowering so the in-progress function's
                 # builder/local_map are untouched.
                 var lw = MirLowering.new_for_target(self.symbols, self.target_context)
+                lw.mir_tag_probe_active_function = gen_name
                 lw.configure_mcdc_mode(
                     self.mcdc_mode, self.mcdc_owner_bytes, self.mcdc_global_bytes,
                     self.mcdc_include_csv, self.mcdc_exclude_csv)

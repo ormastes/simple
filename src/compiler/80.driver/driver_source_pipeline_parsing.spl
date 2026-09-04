@@ -3,6 +3,7 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{env_set, exit}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_parser_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
@@ -16,6 +17,9 @@ use std.string_core.{char_code}
 use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
 use compiler.core.parser.{par_had_error_get}
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
+use compiler.driver.cache.phase_compatibility_admission.{
+    driver_import_phase2_frontend_v1
+}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
@@ -237,7 +241,12 @@ fn _driver_publish_frontend_cache_scope() -> bool:
     if (_sffi_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") != "":
         return true
     val scope = native_build_cache_scope_key(nil, nil, [], 0, native_build_frontend_identity())
-    _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope)
+    if not _sffi_env_set("SIMPLE_FRONTEND_CACHE_SCOPE", scope):
+        return false
+    val imported = driver_import_phase2_frontend_v1()
+    if imported.starts_with("manifest-rejected:") or imported == "manifest-unreadable":
+        dtrace("[M3] frontend compatibility {imported}")
+    true
 
 pub fn driver_promote_frontend_registry_owners() -> bool:
     val aspect_ok = aspect_registry_promote_transient_owner()
@@ -542,6 +551,7 @@ impl CompilerDriver:
         (self.ctx, ok)
 
     me parse_all_committing_impl() -> bool:
+        compiler_work_parser_schedule_v1(self.ctx.sources.len())
         if driver_streaming_surface_enabled(self.ctx):
             return self.parse_all_streaming_surfaces_in_place_impl()
         val (parsed_ctx, parse_ok) = self.parse_all_impl()

@@ -1,0 +1,213 @@
+# @req MBH-REQ-002 MBH-REQ-004 MBH-REQ-009
+use std.spec.*
+use std.spec.step
+use app.io.mod.{dir_create_all, file_write, getpid}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_provider_manifest_v1,
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn arm64_macho(marker: u8 = 0x00u8) -> [u8]:
+    [
+        0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x0cu8, 0x00u8, 0x00u8, 0x01u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        marker, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ]
+
+fn archive_with_member(payload: [u8]) -> [u8]:
+    val header = (
+        "m.o/            " + "            " + "      " + "      " +
+        "        " + "32        " + "`\n"
+    ).bytes()
+    "!<arch>\n".bytes().concat(header).concat(payload)
+
+fn archive_with_named_member(name: text, payload: [u8]) -> [u8]:
+    val padded_name = name + "                "[name.len():]
+    val header = padded_name + "            " + "      " + "      " +
+        "        " + payload.len().to_text() +
+        "          "[payload.len().to_text().len():] + "`\n"
+    var archive = "!<arch>\n".bytes().concat(header.bytes()).concat(payload)
+    if payload.len() % 2 != 0: archive.push(0x0au8)
+    archive
+
+fn fat_arm64_macho() -> [u8]:
+    [
+        0xcau8, 0xfeu8, 0xbau8, 0xbeu8,
+        0x00u8, 0x00u8, 0x00u8, 0x01u8,
+        0x01u8, 0x00u8, 0x00u8, 0x0cu8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x1cu8,
+        0x00u8, 0x00u8, 0x00u8, 0x20u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ].concat(arm64_macho())
+
+fn x86_64_macho(marker: u8 = 0x00u8) -> [u8]:
+    [
+        0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x07u8, 0x00u8, 0x00u8, 0x01u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8,
+        marker, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ]
+
+fn fat_arm64_x86_64_macho() -> [u8]:
+    [
+        0xcau8, 0xfeu8, 0xbau8, 0xbeu8, 0x00u8, 0x00u8, 0x00u8, 0x02u8,
+        0x01u8, 0x00u8, 0x00u8, 0x0cu8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x30u8, 0x00u8, 0x00u8, 0x00u8, 0x20u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x01u8, 0x00u8, 0x00u8, 0x07u8, 0x00u8, 0x00u8, 0x00u8, 0x03u8,
+        0x00u8, 0x00u8, 0x00u8, 0x50u8, 0x00u8, 0x00u8, 0x00u8, 0x20u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8
+    ].concat(arm64_macho()).concat(x86_64_macho())
+
+fn archive_with_two_members(first: [u8], second: [u8]) -> [u8]:
+    archive_with_named_member("first.o/", first).concat(
+        archive_with_named_member("second.o/", second)[8:]
+    )
+
+fn content_identity(manifest: text) -> text:
+    for line in manifest.trim().split("\n"):
+        if line.starts_with("content-identity="): return line[17:]
+    ""
+
+describe "Darwin runtime/provider linker-input manifest":
+    it "keeps paths receipt-only while binding ordered artifact content":
+        step("Copy identical selected link input bytes to two different receipt paths")
+        val root = "/tmp/simple-darwin-provider-manifest-{getpid()}"
+        expect(dir_create_all(root + "/a")).to_be(true)
+        expect(dir_create_all(root + "/b")).to_be(true)
+        val bytes = arm64_macho()
+        expect(rt_file_write_bytes(root + "/a/provider.o", bytes)).to_be(true)
+        expect(rt_file_write_bytes(root + "/b/provider.o", bytes)).to_be(true)
+        val first = darwin_runtime_provider_manifest_v1([root + "/a/provider.o"], "aarch64").unwrap()
+        val second = darwin_runtime_provider_manifest_v1([root + "/b/provider.o"], "aarch64").unwrap()
+        expect(first == second).to_equal(false)
+        expect(content_identity(first)).to_equal(content_identity(second))
+
+    it "rehashes live artifact bytes instead of trusting the receipt digest":
+        step("Publish a valid receipt, mutate its artifact, and reject stale evidence")
+        val root = "/tmp/simple-darwin-provider-live-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val artifact = root + "/provider.o"
+        val receipt = root + "/manifest.receipt"
+        expect(rt_file_write_bytes(artifact, arm64_macho())).to_be(true)
+        val body = darwin_runtime_provider_manifest_v1(
+            [artifact], "aarch64"
+        ).unwrap()
+        expect(file_write(receipt, body)).to_be(true)
+        expect(darwin_runtime_provider_manifest_content_identity_v1(
+            receipt, "aarch64"
+        )).to_equal(content_identity(body))
+        expect(rt_file_write_bytes(artifact, arm64_macho(0x01u8))).to_be(true)
+        expect(darwin_runtime_provider_manifest_content_identity_v1(
+            receipt, "aarch64"
+        )).to_equal("")
+
+    it "binds artifact order with unambiguous digest framing":
+        step("Reverse two selected linker inputs with distinct content")
+        val root = "/tmp/simple-darwin-provider-order-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val first_path = root + "/first.o"
+        val second_path = root + "/second.o"
+        expect(rt_file_write_bytes(first_path, arm64_macho(0x01u8))).to_be(true)
+        expect(rt_file_write_bytes(second_path, arm64_macho(0x02u8))).to_be(true)
+        val forward = darwin_runtime_provider_manifest_v1(
+            [first_path, second_path], "aarch64").unwrap()
+        val reversed = darwin_runtime_provider_manifest_v1(
+            [second_path, first_path], "aarch64").unwrap()
+        expect(content_identity(forward) == content_identity(reversed)).to_equal(false)
+
+    it "records archive members and changes identity when member bytes change":
+        step("Mutate a valid Mach-O archive member without changing its architecture")
+        val root = "/tmp/simple-darwin-provider-members-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.a"
+        expect(rt_file_write_bytes(path, archive_with_member(arm64_macho()))).to_be(true)
+        val baseline = darwin_runtime_provider_manifest_v1([path], "aarch64").unwrap()
+        expect(baseline).to_contain("member=0:0|size=32|digest=")
+        expect(rt_file_write_bytes(path, archive_with_member(arm64_macho(0x01u8)))).to_be(true)
+        val mutated = darwin_runtime_provider_manifest_v1([path], "aarch64").unwrap()
+        expect(content_identity(mutated) == content_identity(baseline)).to_equal(false)
+
+    it "binds archive member ordering":
+        step("Reverse two valid Mach-O members without changing the member set")
+        val root = "/tmp/simple-darwin-provider-member-order-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.a"
+        val first = arm64_macho(0x01u8)
+        val second = arm64_macho(0x02u8)
+        expect(rt_file_write_bytes(path, archive_with_two_members(first, second))).to_be(true)
+        val forward = darwin_runtime_provider_manifest_v1([path], "aarch64").unwrap()
+        expect(forward).to_contain("member=0:1|size=32|digest=")
+        expect(rt_file_write_bytes(path, archive_with_two_members(second, first))).to_be(true)
+        val reversed = darwin_runtime_provider_manifest_v1([path], "aarch64").unwrap()
+        expect(content_identity(forward) == content_identity(reversed)).to_equal(false)
+
+    it "does not mistake an ordinary double-underscore BSD member for metadata":
+        step("Use a valid Mach-O member whose ordinary name begins with two underscores")
+        val root = "/tmp/simple-darwin-provider-bsd-name-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.a"
+        expect(rt_file_write_bytes(path, archive_with_named_member("__provider.o/", arm64_macho()))).to_be(true)
+        val manifest = darwin_runtime_provider_manifest_v1([path], "aarch64").unwrap()
+        expect(manifest).to_contain("member=0:0|size=32|digest=")
+
+    it "rejects malformed archive header trailers and numeric fields":
+        step("Mutate framing bytes that permissive archive readers must not accept")
+        val root = "/tmp/simple-darwin-provider-corrupt-ar-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.a"
+        var bad_trailer = archive_with_member(arm64_macho())
+        bad_trailer[8 + 58] = 0x20u8
+        expect(rt_file_write_bytes(path, bad_trailer)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)
+        var bad_size = archive_with_member(arm64_macho())
+        bad_size[8 + 48] = 0x31u8
+        bad_size[8 + 49] = 0x20u8
+        bad_size[8 + 50] = 0x32u8
+        expect(rt_file_write_bytes(path, bad_size)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)
+
+    it "rejects missing archive padding and fat headers without a real slice":
+        step("Reject framing that names a target slice but contains no admissible Mach-O payload")
+        val root = "/tmp/simple-darwin-provider-truncated-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.a"
+        var odd_payload = arm64_macho()
+        odd_payload.push(0x01u8)
+        var missing_padding = archive_with_named_member("provider.o/", odd_payload)
+        missing_padding.pop()
+        expect(rt_file_write_bytes(path, missing_padding)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)
+
+        val fat_without_slice: [u8] = [
+            0xcau8, 0xfeu8, 0xbau8, 0xbeu8,
+            0x00u8, 0x00u8, 0x00u8, 0x01u8,
+            0x01u8, 0x00u8, 0x00u8, 0x0cu8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x00u8, 0x00u8, 0x10u8, 0x00u8,
+            0x00u8, 0x00u8, 0x00u8, 0x20u8,
+            0x00u8, 0x00u8, 0x00u8, 0x00u8
+        ]
+        expect(rt_file_write_bytes(path, fat_without_slice)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)
+        expect(rt_file_write_bytes(path, fat_arm64_macho())).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_ok()).to_be(true)
+
+    it "rejects malformed non-target and overlapping fat slices":
+        step("Keep a valid requested slice while corrupting another fat-table entry")
+        val root = "/tmp/simple-darwin-provider-fat-table-{getpid()}"
+        expect(dir_create_all(root)).to_be(true)
+        val path = root + "/provider.o"
+        var out_of_bounds = fat_arm64_x86_64_macho()
+        out_of_bounds[38] = 0x10u8
+        out_of_bounds[39] = 0x00u8
+        expect(rt_file_write_bytes(path, out_of_bounds)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)
+        var overlapping = fat_arm64_x86_64_macho()
+        overlapping[39] = 0x30u8
+        expect(rt_file_write_bytes(path, overlapping)).to_be(true)
+        expect(darwin_runtime_provider_manifest_v1([path], "aarch64").is_err()).to_be(true)

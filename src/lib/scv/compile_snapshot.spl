@@ -1,0 +1,444 @@
+# Compile-owned immutable SCV snapshots.
+#
+# Automatic compilation writes only below the caller-provided ignored cache
+# root (normally `build/scv`). It does not initialize or mutate `.scv`, Git,
+# source files, manifests, project configuration, or developer file metadata.
+# Discovery consumes only the returned frozen root; there is no live-worktree
+# fallback.
+
+use app.io.mod.{
+    file_exists, file_delete, file_read_regular_no_follow_bounded,
+    dir_exists, dir_create
+}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io_runtime.{
+    dir_list, dir_remove, file_rename,
+    process_is_running
+}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.scv.core.{scv_rel_path, scv_worktree_path_safe}
+use std.scv.store.{
+    scv_content_id_for_u8, scv_create_parent_dir, scv_write_text
+}
+use std.scv.compile_source_inventory.{
+    CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1
+}
+
+extern fn rt_getpid() -> i64
+
+val SCV_COMPILE_SOURCE_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
+val SCV_COMPILE_METADATA_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+
+struct ScvCompileSnapshotV1:
+    valid: bool
+    reason: text
+    revision_id: text
+    commit_id: text
+    tree_id: text
+    inventory_digest: text
+    inventory_count: i64
+    snapshot_root: text
+    provenance_path: text
+    receipt_path: text
+    source_drifted: bool
+
+fn scv_compile_snapshot_invalid_v1(reason: text) -> ScvCompileSnapshotV1:
+    ScvCompileSnapshotV1(
+        valid: false,
+        reason: reason,
+        revision_id: "",
+        commit_id: "",
+        tree_id: "",
+        inventory_digest: "",
+        inventory_count: 0,
+        snapshot_root: "",
+        provenance_path: "",
+        receipt_path: "",
+        source_drifted: false
+    )
+
+fn scv_compile_snapshot_source_kind_v1(path: text) -> bool:
+    path.ends_with(".spl") or path.ends_with("/simple.sdn") or
+        path.ends_with("/plugin.sdn") or path == "simple.sdn" or
+        path == "plugin.sdn"
+
+fn scv_compile_snapshot_sorted_unique_v1(values: [text]) -> [text]:
+    var sorted = values
+    if sorted.len() > 1:
+        var start = sorted.len() / 2
+        while start > 0:
+            start = start - 1
+            scv_compile_snapshot_sift_down_v1(sorted, start, sorted.len())
+        var end = sorted.len()
+        while end > 1:
+            end = end - 1
+            val temporary = sorted[0]
+            sorted[0] = sorted[end]
+            sorted[end] = temporary
+            scv_compile_snapshot_sift_down_v1(sorted, 0, end)
+    var result: [text] = []
+    for value in sorted:
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn scv_compile_snapshot_sift_down_v1(
+    mut values: [text], root_index: i64, heap_len: i64
+):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+        var largest = root
+        if values[largest] < values[left]:
+            largest = left
+        val right = left + 1
+        if right < heap_len and values[largest] < values[right]:
+            largest = right
+        if largest == root:
+            return
+        val temporary = values[root]
+        values[root] = values[largest]
+        values[largest] = temporary
+        root = largest
+
+fn scv_compile_snapshot_read_source_v1(path: text) -> text?:
+    val loaded = file_read_regular_no_follow_bounded(
+        path, SCV_COMPILE_SOURCE_MAX_BYTES_V1)
+    if val Err(_) = loaded:
+        return nil
+    Some(loaded.unwrap())
+
+fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
+    val content = scv_compile_snapshot_read_source_v1(path)
+    if content == nil: "" else: scv_content_id_for_u8(content!.bytes())
+
+fn scv_compile_snapshot_inventory_entries_v1(
+    root: text, cache_root: text, source_roots: [text]
+) -> [CompileSourceInventoryEntryV1]?:
+    val admitted = compile_source_inventory_read_current_v1(cache_root)
+    if not admitted.valid:
+        return nil
+    var roots: [text] = []
+    for source_root in source_roots:
+        val candidate = if source_root.starts_with("/"):
+            source_root
+        elif root.ends_with("/"):
+            root + source_root
+        else:
+            root + "/" + source_root
+        val absolute = path_absolute(candidate).replace("\\", "/")
+        if (absolute == "" or (absolute != root and
+                not absolute.starts_with(root + "/"))):
+            return nil
+        if (absolute == root or absolute.starts_with(root + "/build/scv") or
+                absolute.starts_with(root + "/.simple/scv")):
+            return nil
+        roots = roots.push(absolute)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    for entry in admitted.inventory!.entries:
+        val absolute = path_absolute("{root}/{entry.source_identity}").replace("\\", "/")
+        var selected = false
+        for source_root in roots:
+            if absolute == source_root or absolute.starts_with(source_root + "/"):
+                selected = true
+        if selected:
+            entries = entries.push(entry)
+    Some(entries)
+
+fn scv_compile_snapshot_revision_id_v1(
+    tree_id: text, inventory_digest: text
+) -> text:
+    "scv-revision-v1-" + sha256_text(
+        "simple/scv-compile-revision/v1|{tree_id}|{inventory_digest}")
+
+fn scv_compile_snapshot_provenance_v1(
+    revision_id: text, commit_id: text, tree_id: text,
+    inventory_digest: text, inventory_count: i64
+) -> text:
+    [
+        "simple-scv-compile-snapshot-v1",
+        "revision={revision_id}",
+        "commit={commit_id}",
+        "tree={tree_id}",
+        "inventory={inventory_digest}",
+        "count={inventory_count}"
+    ].join("\n")
+
+fn scv_compile_snapshot_receipt_v1(
+    provenance: text, revision_id: text
+) -> text:
+    provenance + "\nsnapshot=snapshots/{revision_id}"
+
+fn scv_compile_snapshot_read_text_v1(path: text) -> text:
+    if not file_exists(path):
+        return ""
+    val loaded = file_read_regular_no_follow_bounded(
+        path, SCV_COMPILE_METADATA_MAX_BYTES_V1)
+    if val Err(_) = loaded:
+        return ""
+    loaded.unwrap()
+
+fn scv_compile_snapshot_open_v1(
+    root: text, snapshot_root: text, revision_id: text, commit_id: text,
+    tree_id: text, inventory_digest: text
+) -> ScvCompileSnapshotV1:
+    val canonical_root = path_absolute(root).replace("\\", "/")
+    val canonical_snapshot = path_absolute(snapshot_root).replace("\\", "/")
+    if canonical_root == "" or canonical_snapshot == "":
+        return scv_compile_snapshot_invalid_v1("snapshot-open-path-invalid")
+    val relative = scv_rel_path(canonical_root, canonical_snapshot)
+    if (not canonical_snapshot.starts_with(canonical_root + "/") or
+            not (relative.starts_with("build/scv/snapshots/") or
+                relative.starts_with(".simple/scv/snapshots/")) or
+            not canonical_snapshot.ends_with("/" + revision_id)):
+        return scv_compile_snapshot_invalid_v1("snapshot-open-not-owned")
+    val provenance_path = canonical_snapshot + "/SCV_COMPILE_SNAPSHOT"
+    val provenance = scv_compile_snapshot_read_text_v1(provenance_path)
+    val lines = provenance.split("\n")
+    if lines.len() != 6 or not lines[5].starts_with("count="):
+        return scv_compile_snapshot_invalid_v1("snapshot-open-provenance-invalid")
+    val inventory_count = lines[5].substring(6).to_i64() ?? -1
+    if inventory_count < 0 or provenance != scv_compile_snapshot_provenance_v1(
+            revision_id, commit_id, tree_id, inventory_digest,
+            inventory_count):
+        return scv_compile_snapshot_invalid_v1("snapshot-open-provenance-mismatch")
+    val inventory = scv_compile_snapshot_read_text_v1(
+        canonical_snapshot + "/SCV_COMPILE_INVENTORY")
+    if sha256_text(inventory) != inventory_digest:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-inventory-mismatch")
+    val rows = if inventory == "": [] else: inventory.split("\n")
+    if rows.len() != inventory_count:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-count-mismatch")
+    for row in rows:
+        val fields = row.split("|")
+        if (fields.len() != 3 or not scv_worktree_path_safe(fields[0]) or
+                not fields[1].starts_with("sha256_") or
+                fields[1].len() != 71 or
+                (fields[2].to_i64() ?? -1) < 0):
+            return scv_compile_snapshot_invalid_v1(
+                "snapshot-open-inventory-row-invalid")
+    val marker = canonical_snapshot.last_index_of("/snapshots/")
+    if marker <= 0:
+        return scv_compile_snapshot_invalid_v1("snapshot-open-owner-invalid")
+    val cache_root = canonical_snapshot.substring(0, marker)
+    val receipt_path = "{cache_root}/receipts/{revision_id}.receipt"
+    if scv_compile_snapshot_read_text_v1(receipt_path) !=
+            scv_compile_snapshot_receipt_v1(provenance, revision_id):
+        return scv_compile_snapshot_invalid_v1("snapshot-open-receipt-mismatch")
+    ScvCompileSnapshotV1(
+        valid: true,
+        reason: "ok",
+        revision_id: revision_id,
+        commit_id: commit_id,
+        tree_id: tree_id,
+        inventory_digest: inventory_digest,
+        inventory_count: inventory_count,
+        snapshot_root: canonical_snapshot,
+        provenance_path: provenance_path,
+        receipt_path: receipt_path,
+        source_drifted: false)
+
+fn scv_compile_snapshot_write_chunk_v1(
+    cache_root: text, digest: text, content: text
+) -> bool:
+    val chunk_dir = "{cache_root}/objects/chunks"
+    dir_create(chunk_dir, true)
+    val final_path = "{chunk_dir}/{digest}.blob"
+    if file_exists(final_path):
+        return scv_compile_snapshot_source_digest_v1(final_path) == digest
+    if file_create_excl(final_path, content):
+        return scv_compile_snapshot_source_digest_v1(final_path) == digest
+    file_exists(final_path) and
+        scv_compile_snapshot_source_digest_v1(final_path) == digest
+
+fn scv_compile_snapshot_acquire_v1(
+    root: text, cache_root: text, source_roots: [text]
+) -> ScvCompileSnapshotV1:
+    if root == "" or cache_root == "" or source_roots.len() == 0:
+        return scv_compile_snapshot_invalid_v1("snapshot-input-invalid")
+    val canonical_root = path_absolute(root).replace("\\", "/")
+    if canonical_root == "":
+        return scv_compile_snapshot_invalid_v1("snapshot-root-unavailable")
+    val owned_cache_root = path_absolute(cache_root).replace("\\", "/")
+    val cache_rel = scv_rel_path(canonical_root, owned_cache_root)
+    if (owned_cache_root == "" or owned_cache_root == canonical_root or
+            not owned_cache_root.starts_with(canonical_root + "/") or
+            not (cache_rel == "build/scv" or cache_rel == ".simple/scv")):
+        return scv_compile_snapshot_invalid_v1("snapshot-cache-root-not-owned")
+    val entries = scv_compile_snapshot_inventory_entries_v1(
+        canonical_root, owned_cache_root, source_roots)
+    if entries == nil:
+        return scv_compile_snapshot_invalid_v1("snapshot-inventory-unavailable")
+    if entries!.len() == 0:
+        return scv_compile_snapshot_invalid_v1("snapshot-inventory-empty")
+    dir_create(owned_cache_root, true)
+    val staging = "{owned_cache_root}/snapshots/.tmp.{rt_getpid()}.{time_now_unix_micros()}"
+    if dir_exists(staging):
+        return scv_compile_snapshot_invalid_v1("snapshot-staging-busy")
+    if not dir_create(staging, true):
+        return scv_compile_snapshot_invalid_v1("snapshot-staging-create-failed")
+    var inventory_rows: [text] = []
+    var source_drifted = false
+    for entry in entries!:
+        val rel = entry.source_identity
+        val path = "{canonical_root}/{rel}"
+        if not scv_worktree_path_safe(rel):
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-path-unsafe:{rel}")
+        val content = scv_compile_snapshot_read_source_v1(path)
+        if content == nil:
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-read-failed:{rel}")
+        val bytes = content!.bytes()
+        val digest = scv_content_id_for_u8(bytes)
+        if digest != "sha256_{entry.content_digest}" or
+                bytes.len() != entry.byte_count:
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-index-drift:{rel}")
+        if not scv_compile_snapshot_write_chunk_v1(
+                owned_cache_root, digest, content!):
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-chunk-publish-failed:{rel}")
+        val destination = "{staging}/{rel}"
+        scv_create_parent_dir(destination)
+        if not file_write_bytes(destination, bytes):
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-materialize-failed:{rel}")
+        if scv_compile_snapshot_source_digest_v1(destination) != digest:
+            dir_remove(staging, true)
+            return scv_compile_snapshot_invalid_v1("snapshot-materialize-digest:{rel}")
+        inventory_rows = inventory_rows.push("{rel}|{digest}|{bytes.len()}")
+        val current = scv_compile_snapshot_read_source_v1(path)
+        if current == nil or scv_content_id_for_u8(current!.bytes()) != digest:
+            source_drifted = true
+    val inventory = inventory_rows.join("\n")
+    val inventory_digest = sha256_text(inventory)
+    val tree_id = "scv-tree-v1-" + inventory_digest
+    val commit_id = "scv-compile-v1-" + sha256_text(
+        "simple/scv-compile-commit/v1|{tree_id}|{inventory_rows.len()}")
+    val revision_id = scv_compile_snapshot_revision_id_v1(
+        tree_id, inventory_digest)
+    val provenance = scv_compile_snapshot_provenance_v1(
+        revision_id, commit_id, tree_id, inventory_digest, inventory_rows.len())
+    if not scv_write_text("{staging}/SCV_COMPILE_INVENTORY", inventory):
+        dir_remove(staging, true)
+        return scv_compile_snapshot_invalid_v1("snapshot-inventory-write-failed")
+    if not scv_write_text("{staging}/SCV_COMPILE_SNAPSHOT", provenance):
+        dir_remove(staging, true)
+        return scv_compile_snapshot_invalid_v1("snapshot-provenance-write-failed")
+    val snapshots_root = "{owned_cache_root}/snapshots"
+    dir_create(snapshots_root, true)
+    val destination = "{snapshots_root}/{revision_id}"
+    if file_exists(destination):
+        val existing = scv_compile_snapshot_read_text_v1(
+            "{destination}/SCV_COMPILE_SNAPSHOT")
+        dir_remove(staging, true)
+        if existing != provenance:
+            return scv_compile_snapshot_invalid_v1("snapshot-destination-conflict")
+    elif not file_rename(staging, destination):
+        dir_remove(staging, true)
+        val existing = scv_compile_snapshot_read_text_v1(
+            "{destination}/SCV_COMPILE_SNAPSHOT")
+        if existing != provenance:
+            return scv_compile_snapshot_invalid_v1("snapshot-publish-failed")
+    val receipt_dir = "{owned_cache_root}/receipts"
+    if not dir_create(receipt_dir, true):
+        return scv_compile_snapshot_invalid_v1("snapshot-receipt-dir-failed")
+    val receipt_path = "{receipt_dir}/{revision_id}.receipt"
+    val receipt = scv_compile_snapshot_receipt_v1(provenance, revision_id)
+    if file_exists(receipt_path):
+        if scv_compile_snapshot_read_text_v1(receipt_path) != receipt:
+            return scv_compile_snapshot_invalid_v1("snapshot-receipt-conflict")
+    elif not file_create_excl(receipt_path, receipt):
+        if scv_compile_snapshot_read_text_v1(receipt_path) != receipt:
+            return scv_compile_snapshot_invalid_v1("snapshot-receipt-publish-failed")
+    val admitted = scv_compile_snapshot_open_v1(
+        canonical_root, destination, revision_id, commit_id, tree_id,
+        inventory_digest)
+    if not admitted.valid:
+        return admitted
+    ScvCompileSnapshotV1(
+        valid: true,
+        reason: if source_drifted: "ok-source-drifted" else: "ok",
+        revision_id: admitted.revision_id,
+        commit_id: admitted.commit_id,
+        tree_id: admitted.tree_id,
+        inventory_digest: admitted.inventory_digest,
+        inventory_count: admitted.inventory_count,
+        snapshot_root: admitted.snapshot_root,
+        provenance_path: admitted.provenance_path,
+        receipt_path: admitted.receipt_path,
+        source_drifted: source_drifted
+    )
+
+fn scv_compile_snapshot_recover_v1(cache_root: text) -> i64:
+    val snapshots_root = "{cache_root}/snapshots"
+    if not dir_exists(snapshots_root):
+        return 0
+    var removed = 0
+    for name in dir_list(snapshots_root):
+        if name.starts_with(".tmp."):
+            val parts = name.split(".")
+            val owner_pid = if parts.len() >= 4: parts[2].to_i64() else: nil
+            if owner_pid != nil and owner_pid! > 0 and not process_is_running(owner_pid!) and dir_remove("{snapshots_root}/{name}", true):
+                removed = removed + 1
+    removed
+
+fn scv_compile_snapshot_gc_v1(
+    cache_root: text, retained_revisions: [text], max_remove: i64
+) -> i64:
+    if max_remove <= 0:
+        return 0
+    val snapshots_root = "{cache_root}/snapshots"
+    if not dir_exists(snapshots_root):
+        return 0
+    val names = scv_compile_snapshot_sorted_unique_v1(dir_list(snapshots_root))
+    var removed = 0
+    for name in names:
+        if removed >= max_remove:
+            break
+        if name.starts_with(".") or retained_revisions.contains(name):
+            continue
+        val root = "{snapshots_root}/{name}"
+        val provenance = scv_compile_snapshot_read_text_v1(
+            "{root}/SCV_COMPILE_SNAPSHOT")
+        val receipt_path = "{cache_root}/receipts/{name}.receipt"
+        val receipt = scv_compile_snapshot_read_text_v1(receipt_path)
+        if (provenance.starts_with("simple-scv-compile-snapshot-v1\n") and
+                provenance.contains("\nrevision={name}\n") and
+                receipt == scv_compile_snapshot_receipt_v1(provenance, name) and
+                dir_remove(root, true)):
+            file_delete(receipt_path)
+            removed = removed + 1
+    removed
+
+fn scv_compile_snapshot_cleanup_v1(snapshot: ScvCompileSnapshotV1) -> bool:
+    if not snapshot.valid or snapshot.snapshot_root == "":
+        return false
+    val expected = scv_compile_snapshot_provenance_v1(
+        snapshot.revision_id, snapshot.commit_id, snapshot.tree_id,
+        snapshot.inventory_digest, snapshot.inventory_count)
+    if scv_compile_snapshot_read_text_v1(snapshot.provenance_path) != expected:
+        return false
+    val receipt = scv_compile_snapshot_receipt_v1(expected, snapshot.revision_id)
+    if (snapshot.receipt_path == "" or
+            scv_compile_snapshot_read_text_v1(snapshot.receipt_path) != receipt):
+        return false
+    if not dir_remove(snapshot.snapshot_root, true):
+        return false
+    file_delete(snapshot.receipt_path)
+
+export ScvCompileSnapshotV1
+export scv_compile_snapshot_revision_id_v1
+export scv_compile_snapshot_provenance_v1
+export scv_compile_snapshot_receipt_v1
+export scv_compile_snapshot_open_v1
+export scv_compile_snapshot_acquire_v1
+export scv_compile_snapshot_recover_v1
+export scv_compile_snapshot_gc_v1
+export scv_compile_snapshot_cleanup_v1

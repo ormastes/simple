@@ -292,12 +292,12 @@ jobs:
           echo "PATH=${LLVM_PREFIX}/bin:${PATH}" >> $GITHUB_ENV
           ls -la "${LLVM_PREFIX}/lib/"libLLVM*.dylib | head -5
 
-      - name: Build native macOS binary via Rust bootstrap
+      - name: Build native macOS binary via bootstrap-only Rust seed
         if: runner.os == 'macOS'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Building native macOS binary via Rust bootstrap"
+          echo "Building native macOS binary via bootstrap-only Rust seed"
           echo "Platform: ${{ matrix.platform }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -309,16 +309,16 @@ jobs:
           cargo build --profile bootstrap -p simple-native-all --features driver-compat
           cd ../..
 
-          SEED="src/compiler_rust/target/bootstrap/simple"
-          if [ ! -f "$SEED" ]; then
+          BOOTSTRAP_ONLY_SEED="src/compiler_rust/target/bootstrap/simple"
+          if [ ! -f "$BOOTSTRAP_ONLY_SEED" ]; then
             echo "✗ Rust seed build failed — no binary produced"
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
-            exit 0
+            exit 1
           fi
 
           echo "Rust seed built:"
-          file "$SEED"
-          ls -lh "$SEED"
+          file "$BOOTSTRAP_ONLY_SEED"
+          ls -lh "$BOOTSTRAP_ONLY_SEED"
 
           # 3. Run native-build: compile Simple source -> native binary
           echo ""
@@ -327,14 +327,15 @@ jobs:
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           mkdir -p build/bootstrap/stage1
           RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
-            "$SEED" native-build \
+            "$BOOTSTRAP_ONLY_SEED" native-build \
             --source-dir src \
             --entry-closure \
             --entry src/app/cli/bootstrap_main.spl \
             --output build/bootstrap/stage1/simple \
             2>&1 || true
 
-          # 4. Verify native-built binary, fall back to seed if failed
+          # 4. Verify the native-built binary. The Rust seed is bootstrap-only
+          # and must never become NEW_RUNTIME_PATH or a release artifact.
           NATIVE_BIN="build/bootstrap/stage1/simple"
           if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
             "./$NATIVE_BIN" -c "print 42" || echo "⚠ -c flag not supported (bootstrap binary)"
@@ -345,10 +346,9 @@ jobs:
             file "$NATIVE_BIN"
             ls -lh "$NATIVE_BIN"
           else
-            echo "⚠ native-build failed or binary broken — falling back to Rust seed"
-            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
-            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            exit 1
           fi
 
       - name: Self-host with LLVM lib backend (macOS stage2)
@@ -385,12 +385,12 @@ jobs:
             echo "⚠ LLVM lib stage2 failed — using stage1 binary"
           fi
 
-      - name: Build native Windows binary via Rust bootstrap
+      - name: Build native Windows binary via bootstrap-only Rust seed
         if: runner.os == 'Windows'
         shell: bash
         run: |
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Building native Windows binary via Rust bootstrap"
+          echo "Building native Windows binary via bootstrap-only Rust seed"
           echo "Platform: ${{ matrix.platform }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -414,16 +414,16 @@ jobs:
           fi
           cd ../..
 
-          SEED="src/compiler_rust/target/${TARGET_DIR}/simple.exe"
-          if [ ! -f "$SEED" ]; then
+          BOOTSTRAP_ONLY_SEED="src/compiler_rust/target/${TARGET_DIR}/simple.exe"
+          if [ ! -f "$BOOTSTRAP_ONLY_SEED" ]; then
             echo "⚠ Rust seed build failed — no binary produced, skipping native build"
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
-            exit 0
+            exit 1
           fi
 
           echo "Rust seed built:"
-          file "$SEED"
-          ls -lh "$SEED"
+          file "$BOOTSTRAP_ONLY_SEED"
+          ls -lh "$BOOTSTRAP_ONLY_SEED"
 
           # 3. For native builds (not cross-compile), try native-build
           if [ -z "$CROSS_TARGET" ]; then
@@ -433,14 +433,15 @@ jobs:
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             mkdir -p build/bootstrap/stage1
             RUST_LOG=error SIMPLE_BOOTSTRAP=1 \
-              "$SEED" native-build \
+              "$BOOTSTRAP_ONLY_SEED" native-build \
               --source-dir src \
               --entry-closure \
               --entry src/app/cli/bootstrap_main.spl \
               --output build/bootstrap/stage1/simple.exe \
               2>&1 || true
 
-            # 4. Verify native-built binary, fall back to seed if failed
+            # 4. Verify the native-built binary. The Rust seed is bootstrap-only
+            # and must never become NEW_RUNTIME_PATH or a release artifact.
             NATIVE_BIN="build/bootstrap/stage1/simple.exe"
             if [ -f "$NATIVE_BIN" ] && "./$NATIVE_BIN" --version 2>/dev/null; then
               "./$NATIVE_BIN" -c "print 42" || echo "⚠ -c flag not supported (bootstrap binary)"
@@ -451,20 +452,18 @@ jobs:
               file "$NATIVE_BIN"
               ls -lh "$NATIVE_BIN"
             else
-              echo "⚠ native-build failed or binary broken — falling back to Rust seed"
-              echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-              echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
-              echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+              echo "✗ native-build failed or binary broken; bootstrap-only Rust seed cannot satisfy release"
+              echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+              exit 1
             fi
           else
-            # Cross-compiled binary — can't run native-build, use seed directly
-            echo "✓ Cross-compiled binary ready (cannot run native-build for cross target)"
-            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
-            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            # A cross-compiled Rust driver is seed-only, not release authority.
+            echo "✗ Cross-compiled bootstrap-only Rust seed cannot satisfy release"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            exit 1
           fi
-          file "$SEED"
-          ls -lh "$SEED"
+          file "$BOOTSTRAP_ONLY_SEED"
+          ls -lh "$BOOTSTRAP_ONLY_SEED"
 
       - name: Build Windows cross-compile binary via Rust
         if: runner.os == 'Linux' && contains(matrix.platform, 'windows') && matrix.cross_compile
@@ -499,14 +498,13 @@ jobs:
           cargo build --profile bootstrap -p simple-driver --target "$RUST_TARGET"
           cd ../..
 
-          SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple.exe"
-          if [ -f "$SEED" ]; then
-            echo "✓ Cross-compiled Windows binary built"
-            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
-            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
-            file "$SEED"
-            ls -lh "$SEED"
+          BOOTSTRAP_ONLY_SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple.exe"
+          if [ -f "$BOOTSTRAP_ONLY_SEED" ]; then
+            echo "✗ Cross-compiled Windows Rust seed is bootstrap-only and cannot satisfy release"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            file "$BOOTSTRAP_ONLY_SEED"
+            ls -lh "$BOOTSTRAP_ONLY_SEED"
+            exit 1
           else
             echo "⚠ Cross-compilation failed"
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
@@ -572,14 +570,13 @@ jobs:
           cargo build --profile bootstrap -p simple-driver --target "$RUST_TARGET"
           cd ../..
 
-          SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple"
-          if [ -f "$SEED" ]; then
-            echo "Cross-compiled FreeBSD binary built"
-            echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/$SEED" >> $GITHUB_ENV
-            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
-            file "$SEED"
-            ls -lh "$SEED"
+          BOOTSTRAP_ONLY_SEED="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple"
+          if [ -f "$BOOTSTRAP_ONLY_SEED" ]; then
+            echo "Cross-compiled FreeBSD Rust seed is bootstrap-only and cannot satisfy release"
+            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            file "$BOOTSTRAP_ONLY_SEED"
+            ls -lh "$BOOTSTRAP_ONLY_SEED"
+            exit 1
           else
             echo "Cross-compilation failed"
             echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
@@ -596,12 +593,6 @@ jobs:
           echo "Version: ${VERSION}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # Check if we have a bootstrap runtime available
-          if [ "${HAVE_BOOTSTRAP:-false}" != "true" ]; then
-            echo "⚠ No bootstrap runtime available for ${PLATFORM}"
-            echo "  Creating source-only package for this platform"
-          fi
-
           # Create package structure
           PKG_DIR="simple-bootstrap-${VERSION}-${PLATFORM}"
           mkdir -p "${PKG_DIR}/bin"
@@ -609,53 +600,52 @@ jobs:
           mkdir -p "${PKG_DIR}/src"
           mkdir -p "${PKG_DIR}/examples"
 
-          # Choose which binary to package (if available)
-          BINARY_TO_PACKAGE=""
-
-          if [ "${HAVE_BOOTSTRAP:-false}" = "true" ]; then
-            # Use newly built runtime if available (Linux committed binary or macOS Rust bootstrap)
-            if [ "${NEW_RUNTIME_BUILT:-false}" = "true" ] && [ -n "${NEW_RUNTIME_PATH}" ]; then
-              echo "✓ Using newly built runtime for packaging"
-              BINARY_TO_PACKAGE="$NEW_RUNTIME_PATH"
-            elif [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then
-              echo "✓ Using bootstrap runtime for packaging"
-              BINARY_TO_PACKAGE="$SIMPLE_RUNTIME"
-            fi
-
-            # Copy binary if we have one
-            if [ -n "$BINARY_TO_PACKAGE" ] && [ -f "$BINARY_TO_PACKAGE" ]; then
-              # Use .exe extension for Windows platforms
-              if [[ "$PLATFORM" == windows-* ]]; then
-                BIN_NAME="simple.exe"
-              else
-                BIN_NAME="simple-runtime"
-              fi
-              cp "$BINARY_TO_PACKAGE" "${PKG_DIR}/bin/${BIN_NAME}"
-              chmod +x "${PKG_DIR}/bin/${BIN_NAME}"
-              if [[ "$PLATFORM" != windows-* ]] && command -v strip >/dev/null 2>&1; then
-                strip "${PKG_DIR}/bin/${BIN_NAME}" || true
-              fi
-              if [[ "$PLATFORM" == windows-* ]]; then
-                printf '%s\r\n' '@echo off' 'set "SIMPLE_ASSET_ROOT=%~dp0.."' '"%~dp0simple.exe" %*' > "${PKG_DIR}/bin/simple.bat"
-              else
-                printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
-                chmod +x "${PKG_DIR}/bin/simple"
-              fi
-              echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
-            else
-              echo "⚠ Warning: No binary available for this platform"
-              echo "  Package will contain source code only"
-            fi
-          else
-            echo "ℹ Creating source-only package (no binary available for ${PLATFORM})"
+          # Release packages require an explicitly selected pure-Simple
+          # self-hosted candidate. Legacy runtimes and Rust seeds are inputs only.
+          if [ "${NEW_RUNTIME_BUILT:-false}" != "true" ] || [ -z "${NEW_RUNTIME_PATH:-}" ] || [ ! -f "$NEW_RUNTIME_PATH" ]; then
+            echo "✗ No pure-Simple self-hosted release candidate for ${PLATFORM}" >&2
+            exit 1
           fi
+          BINARY_TO_PACKAGE="$NEW_RUNTIME_PATH"
+          case "$BINARY_TO_PACKAGE" in
+            */src/compiler_rust/target/*)
+              echo "✗ Rust seed path is bootstrap-only and cannot be packaged: $BINARY_TO_PACKAGE" >&2
+              exit 1
+              ;;
+          esac
+          selfhost_identity_marker='enum construction: unregistered enum'
+          if ! grep -a -q "$selfhost_identity_marker" "$BINARY_TO_PACKAGE" 2>/dev/null; then
+            echo "✗ Release candidate is not a pure-Simple self-hosted binary" >&2
+            exit 1
+          fi
+          echo "✓ Pure-Simple self-hosted release candidate verified"
+
+          # Copy the verified candidate.
+          # Use .exe extension for Windows platforms
+          if [[ "$PLATFORM" == windows-* ]]; then
+            BIN_NAME="simple.exe"
+          else
+            BIN_NAME="simple-runtime"
+          fi
+          cp "$BINARY_TO_PACKAGE" "${PKG_DIR}/bin/${BIN_NAME}"
+          chmod +x "${PKG_DIR}/bin/${BIN_NAME}"
+          if [[ "$PLATFORM" != windows-* ]] && command -v strip >/dev/null 2>&1; then
+            strip "${PKG_DIR}/bin/${BIN_NAME}" || true
+          fi
+          if [[ "$PLATFORM" == windows-* ]]; then
+            printf '%s\r\n' '@echo off' 'set "SIMPLE_ASSET_ROOT=%~dp0.."' '"%~dp0simple.exe" %*' > "${PKG_DIR}/bin/simple.bat"
+          else
+            printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' 'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "${PKG_DIR}/bin/simple"
+            chmod +x "${PKG_DIR}/bin/simple"
+          fi
+          echo "✓ Copied binary: $(basename $BINARY_TO_PACKAGE) → bin/${BIN_NAME}"
 
           # Build and package native MCP entrypoints for host-native jobs.
           # npm launchers prefer these binaries so installed packages do not
           # depend on parsing bundled MCP source with a drifted bootstrap.
           MCP_STAGE_DIR="build/bootstrap/mcp-package"
           mkdir -p "${MCP_STAGE_DIR}"
-          if [ "${HAVE_BOOTSTRAP:-false}" = "true" ] && [ -n "${BINARY_TO_PACKAGE}" ] && [ -x "${BINARY_TO_PACKAGE}" ] && [ "${{ matrix.cross_compile || false }}" != "true" ]; then
+          if [ -x "${BINARY_TO_PACKAGE}" ] && [ "${{ matrix.cross_compile || false }}" != "true" ]; then
             for mcp_entry in "simple_mcp_server:src/app/mcp/main.spl" "simple_lsp_mcp_server:src/app/simple_lsp_mcp/main.spl"; do
               mcp_name="${mcp_entry%%:*}"
               mcp_spl="${mcp_entry#*:}"
@@ -750,7 +740,7 @@ jobs:
   build-installers:
     name: Build Installation Packages
     needs: [check-version, build-bootstrap]
-    if: always() && needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result != 'cancelled'
+    if: needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -1121,7 +1111,7 @@ jobs:
     # Ref gate: publishing is TAG-ONLY. Without this, a workflow_dispatch run on a
     # branch leaves VERSION=${GITHUB_REF#refs/tags/v} unsubstituted (it stays
     # "refs/heads/main") and the job publishes a garbage "vrefs/heads/main" release.
-    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build-bootstrap.result != 'cancelled' && needs.whole-tests.result == 'success'
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build-bootstrap.result == 'success' && needs.build-installers.result == 'success' && needs.simpleos-build.result == 'success' && needs.whole-tests.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1175,17 +1165,17 @@ jobs:
 
           **Release Date:** $(date +%Y-%m-%d)
           **Version Source:** VERSION
-          **Build Method:** Rust seed bootstrap plus self-hosted Simple stages
+          **Build Method:** Pure-Simple self-hosted release binaries; Rust seed is bootstrap-only
 
           ## 🎯 Release Highlights
 
-          This release is built from the current Rust seed and verified through
-          self-hosted Simple bootstrap stages where the platform lane supports
-          them.
+          Every release binary is a verified pure-Simple self-hosted candidate.
+          Rust seed outputs are bootstrap-only inputs and are never packaged or
+          accepted as release authority.
 
           ### Key Features
           ✅ Multi-platform support (Linux, macOS, Windows, FreeBSD)
-          ✅ Built with the current Rust seed / self-hosted bootstrap flow
+          ✅ Pure-Simple self-hosted binaries verified before packaging
           ✅ Comprehensive test suite (4000+ tests)
           ✅ Full source code included
 
@@ -1196,15 +1186,13 @@ jobs:
           Choose the package for your platform:
 
           - **Linux x86_64**: \`simple-bootstrap-${VERSION}-linux-x86_64.spk\` ✅
-          - **Linux ARM64**: \`simple-bootstrap-${VERSION}-linux-aarch64.spk\` (source-only, requires build)
-          - **Linux RISC-V**: \`simple-bootstrap-${VERSION}-linux-riscv64.spk\` (source-only, requires build)
+          - **Linux ARM64**: \`simple-bootstrap-${VERSION}-linux-aarch64.spk\` ✅
+          - **Linux RISC-V**: \`simple-bootstrap-${VERSION}-linux-riscv64.spk\` ✅
           - **macOS ARM64** (Apple Silicon): \`simple-bootstrap-${VERSION}-darwin-arm64.spk\` ✅
           - **macOS x86_64** (Intel): \`simple-bootstrap-${VERSION}-darwin-x86_64.spk\` ✅
           - **FreeBSD x86_64**: \`simple-bootstrap-${VERSION}-freebsd-x86_64.spk\` ✅
           - **Windows x86_64**: \`simple-bootstrap-${VERSION}-windows-x86_64.spk\` ✅
-          - **Windows ARM64**: \`simple-bootstrap-${VERSION}-windows-aarch64.spk\` (source-only, requires build)
-
-          **Note:** Some platforms provide source-only packages that require local compilation.
+          - **Windows ARM64**: \`simple-bootstrap-${VERSION}-windows-aarch64.spk\` ✅
           Platforms marked with ✅ include pre-built binaries.
 
           ### Native Installation Packages

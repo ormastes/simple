@@ -1,0 +1,88 @@
+"""Deterministic child-tool environment projection from two frozen roots."""
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.storage_roots.*
+
+val MAX_TOOL_ID_BYTES: i64 = 192
+
+fn _join(base: text, suffix: text) -> text:
+    if base.ends_with("/"): base + suffix else: base + "/" + suffix
+
+fn _valid_tool_id(tool_id: text) -> bool:
+    if tool_id == "" or tool_id.len() > MAX_TOOL_ID_BYTES:
+        return false
+    if tool_id.starts_with(".") or tool_id.ends_with(".") or tool_id.contains(".."):
+        return false
+    val allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+    var offset = 0
+    while offset < tool_id.len():
+        if allowed.find(tool_id.substring(offset, offset + 1)) < 0:
+            return false
+        offset = offset + 1
+    true
+
+fn _tool_name(tool_id: text) -> text:
+    val separator = tool_id.find(":")
+    if separator < 0: tool_id.lower() else: tool_id.substring(0, separator).lower()
+
+fn _scope(tool_id: text) -> text:
+    sha256_text("child-storage-environment-v1\n" + tool_id).substring(0, 24)
+
+fn _temporary_child(storage_class: StorageClass) -> text?:
+    match storage_class:
+        StorageClass.Ephemeral: Some("tmp")
+        StorageClass.Build: Some("build")
+        StorageClass.TestArtifact: Some("test-artifacts")
+        StorageClass.Evidence: Some("evidence")
+        StorageClass.ManagedWorktree: Some("worktrees")
+        _: nil
+
+fn _binding(key: text, value: text) -> EnvironmentBinding:
+    EnvironmentBinding(key: key, value: value, ownership: StorageOwnership.SimpleManaged)
+
+fn _user_cache(roots: StorageRoots, tool: text, area: text, scope: text) -> text:
+    _join(roots.user_root.value, "cache/" + tool + "/" + area + "/" + scope)
+
+fn _worktree_build(roots: StorageRoots, tool: text, scope: text) -> text:
+    _join(roots.worktree_root.value, "build/" + tool + "/" + scope)
+
+pub fn project_child_storage_environment(
+    roots: StorageRoots,
+    policy: ToolStoragePolicy,
+) -> Result<StableEnvironment, StoragePathError>:
+    if not _valid_tool_id(policy.tool_id):
+        return Err(if policy.tool_id.len() > MAX_TOOL_ID_BYTES:
+            StoragePathError.SegmentTooLong
+        else:
+            StoragePathError.InvalidSegment)
+    val temporary_child = _temporary_child(policy.temporary_class)
+    if temporary_child == nil:
+        return Err(StoragePathError.InvalidSegment)
+
+    val tool = _tool_name(policy.tool_id)
+    val scope = _scope(policy.tool_id)
+    val temporary = _join(
+        roots.worktree_root.value,
+        temporary_child! + "/child/" + tool + "/" + scope,
+    )
+    var bindings: [EnvironmentBinding] = []
+
+    if tool == "cargo" or tool == "rust":
+        bindings.push(_binding("CARGO_HOME", _user_cache(roots, "cargo", "home-v1", scope)))
+        bindings.push(_binding("CARGO_TARGET_DIR", _worktree_build(roots, "cargo", scope)))
+    if tool == "go":
+        bindings.push(_binding("GOCACHE", _user_cache(roots, "go", "build-v1", scope)))
+        bindings.push(_binding("GOTMPDIR", temporary))
+    if tool == "python" or tool == "python3":
+        bindings.push(_binding("PYTHONPYCACHEPREFIX", _user_cache(roots, "python", "pycache-v1", scope)))
+    if tool == "simple":
+        bindings.push(_binding("SIMPLE_CACHE", _user_cache(roots, "simple", "compiler-v1", scope)))
+        bindings.push(_binding("SIMPLE_FRONTEND_CACHE_DIR", _user_cache(roots, "simple", "frontend-v1", scope)))
+        bindings.push(_binding("SIMPLE_HIR_CACHE_DIR", _user_cache(roots, "simple", "hir-v1", scope)))
+        bindings.push(_binding("SIMPLE_NATIVE_BUILD_CACHE_DIR", _worktree_build(roots, "simple", scope)))
+        bindings.push(_binding("SIMPLE_TEST_TMP", temporary))
+
+    bindings.push(_binding(SIMPLE_USER_STORAGE_ROOT, roots.user_root.value))
+    bindings.push(_binding(SIMPLE_WORKTREE_STORAGE_ROOT, roots.worktree_root.value))
+    bindings.push(_binding("TMPDIR", temporary))
+    Ok(StableEnvironment(bindings: bindings))

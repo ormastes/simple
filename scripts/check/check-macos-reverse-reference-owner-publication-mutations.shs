@@ -1,0 +1,145 @@
+#!/bin/sh
+set -eu
+
+root=${1:-.}
+root=$(cd "$root" && pwd)
+STORAGE_ROOTS_REPO_ROOT=$root
+export STORAGE_ROOTS_REPO_ROOT
+. "$root/scripts/lib/storage-roots.shs"
+temporary_root=$(storage_roots_mktemp macos-reverse-reference-owner-mutations)
+
+cleanup() {
+    find "$temporary_root" -depth -delete
+}
+trap cleanup EXIT
+
+files='scripts/check/check-macos-reverse-reference-owner-publication.shs
+test/02_integration/compiler/cache/reverse_reference_projection_receipt_spec.spl
+src/compiler/25.traits/trait_solver.spl
+src/compiler/35.semantics/resolve_strategies.spl
+src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+src/compiler/40.mono/monomorphize/note_sdn.spl
+src/compiler/85.mdsoc/aop_index/reverse_index.spl
+src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl
+src/compiler/50.mir/_MirLowering/module_lowering.spl
+src/compiler/70.backend/linker/symbol_analysis.spl
+src/compiler/80.driver/driver_build/incremental.spl
+src/compiler/00.common/cache/reverse_reference_facts.spl
+src/compiler/80.driver/cache/reverse_reference_receipt.spl
+src/compiler/80.driver/cache/package_scc_scheduler.spl
+src/compiler/80.driver/cache/package_module_index.spl
+src/compiler/00.common/cache/reverse_reference_key.spl'
+
+echo "$files" | while IFS= read -r file; do
+    mkdir -p "$temporary_root/$(dirname "$file")"
+    cp "$root/$file" "$temporary_root/$file"
+done
+
+checker="$temporary_root/scripts/check/check-macos-reverse-reference-owner-publication.shs"
+if MACOS_REVERSE_REFERENCE_STRUCTURAL_ONLY=1 \
+        sh "$checker" "$temporary_root" >/dev/null 2>&1; then
+    status=0
+else
+    status=$?
+fi
+if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 2 ]; then
+        echo "BLOCKED: self-hosted runtime unavailable for reverse-reference owner mutation acceptance" >&2
+        exit 2
+    fi
+    echo "FAIL: owner publication acceptance baseline failed" >&2
+    exit 1
+fi
+
+mutate_and_require_failure() {
+    label=$1
+    file=$2
+    old=$3
+    new=$4
+    target="$temporary_root/$file"
+    OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/' "$target"
+    if cmp -s "$root/$file" "$target"; then
+        echo "FAIL mutation absent: $label" >&2
+        exit 1
+    fi
+    if MACOS_REVERSE_REFERENCE_STRUCTURAL_ONLY=1 \
+            sh "$checker" "$temporary_root" >/dev/null 2>&1; then
+        echo "FAIL mutation survived: $label" >&2
+        exit 1
+    else
+        status=$?
+        if [ "$status" -eq 2 ]; then
+            echo "BLOCKED: self-hosted runtime unavailable for reverse-reference owner mutation acceptance" >&2
+            exit 2
+        fi
+    fi
+    cp "$root/$file" "$target"
+}
+
+mutate_and_require_failure direct-import-export-known \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '    reverse_reference_owner_mark_known_v1("direct-import-export")' \
+  '    pass'
+mutate_and_require_failure module-scc-artifact-known \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '    reverse_reference_owner_mark_known_v1("module-scc-artifact")' \
+  '    pass'
+mutate_and_require_failure direct-import-export-publication \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '        incremental_publish_direct_import_export_v1(
+            dependency, source, deps_iface)' \
+  '    pass'
+mutate_and_require_failure module-scc-peer-publication \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '    reverse_reference_register_module_scc_peer_v1(subject, consumer, evidence)' \
+  '    pass'
+mutate_and_require_failure production-scc-owner-publication \
+  src/compiler/80.driver/cache/package_scc_scheduler.spl \
+  '    package_scc_publish_reverse_reference_peers_v1(
+        generation, group_ids)' \
+  '    pass'
+mutate_and_require_failure import-export-self-publication \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '    incremental_publish_direct_import_export_v1(
+        source, source, fingerprint.content_hash)' \
+  '    pass'
+mutate_and_require_failure module-edge-self-publication \
+  src/compiler/80.driver/driver_build/incremental.spl \
+  '    incremental_publish_module_scc_artifact_v1(
+        source, source,
+        if module_witness == "": fingerprint.content_hash else: module_witness)' \
+  '    pass'
+mutate_and_require_failure trait-family-seam \
+  src/compiler/25.traits/trait_solver.spl \
+  '    reverse_reference_register_trait_candidate_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_trait_candidate_v1("", consumer, evidence)'
+mutate_and_require_failure unresolved-family-seam \
+  src/compiler/35.semantics/resolve_strategies.spl \
+  '    reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_unresolved_method_v1("", consumer, evidence)'
+mutate_and_require_failure annotation-family-seam \
+  src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl \
+  '    reverse_reference_register_annotation_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_annotation_v1("", consumer, evidence)'
+mutate_and_require_failure generic-family-seam \
+  src/compiler/40.mono/monomorphize/note_sdn.spl \
+  '        subject, consumer, evidence)' \
+  '        "", consumer, evidence)'
+mutate_and_require_failure aop-family-seam \
+  src/compiler/85.mdsoc/aop_index/reverse_index.spl \
+  '    reverse_reference_register_aop_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_aop_v1("", consumer, evidence)'
+mutate_and_require_failure runtime-provider-family-seam \
+  src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl \
+  '    reverse_reference_register_runtime_provider_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_runtime_provider_v1("", consumer, evidence)'
+mutate_and_require_failure initializer-family-seam \
+  src/compiler/50.mir/_MirLowering/module_lowering.spl \
+  '    reverse_reference_register_initializer_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_initializer_v1("", consumer, evidence)'
+mutate_and_require_failure relocation-family-seam \
+  src/compiler/70.backend/linker/symbol_analysis.spl \
+  '    reverse_reference_register_relocation_v1(subject, consumer, evidence)' \
+  '    reverse_reference_register_relocation_v1("", consumer, evidence)'
+
+echo "PASS: reverse-reference owner publication mutations rejected"

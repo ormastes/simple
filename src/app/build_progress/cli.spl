@@ -1,0 +1,41 @@
+"""Concise reader for the atomically replaced build progress snapshot."""
+
+use std.nogc_sync_mut.build_progress.{read_build_progress, render_build_progress, encode_build_progress}
+use app.io.env_ops.{env_get}
+
+fn _default_snapshot_path() -> text:
+    val explicit = env_get("SIMPLE_BUILD_PROGRESS_SNAPSHOT") ?? ""
+    if explicit != "": return explicit
+    val worktree_root = env_get("SIMPLE_WORKTREE_STORAGE_ROOT") ?? ""
+    if worktree_root == "": return ""
+    worktree_root + "/build/progress/current.sdn"
+
+pub fn run_build_progress_cli(args: [text]) -> i64:
+    var path = _default_snapshot_path()
+    var as_raw = false
+    var index = 1
+    while index < args.len():
+        if args[index] == "--raw":
+            as_raw = true
+        elif args[index] == "--path" and index + 1 < args.len():
+            path = args[index + 1]
+            index = index + 1
+        elif args[index].starts_with("--path="):
+            path = args[index].substring(7)
+        else:
+            print "usage: simple build-progress [--raw] [--path PATH]"
+            return 2
+        index = index + 1
+    if path == "":
+        print "build progress unavailable: storage roots are not resolved"
+        return 1
+    match read_build_progress(path):
+        Ok(snapshot):
+            if as_raw:
+                print encode_build_progress(snapshot)
+            else:
+                print render_build_progress(snapshot)
+            0
+        Err(_):
+            print "build progress unavailable: " + path
+            1

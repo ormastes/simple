@@ -6,14 +6,17 @@
 # and the object/capsule receipts selected from build_cache.sdn.  A later exact
 # hit restores the cached artifact atomically and does not start the worker.
 
-use app.io.env_ops.{env_get, cwd}
+use app.io.env_ops.{env_get, env_set, cwd}
+use std.scv.compile_snapshot.{
+    scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
+}
 use std.io_runtime.{
     dir_create_all, dir_exists, dir_list, file_copy, file_delete, file_exists,
     file_hash_sha256, file_read, file_rename, file_write, getpid,
     host_os
 }
 
-val NATIVE_BUILD_WARM_RECEIPT_VERSION: text = "simple-native-warm-receipt-v3"
+val NATIVE_BUILD_WARM_RECEIPT_VERSION: text = "simple-native-warm-receipt-v4"
 val NATIVE_BUILD_WARM_CANDIDATE_VERSION: text = "simple-native-warm-candidate-v1"
 val NATIVE_BUILD_WARM_CANDIDATE_ENV: text = "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE"
 
@@ -220,7 +223,8 @@ fn _warm_canonical_args(args: [text]) -> text:
     framed.join("")
 
 fn _warm_cache_dir(args: [text]) -> text:
-    var result = "build/native_cache"
+    val user_root = env_get("SIMPLE_USER_STORAGE_ROOT") ?? ""
+    var result = if user_root == "": "build/native_cache" else: "{user_root}/cache/compiler/native-build/v1"
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -231,7 +235,7 @@ fn _warm_cache_dir(args: [text]) -> text:
         if arg.starts_with("--cache-dir="):
             result = arg.substring(12)
         i = i + 1
-    if result == "": result = "build/native_cache"
+    if result == "": result = if user_root == "": "build/native_cache" else: "{user_root}/cache/compiler/native-build/v1"
     _warm_lexical_abs(result)
 
 fn _warm_has_entry_closure(args: [text]) -> bool:
@@ -274,12 +278,84 @@ fn _warm_reuse_forbidden(args: [text]) -> bool:
             return true
     false
 
+fn _warm_scv_explicit_inputs(args: [text]) -> (text, [text]):
+    var entry = ""
+    var source_dirs: [text] = []
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--entry" and index + 1 < args.len():
+            index = index + 1
+            entry = args[index]
+        elif arg.starts_with("--entry="):
+            entry = arg.substring(8)
+        elif arg == "--source" and index + 1 < args.len():
+            index = index + 1
+            source_dirs = source_dirs.push(args[index])
+        elif arg.starts_with("--source="):
+            source_dirs = source_dirs.push(arg.substring(9))
+        index = index + 1
+    (entry, source_dirs)
+
+fn _warm_scv_binding() -> text:
+    val revision = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
+    val commit = env_get("SIMPLE_SCV_COMMIT_ID") ?? ""
+    val tree = env_get("SIMPLE_SCV_TREE_ID") ?? ""
+    val inventory = env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? ""
+    for value in [revision, commit, tree, inventory]:
+        if value == "" or value.contains("|") or value.contains("\n") or value.contains("\r"):
+            return ""
+    revision + "|" + commit + "|" + tree + "|" + inventory
+
+fn _warm_scv_prepare(args: [text]) -> bool:
+    val inputs = _warm_scv_explicit_inputs(args)
+    val inherited_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    if (inputs.0 == "" or inputs.1.len() == 0) and inherited_root != "":
+        val opened = scv_compile_snapshot_open_v1(
+            ".", inherited_root,
+            env_get("SIMPLE_SCV_REVISION_ID") ?? "",
+            env_get("SIMPLE_SCV_COMMIT_ID") ?? "",
+            env_get("SIMPLE_SCV_TREE_ID") ?? "",
+            env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "")
+        return opened.valid
+    if inputs.0 == "" or inputs.1.len() == 0:
+        return false
+    var inventory_roots = inputs.1
+    if not inventory_roots.contains(inputs.0):
+        inventory_roots = inventory_roots.push(inputs.0)
+    val snapshot = scv_compile_snapshot_acquire_v1(
+        ".", "build/scv", inventory_roots)
+    if not snapshot.valid:
+        return false
+    val bound = (
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root) and
+        env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id) and
+        env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id) and
+        env_set("SIMPLE_SCV_TREE_ID", snapshot.tree_id) and
+        env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot.inventory_digest) and
+        env_set("SIMPLE_SCV_SOURCE_DRIFTED",
+            if snapshot.source_drifted: "1" else: "0"))
+    if not bound:
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", "")
+        env_set("SIMPLE_SCV_REVISION_ID", "")
+        env_set("SIMPLE_SCV_COMMIT_ID", "")
+        env_set("SIMPLE_SCV_TREE_ID", "")
+        env_set("SIMPLE_SCV_INVENTORY_DIGEST", "")
+        env_set("SIMPLE_SCV_SOURCE_DRIFTED", "")
+    bound
+
 fn _warm_frontend_identity(args: [text], simple_bin: text) -> text:
+    if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
+        return ""
     val binary_digest = file_hash_sha256(simple_bin)
     if not _warm_valid_digest(binary_digest):
         return ""
+    val scv_binding = _warm_scv_binding()
+    if scv_binding == "":
+        return ""
     var rows = [
         "binary=" + binary_digest,
+        "scv=" + scv_binding,
         "cache_scope=" + (env_get("SIMPLE_CACHE_SCOPE") ?? ""),
         "frontend_scope=" + (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""),
         "frontend_dir=" + (env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""),
@@ -532,19 +608,22 @@ pub fn native_build_warm_candidate_publish(paths: [text]) -> bool:
         rows.len().to_text() + "\n" + rows.join("\n")
     _warm_write_atomic(path, payload)
 
-fn _warm_receipt_hit(path: text, key: text, artifact_path: text) -> (i64, text):
+fn _warm_receipt_hit(
+    path: text, key: text, artifact_path: text, scv_binding: text
+) -> (i64, text):
     if not file_exists(path):
         return (0, "")
     val payload = _warm_checked_payload(file_read(path), NATIVE_BUILD_WARM_RECEIPT_VERSION)
     if payload == "":
         return (0, "")
     val lines = payload.split("\n")
-    if (lines.len() < 7 or lines[1] != "key=" + key or
-            not lines[2].starts_with("artifact=") or
-            not lines[3].starts_with("source_count=") or
-            not lines[4].starts_with("input_count=")):
+    if (lines.len() < 8 or lines[1] != "key=" + key or
+            lines[2] != "scv=" + scv_binding or
+            not lines[3].starts_with("artifact=") or
+            not lines[4].starts_with("source_count=") or
+            not lines[5].starts_with("input_count=")):
         return (0, "")
-    val artifact_row = lines[2].substring(9)
+    val artifact_row = lines[3].substring(9)
     val artifact_tab = artifact_row.last_index_of("\t")
     if artifact_tab <= 0:
         return (0, "")
@@ -553,9 +632,9 @@ fn _warm_receipt_hit(path: text, key: text, artifact_path: text) -> (i64, text):
     if (recorded_artifact != artifact_path or not _warm_valid_digest(artifact_digest) or
             not file_exists(artifact_path) or file_hash_sha256(artifact_path) != artifact_digest):
         return (0, "")
-    val source_count = lines[3].substring(13).to_i64() ?? -1
-    val input_count = lines[4].substring(12).to_i64() ?? -1
-    val rows = _warm_rows_from_payload(payload, 5)
+    val source_count = lines[4].substring(13).to_i64() ?? -1
+    val input_count = lines[5].substring(12).to_i64() ?? -1
+    val rows = _warm_rows_from_payload(payload, 6)
     if (source_count <= 0 or input_count <= 0 or
             source_count + input_count != rows.len()):
         return (0, "")
@@ -571,6 +650,8 @@ pub fn native_build_warm_receipt_prepare(args: [text], simple_bin: text) -> Nati
     # also commands to run the real worker, not artifact-reuse requests.
     if (not _warm_has_entry_closure(args) or not _warm_has_explicit_output(args) or
             not _warm_args_paths_supported(args) or _warm_reuse_forbidden(args)):
+        return _warm_empty_state()
+    if not _warm_scv_prepare(args):
         return _warm_empty_state()
     if ((env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
             (env_get("SIMPLE_HIR_CACHE") ?? "") == "0"):
@@ -589,7 +670,7 @@ pub fn native_build_warm_receipt_prepare(args: [text], simple_bin: text) -> Nati
     val artifact_path = root + "/" + key + ".artifact"
     val _stale = file_delete(candidate_path)
     val (closure_count, artifact_digest) = _warm_receipt_hit(
-        receipt_path, key, artifact_path)
+        receipt_path, key, artifact_path, _warm_scv_binding())
     NativeBuildWarmReceiptState(
         eligible: true, hit: closure_count > 0, key: key,
         receipt_path: receipt_path, candidate_path: candidate_path,
@@ -668,7 +749,8 @@ pub fn native_build_warm_receipt_finish(
                             _warm_copy_verified_atomic(state.output_path,
                                 state.artifact_path, output_digest)):
                         val payload = NATIVE_BUILD_WARM_RECEIPT_VERSION + "\nkey=" +
-                            state.key + "\nartifact=" + state.artifact_path + "\t" +
+                            state.key + "\nscv=" + _warm_scv_binding() +
+                            "\nartifact=" + state.artifact_path + "\t" +
                             output_digest + "\nsource_count=" + count.to_text() +
                             "\ninput_count=" + input_rows.len().to_text() + "\n" +
                             rows.join("\n") + "\n" + input_rows.join("\n")

@@ -1,0 +1,40 @@
+# @req MBH-REQ-004 MBH-REQ-005 MBH-REQ-006 MBH-REQ-009
+use std.spec.{describe, it, expect, step}
+use compiler.common.cache.phase_compatibility_manifest.{
+    PhaseCompatibilityManifestV1,
+    phase_compatibility_manifest_read_only_v1,
+    phase_compatibility_compare_outputs_v1
+}
+
+describe "macOS bootstrap M3 cross-phase reuse evidence":
+    it "should preserve separate writable cache ownership":
+        step("Invoke the production read-only compatibility gate")
+        val separate = PhaseCompatibilityManifestV1(
+            1, "cache/phase2", "cache/phase3", "cache/phase2/build-cache.sdn",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "owner", "root", [])
+        val shared = PhaseCompatibilityManifestV1(
+            1, "cache/shared", "cache/shared", "cache/shared/build-cache.sdn",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "owner", "root", [])
+        expect(phase_compatibility_manifest_read_only_v1(
+            separate, "cache/phase3")).to_equal("ok")
+        expect(phase_compatibility_manifest_read_only_v1(
+            separate, "cache/wrong")).to_equal("wrong-phase3-cache-root")
+        expect(phase_compatibility_manifest_read_only_v1(
+            shared, "cache/shared")).to_equal("phase2-cache-not-read-only")
+
+    it "should compare normalized production output receipts":
+        step("Invoke the production comparator with permitted volatile fields")
+        val same = phase_compatibility_compare_outputs_v1(
+            "ok\nbuild_elapsed_us=10\npeak_rss_bytes=20\n",
+            "ok\r\nbuild_elapsed_us=99\r\npeak_rss_bytes=88\r\n")
+        expect(same.equal).to_equal(true)
+        expect(same.reason).to_equal("normalized-byte-identical")
+
+    it "should turn a semantic output mutation red":
+        step("Change a non-volatile output byte through the production comparator")
+        val changed = phase_compatibility_compare_outputs_v1(
+            "result=A\n", "result=B\n")
+        expect(changed.equal).to_equal(false)
+        expect(changed.reason).to_equal("normalized-output-mismatch")

@@ -17,14 +17,16 @@
 # function bodies, and any declaration whose declared visibility is private.
 
 use std.common.crypto.sha256.{sha256_text}
-use compiler.driver.cache.action_key.{
-    canon_str, canon_nat, canon_field, canon_seq, action_key_sort_texts}
-use compiler.tools.api_surface.{
+use compiler.common.cache.canonical_identity.{
+    canon_str, canon_nat, canon_field, canon_seq,
+    canonical_identity_sort_texts as action_key_sort_texts}
+use compiler.common.api_surface_contract.{
     ApiSurface, FunctionSignature, StructSignature, ClassSignature,
     EnumSignature, TraitSignature, FieldSignature}
 
 # Domain tags (schema-versioned; distinct per digest kind).
 val COMPILE_INTERFACE_DOMAIN: text = "simple/compile-interface/v1"
+val ABI_INTERFACE_DOMAIN: text = "simple/abi-interface/v1"
 
 # A declaration is part of the public surface unless explicitly private.
 # nil visibility = module default = public.
@@ -73,6 +75,24 @@ fn encode_interface_fields(fields: [FieldSignature]) -> text:
             items.push(canon_seq(ff))
     canon_seq(items)
 
+# ABI field layout is ordinal: append, rename, retype, and reorder must all
+# produce a distinct digest. Keep the ordinal explicit so an encoder mutation
+# cannot accidentally turn this ordered layout into a name-keyed set.
+fn encode_abi_fields(fields: [FieldSignature]) -> text:
+    var items: [text] = []
+    var ordinal = 0
+    for f in fields:
+        # ApiSurface contains exported records, but their private fields still
+        # occupy layout slots. Omitting them would let a private-field change
+        # preserve the ABI digest while changing the value representation.
+        var ff: [text] = []
+        ff.push(canon_field("ordinal", canon_nat(ordinal)))
+        ff.push(canon_field("name", canon_str(f.name)))
+        ff.push(canon_field("type", canon_str(f.type_name ?? "_")))
+        items.push(canon_seq(ff))
+        ordinal = ordinal + 1
+    canon_seq(items)
+
 fn encode_interface_struct(sig: StructSignature) -> text:
     var inner: [text] = []
     inner.push(canon_field("name", canon_str(sig.name)))
@@ -108,6 +128,22 @@ fn encode_interface_trait(sig: TraitSignature) -> text:
     inner.push(canon_field("methods", canon_seq(methods)))
     canon_field("trait", canon_seq(inner))
 
+fn encode_abi_struct(sig: StructSignature) -> text:
+    var inner: [text] = []
+    inner.push(canon_field("name", canon_str(sig.name)))
+    inner.push(canon_field("fields", encode_abi_fields(sig.fields)))
+    canon_field("struct", canon_seq(inner))
+
+fn encode_abi_class(sig: ClassSignature) -> text:
+    var methods: [text] = []
+    for m in action_key_sort_texts(sig.methods):
+        methods.push(canon_str(m))
+    var inner: [text] = []
+    inner.push(canon_field("name", canon_str(sig.name)))
+    inner.push(canon_field("fields", encode_abi_fields(sig.fields)))
+    inner.push(canon_field("methods", canon_seq(methods)))
+    canon_field("class", canon_seq(inner))
+
 # ---- whole-surface digest -------------------------------------------------
 
 # Canonical item texts for the public surface. A SET: sorted before hashing,
@@ -130,3 +166,24 @@ fn compile_interface_parts(surface: ApiSurface) -> [text]:
 
 fn compile_interface_digest(surface: ApiSurface) -> text:
     interface_digest_with_domain(COMPILE_INTERFACE_DOMAIN, compile_interface_parts(surface))
+
+# Canonical ABI parts. Non-record declarations reuse the typed public-surface
+# encoding; records use the explicit field-ordinal layout above.
+fn abi_interface_parts(surface: ApiSurface) -> [text]:
+    var parts: [text] = []
+    for name in surface.functions.keys():
+        val sig = surface.functions[name]
+        if interface_visibility_is_public(sig.declared_visibility):
+            parts.push(encode_interface_function(sig))
+    for name in surface.structs.keys():
+        parts.push(encode_abi_struct(surface.structs[name]))
+    for name in surface.classes.keys():
+        parts.push(encode_abi_class(surface.classes[name]))
+    for name in surface.enums.keys():
+        parts.push(encode_interface_enum(surface.enums[name]))
+    for name in surface.traits.keys():
+        parts.push(encode_interface_trait(surface.traits[name]))
+    parts
+
+fn abi_interface_digest(surface: ApiSurface) -> text:
+    interface_digest_with_domain(ABI_INTERFACE_DOMAIN, abi_interface_parts(surface))

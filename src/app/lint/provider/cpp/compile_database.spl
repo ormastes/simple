@@ -1,0 +1,49 @@
+use std.common.json.{json_parse, json_to_array, json_to_string, json_object_get}
+use app.lint.provider.cpp.model.{CompileCommandV1, CompileCommandSelectionV1, CompileCommandStatus, CppAnalysisState, select_compile_command_v1}
+
+pub struct CompileDatabaseParseV1:
+    valid: bool
+    commands: [CompileCommandV1]
+    reason: text
+
+fn _json_text_v1(value: any?) -> text:
+    if value == nil:
+        return ""
+    if val extracted = json_to_string(value):
+        return extracted
+    ""
+
+fn _json_text_array_v1(value: any?) -> [text]:
+    var result: [text] = []
+    if value == nil:
+        return result
+    if val values = json_to_array(value):
+        for item in values:
+            val entry = _json_text_v1(item)
+            if entry != "":
+                result.push(entry)
+    result
+
+pub fn parse_compile_commands_v1(content: text) -> CompileDatabaseParseV1:
+    val parsed = json_parse(content)
+    if parsed == nil:
+        return CompileDatabaseParseV1(false, [], "compile_commands.json is malformed JSON")
+    if val entries = json_to_array(parsed):
+        var commands: [CompileCommandV1] = []
+        for entry in entries:
+            val directory = _json_text_v1(json_object_get(entry, "directory"))
+            val file = _json_text_v1(json_object_get(entry, "file"))
+            val command = _json_text_v1(json_object_get(entry, "command"))
+            val arguments = _json_text_array_v1(json_object_get(entry, "arguments"))
+            val configuration_id = _json_text_v1(json_object_get(entry, "configuration_id"))
+            if directory == "" or file == "" or (command == "" and arguments.len() == 0):
+                return CompileDatabaseParseV1(false, [], "compile command requires directory, file, and command or arguments")
+            commands.push(CompileCommandV1(directory, file, arguments, command, configuration_id))
+        return CompileDatabaseParseV1(true, commands, "")
+    CompileDatabaseParseV1(false, [], "compile_commands.json root must be an array")
+
+pub fn resolve_compile_command_v1(content: text, translation_unit: text, configuration_hint: text, compile_database_path: text) -> CompileCommandSelectionV1:
+    val parsed = parse_compile_commands_v1(content)
+    if not parsed.valid:
+        return CompileCommandSelectionV1(CompileCommandStatus.Malformed, CppAnalysisState.NotAnalyzed, nil, 0, parsed.reason)
+    select_compile_command_v1(parsed.commands, translation_unit, configuration_hint, compile_database_path)

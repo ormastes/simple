@@ -16,6 +16,10 @@ use std.nogc_sync_mut.shell.file (rename)
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
+use app.io._CliCompile.build_intermediate_policy.{
+    native_build_cleanup_stale_intermediates, native_build_finish_intermediate,
+    native_build_intermediate_name, native_build_output_name
+}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
 use app.io._CliCompile.compile_llvm_ir_facade.{
     cli_compile_source_llvm_artifacts
@@ -32,6 +36,26 @@ use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    darwin_target_identity_digest_v1, publish_current_native_action_input_v1,
+    load_current_native_action_input_v1, darwin_macho_slice_error_v1,
+    canonical_darwin_target_triple_v1, canonical_darwin_deployment_target_v1,
+    canonical_darwin_cpu_features_v1, darwin_sdk_identity_v1,
+    darwin_link_tool_identity_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, digest_is_sha256,
+    publish_dependency_manifest_layer_v1, publish_imported_closure_layer_v1,
+    target_cache_namespace_v1, target_action_key_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.darwin_runtime_provider_manifest.{
+    darwin_runtime_provider_manifest_content_identity_v1
+}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.platform.{host_os, host_arch}
+use std.io_runtime.{cwd}
 
 use std.io_runtime.{read_file_text}
 extern fn rt_path_absolute(path: text) -> text
@@ -59,6 +83,129 @@ fn _cli_file_remove_impl(path: text) -> bool:
 
 fn _cli_file_rename_impl(source: text, destination: text) -> bool:
     rename(source, destination)
+
+fn _native_build_relative_identity_path(repo_root: text, path: text) -> text:
+    val prefix = repo_root + "/"
+    if path.starts_with(prefix):
+        return path[prefix.len():]
+    path
+
+fn _native_build_provider_identity(cache_dir: text, backend: text) -> [text]:
+    val path = cache_dir + "/native_provider_identity.receipt"
+    if not _cli_file_exists_impl(path):
+        return []
+    val lines = read_file_text(path).trim().split("\n")
+    if lines.len() != 3 or lines[0] != "simple-native-provider-identity-v1" or
+            lines[1] != "backend=" + backend or
+            not lines[2].starts_with("provider="):
+        return []
+    val provider = lines[2][9:]
+    if not digest_is_sha256(provider): return []
+    [provider]
+
+fn _native_build_runtime_manifest_identity(cache_dir: text, architecture: text) -> text:
+    darwin_runtime_provider_manifest_content_identity_v1(
+        cache_dir + "/native_runtime_provider_manifest.receipt", architecture
+    )
+
+fn _publish_and_admit_darwin_native_action_v1(
+    cache_dir: text, output: text, entry_point: text, native_inputs: [text], backend: text,
+    native_target: text, opt_level: i64, release: bool, artifact_kind: text
+) -> text:
+    val os_name = host_os()
+    var target_triple = native_target
+    if target_triple == "" and (os_name == "macos" or os_name == "darwin"):
+        val architecture = if host_arch() == "arm64": "aarch64" else: host_arch()
+        target_triple = architecture + "-apple-darwin"
+    target_triple = canonical_darwin_target_triple_v1(target_triple)
+    if target_triple == "":
+        return ""
+    val architecture = target_triple.split("-")[0]
+    val cpu = env_get("SIMPLE_NATIVE_CPU") ?? ""
+    val cpu_features = canonical_darwin_cpu_features_v1(cpu)
+    val artifact_error = darwin_macho_slice_error_v1(output, architecture)
+    if artifact_error != "": return artifact_error
+    val deployment_target = canonical_darwin_deployment_target_v1(
+        env_get("MACOSX_DEPLOYMENT_TARGET") ?? ""
+    )
+    val sdk_root = env_get("SDKROOT") ?? ""
+    if deployment_target == "" or sdk_root == "":
+        return "target-identity-error: darwin-deployment-or-sdk-missing"
+    val sdk_identity = darwin_sdk_identity_v1(sdk_root)
+    if sdk_identity == "":
+        return "target-identity-error: sdk-settings-evidence-missing-or-unreadable"
+    val provider_evidence = _native_build_provider_identity(cache_dir, backend)
+    if provider_evidence.len() != 1:
+        return "target-identity-error: native-provider-identity-missing"
+    val exact_provider_receipt = provider_evidence[0]
+    val runtime_artifact_digest = _native_build_runtime_manifest_identity(
+        cache_dir, architecture
+    )
+    if runtime_artifact_digest == "":
+        return "target-identity-error: runtime-provider-manifest-missing-or-invalid"
+    val linker_tool_identity = darwin_link_tool_identity_v1(cache_dir)
+    if linker_tool_identity == "":
+        return "target-identity-error: linker-tool-identity-missing-or-invalid"
+    val repo_root = rt_path_absolute(".")
+    val entry = _native_build_relative_identity_path(repo_root, entry_point)
+    var closure_inputs: [ImportedClosureInputV1] = []
+    for input_path in native_inputs:
+        val relative = _native_build_relative_identity_path(repo_root, input_path)
+        if relative.starts_with("/") or not _cli_file_exists_impl(input_path):
+            return "target-identity-error: native-input-not-repo-relative"
+        closure_inputs.push(ImportedClosureInputV1(relative, file_hash_sha256(input_path)))
+    val dependencies = publish_dependency_manifest_layer_v1(
+        repo_root, cache_dir, entry, []
+    )
+    if not digest_is_sha256(dependencies): return dependencies
+    val tool_path = _native_build_relative_identity_path(repo_root, cli_current_exe_path())
+    if not _cli_file_exists_impl(tool_path):
+        return "target-identity-error: current-tool-artifact-missing"
+    val tool_artifact = file_hash_sha256(tool_path)
+    val closure = publish_imported_closure_layer_v1(
+        repo_root, cache_dir, entry, entry, tool_artifact, dependencies, closure_inputs
+    )
+    if not digest_is_sha256(closure): return closure
+    val optimization = "opt=" + opt_level.to_text() + "|release=" + release.to_text()
+    val target_identity = darwin_target_identity_digest_v1(
+        target_triple, architecture, cpu_features, deployment_target, sdk_identity, backend,
+        optimization, "mach-o", "darwin-dead-strip-v1",
+        linker_tool_identity, exact_provider_receipt, runtime_artifact_digest
+    )
+    val producer_abi = sha256_text("simple-native-action-producer-v1|" + tool_artifact)
+    val cache_namespace = target_cache_namespace_v1(
+        producer_abi, target_identity, if release: "release" else: "debug", artifact_kind
+    )
+    val action_key = target_action_key_v1(
+        entry, "native-build", "native", backend, cache_namespace,
+        dependencies, closure, tool_artifact, artifact_kind
+    )
+    val identity = NativeActionInputIdentityV1(
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: entry,
+        action: "native-build", entry: entry, tool_path: tool_path,
+        tool_artifact_digest: tool_artifact, tool_behavior_digest: tool_artifact,
+        producer_abi_digest: producer_abi, target_identity_digest: target_identity,
+        profile: if release: "release" else: "debug",
+        dependency_manifest_digest: dependencies, imported_closure_digest: closure,
+        target_triple: target_triple, architecture: architecture,
+        cpu_features: cpu_features,
+        deployment_target: deployment_target, sdk_identity: sdk_identity,
+        backend: backend, optimization: optimization, object_format: "mach-o",
+        linker_policy: "darwin-dead-strip-v1",
+        linker_tool_identity: linker_tool_identity,
+        runtime_provider_receipt: exact_provider_receipt,
+        runtime_artifact_digest: runtime_artifact_digest,
+        action_key: action_key, errors: []
+    )
+    val publish_error = publish_current_native_action_input_v1(cache_dir, identity)
+    if publish_error != "": return publish_error
+    val admitted = load_current_native_action_input_v1(
+        repo_root, cache_dir, entry, "native", backend, entry, artifact_kind,
+        tool_artifact, target_triple, architecture, deployment_target,
+        sdk_identity, exact_provider_receipt, runtime_artifact_digest,
+        sdk_root, cpu
+    )
+    if admitted.errors.len() > 0: admitted.errors[0] else: ""
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0` checks,
 # NOT std.path.stem/extension: those match rfind's raw i64 result against
@@ -145,7 +292,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
         if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
             i = i + 1
             continue
-        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
+        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast" or arg == "--keep-intermediates" or arg == "--print-intermediates":
             i = i + 1
             continue
         if arg == "--log":
@@ -498,6 +645,8 @@ fn cli_native_build(args: [text]) -> i64:
             cli_print_shared_opt_level_help()
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
+            print "  --keep-intermediates Retain diagnostic temporary files after failure"
+            print "  --print-intermediates Retain and print diagnostic temporary paths"
             print "  --emit-object        Emit relocatable object output instead of linking executable"
             print "  --emit-archive       Emit a static archive instead of linking executable"
             print "  --emit-shared        Emit a native shared library with no entry shim"
@@ -607,6 +756,9 @@ fn cli_native_build(args: [text]) -> i64:
         var no_borrow_check = false
         var no_mangle = false
         var low_memory = false
+        var print_intermediates = (env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") ?? "") == "1"
+        var keep_intermediates = (env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? "") == "1" or
+            print_intermediates
         var j = 0
         # Skip "native-build" command name
         if args.len() > 0 and args[0] == "native-build":
@@ -659,6 +811,11 @@ fn cli_native_build(args: [text]) -> i64:
                 verbose = true
             elif a == "--strip":
                 strip = true
+            elif a == "--keep-intermediates":
+                keep_intermediates = true
+            elif a == "--print-intermediates":
+                keep_intermediates = true
+                print_intermediates = true
             elif a == "--emit-smf":
                 emit_smf = true
             elif a == "--emit-object":
@@ -876,7 +1033,15 @@ fn cli_native_build(args: [text]) -> i64:
         # satisfy the success check when a driver/linker reports Success without
         # writing its artifact; conversely, a failed build must leave the last
         # known-good requested output untouched.
-        val staged_output = "{output}.simple-native-build-{getpid()}-{time_now_unix_micros()}.tmp"
+        match native_build_cleanup_stale_intermediates(output):
+            case Err(reason):
+                _cli_eprint("Error: {reason}")
+                return 1
+            case Ok(removed):
+                if verbose and removed.len() > 0:
+                    _cli_eprint("[native-build] Removed {removed.len()} stale intermediates")
+        val staged_output = out_parent + "/" + native_build_intermediate_name(
+            native_build_output_name(output), getpid(), time_now_unix_micros())
         if _cli_file_exists_impl(staged_output) and not _cli_file_remove_impl(staged_output):
             _cli_eprint("Error: could not clear stale native-build staging output {staged_output}")
             return 1
@@ -899,6 +1064,9 @@ fn cli_native_build(args: [text]) -> i64:
         val old_native_runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
         val old_core_runtime_path = env_get("SIMPLE_CORE_RUNTIME_PATH") ?? ""
+        val old_native_noop_final_output = env_get("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT") ?? ""
+        val old_keep_intermediates = env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? ""
+        val old_print_intermediates = env_get("SIMPLE_PRINT_BUILD_INTERMEDIATES") ?? ""
         val set_native_target = native_target != ""
         val set_native_cpu = native_cpu != ""
         if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
@@ -960,6 +1128,12 @@ fn cli_native_build(args: [text]) -> i64:
         val _nb_target_opt_ctx = target_opt_context_default()
         driver_entry_scan_cache_reset()
 
+        val native_action_inputs = _native_build_entry_closure(entry_point, source_dirs)
+        if not env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", output):
+            _cli_eprint("Error: could not export SIMPLE_NATIVE_NOOP_FINAL_OUTPUT={output}")
+            return 1
+        env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", if keep_intermediates: "1" else: "")
+        env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", if print_intermediates: "1" else: "")
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types (CompileOptions, CompileMode)
@@ -986,6 +1160,7 @@ fn cli_native_build(args: [text]) -> i64:
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.strip_output = strip
             options.opt_level = opt_level
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
@@ -1023,6 +1198,7 @@ fn cli_native_build(args: [text]) -> i64:
             options.backend = backend
             options.native_target = native_target
             options.release = release
+            options.strip_output = strip
             options.opt_level = opt_level
             options.low_memory = low_memory
             options.target_opt_ctx = _nb_target_opt_ctx
@@ -1034,6 +1210,9 @@ fn cli_native_build(args: [text]) -> i64:
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
+        env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", old_native_noop_final_output)
+        env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", old_keep_intermediates)
+        env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", old_print_intermediates)
         match result:
             case CompileResult.Success(_):
                 # Root-cause guard for the exit-0-with-no-binary hang
@@ -1062,12 +1241,12 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
                     if native_threads > 0:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
-                    _cli_file_remove_impl(staged_output)
+                    native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                     _cli_eprint("error: native-build reported success but produced no fresh output binary: {staged_output}")
                     _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
                     return 1
                 if not _cli_file_rename_impl(staged_output, output):
-                    _cli_file_remove_impl(staged_output)
+                    native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                     env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                     env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                     env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
@@ -1117,6 +1296,44 @@ fn cli_native_build(args: [text]) -> i64:
                         env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
                     _cli_eprint("Error: failed to update launch metadata sidecar: {metadata_path}")
                     return 1
+                val native_action_artifact_kind = if emit_object:
+                    "object"
+                elif emit_archive:
+                    "archive"
+                elif emit_shared:
+                    "shared"
+                else:
+                    "binary"
+                val native_identity_error = _publish_and_admit_darwin_native_action_v1(
+                    cache_dir, output, entry_point, native_action_inputs, backend,
+                    native_target, opt_level, release, native_action_artifact_kind
+                )
+                if native_identity_error != "":
+                    _cli_dir_create_impl(cache_dir + "/inputs", true)
+                    _cli_file_write_impl(
+                        cache_dir + "/inputs/admission-failure.receipt",
+                        "simple-native-action-admission-failure-v1\nreason=" +
+                            native_identity_error + "\n"
+                    )
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                    env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_eprint("error: native-build Darwin identity admission failed: {native_identity_error}")
+                    return 1
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
@@ -1145,7 +1362,7 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint(dynload_pack_notice)
                 return 0
             case _:
-                _cli_file_remove_impl(staged_output)
+                native_build_finish_intermediate(staged_output, keep_intermediates, print_intermediates)
                 env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
                 env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)

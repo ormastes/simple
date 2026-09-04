@@ -1,0 +1,63 @@
+use common.kernel_plugin.ids.{KpfId128, kpf_id128_equal, kpf_id128_is_zero}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+
+pub struct KpfStaticBinding:
+    provider_id: KpfId128
+    interface_id: KpfId128
+    operation_table_token: u64
+
+pub struct KpfStaticBindingResult:
+    status: KpfSyncStatus
+    slot: u32
+    binding: KpfStaticBinding
+
+class KpfStaticRegistry:
+    var bindings: [KpfStaticBinding]
+    capacity: u32
+    var count: u32
+    var sealed: bool
+
+    static fn create(capacity: u32) -> KpfStaticRegistry:
+        var bindings: [KpfStaticBinding] = []
+        var index = 0u32
+        while index < capacity:
+            bindings.push(KpfStaticBinding(provider_id: KpfId128(hi: 0, lo: 0), interface_id: KpfId128(hi: 0, lo: 0), operation_table_token: 0))
+            index = index + 1
+        KpfStaticRegistry(bindings: bindings, capacity: capacity, count: 0, sealed: false)
+
+    me bind(binding: KpfStaticBinding) -> KpfSyncStatus:
+        if self.sealed: return KpfSyncStatus.RegistrySealed
+        if kpf_id128_is_zero(binding.provider_id) or kpf_id128_is_zero(binding.interface_id) or binding.operation_table_token == 0:
+            return KpfSyncStatus.IdentityMissing
+        if self.count >= self.capacity: return KpfSyncStatus.CapacityExceeded
+        var index = 0u32
+        while index < self.count:
+            if kpf_id128_equal(self.bindings[index].interface_id, binding.interface_id): return KpfSyncStatus.RegistryDuplicate
+            index = index + 1
+        self.bindings[self.count] = binding
+        self.count = self.count + 1
+        KpfSyncStatus.Ok
+
+    me seal() -> KpfSyncStatus:
+        self.sealed = true
+        KpfSyncStatus.Ok
+
+    fn resolve(interface_id: KpfId128) -> KpfStaticBindingResult:
+        val empty = KpfStaticBinding(provider_id: KpfId128(hi: 0, lo: 0), interface_id: KpfId128(hi: 0, lo: 0), operation_table_token: 0)
+        if not self.sealed: return KpfStaticBindingResult(status: KpfSyncStatus.RegistryNotSealed, slot: 0, binding: empty)
+        var index = 0u32
+        while index < self.count:
+            if kpf_id128_equal(self.bindings[index].interface_id, interface_id):
+                return KpfStaticBindingResult(status: KpfSyncStatus.Ok, slot: index, binding: self.bindings[index])
+            index = index + 1
+        KpfStaticBindingResult(status: KpfSyncStatus.RegistryMissing, slot: 0, binding: empty)
+
+    fn binding_at(slot: u32) -> KpfStaticBindingResult:
+        val empty = KpfStaticBinding(provider_id: KpfId128(hi: 0, lo: 0), interface_id: KpfId128(hi: 0, lo: 0), operation_table_token: 0)
+        if not self.sealed: return KpfStaticBindingResult(status: KpfSyncStatus.RegistryNotSealed, slot: slot, binding: empty)
+        if slot >= self.count: return KpfStaticBindingResult(status: KpfSyncStatus.RegistryMissing, slot: slot, binding: empty)
+        KpfStaticBindingResult(status: KpfSyncStatus.Ok, slot: slot, binding: self.bindings[slot])
+
+    fn storage_capacity() -> u32: self.capacity
+
+    fn size() -> u32: self.count

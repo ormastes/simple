@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+fail() { printf '%s\n' "FAIL: release-small-unwind-rtti: $1"; exit 1; }
+error() { printf '%s\n' "ERROR: release-small-unwind-rtti: $1"; exit 2; }
+need() { command -v "$1" >/dev/null 2>&1 || error "required tool unavailable: $1"; }
+
+binary=
+proof=
+target=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --binary) [ "$#" -ge 2 ] || error '--binary requires a path'; binary=$2; shift 2 ;;
+        --proof) [ "$#" -ge 2 ] || error '--proof requires a path'; proof=$2; shift 2 ;;
+        --target) [ "$#" -ge 2 ] || error '--target requires a triple'; target=$2; shift 2 ;;
+        *) error "unknown argument: $1" ;;
+    esac
+done
+[ -f "$binary" ] || error "binary not found: $binary"
+[ -f "$proof" ] || error "proof not found: $proof"
+[ -n "$target" ] || error '--target is required'
+
+proof_value() {
+    key=$1
+    count=$(awk -F= -v key="$key" '$1 == key { count += 1 } END { print count + 0 }' "$proof")
+    [ "$count" -eq 1 ] || error "proof key must occur exactly once: $key"
+    awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$proof"
+}
+
+[ "$(proof_value schema)" = 'simple/no-unwind-proof/v1' ] || fail 'proof-schema-mismatch'
+[ "$(proof_value profile)" = 'release-small' ] || fail 'profile-not-release-small'
+[ "$(proof_value target_triple)" = "$target" ] || fail 'target-proof-mismatch'
+for key in closure_digest toolchain_digest proof_digest; do
+    value=$(proof_value "$key")
+    printf '%s' "$value" | grep -Eq '^[0-9a-f]{64}$' || fail "invalid-$key"
+done
+for key in all_objects_classified all_foreign_boundaries_classified exceptions_absent foreign_unwind_absent cleanup_landing_pads_absent stack_unwind_absent rtti_absent personality_absent; do
+    [ "$(proof_value "$key")" = true ] || fail "proof-incomplete-$key"
+done
+
+case "$target" in
+    *-apple-darwin*|*-apple-macos*) format=macho ;;
+    *-linux-*|*-freebsd-*|*-simpleos-*) format=elf ;;
+    *-windows-*|*-pc-windows*) format=pe ;;
+    *) error "unsupported target scanner: $target" ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/release-small-unwind-rtti.XXXXXX") || error 'mktemp failed'
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+sections=$tmp/sections
+symbols=$tmp/symbols
+deps=$tmp/deps
+
+case "$format" in
+    macho)
+        need otool; need nm
+        otool -l "$binary" >"$sections" 2>/dev/null || error 'Mach-O section scan failed'
+        nm -a "$binary" >"$symbols" 2>/dev/null || error 'Mach-O symbol scan failed'
+        otool -L "$binary" >"$deps" 2>/dev/null || error 'Mach-O dependency scan failed'
+        ;;
+    elf)
+        if command -v readelf >/dev/null 2>&1; then
+            readelf -SW "$binary" >"$sections" 2>/dev/null || error 'ELF section scan failed'
+            readelf -Ws "$binary" >"$symbols" 2>/dev/null || error 'ELF symbol scan failed'
+            readelf -d "$binary" >"$deps" 2>/dev/null || error 'ELF dependency scan failed'
+        elif command -v llvm-readobj >/dev/null 2>&1; then
+            llvm-readobj --sections "$binary" >"$sections" 2>/dev/null || error 'ELF section scan failed'
+            llvm-readobj --symbols "$binary" >"$symbols" 2>/dev/null || error 'ELF symbol scan failed'
+            llvm-readobj --dynamic-table "$binary" >"$deps" 2>/dev/null || error 'ELF dependency scan failed'
+        else
+            error 'ELF scanner unavailable (readelf or llvm-readobj required)'
+        fi
+        ;;
+    pe)
+        if command -v llvm-readobj >/dev/null 2>&1; then
+            llvm-readobj --sections "$binary" >"$sections" 2>/dev/null || error 'PE section scan failed'
+            llvm-readobj --symbols "$binary" >"$symbols" 2>/dev/null || error 'PE symbol scan failed'
+            llvm-readobj --coff-imports "$binary" >"$deps" 2>/dev/null || error 'PE dependency scan failed'
+        elif command -v dumpbin >/dev/null 2>&1; then
+            dumpbin /headers "$binary" >"$sections" 2>/dev/null || error 'PE section scan failed'
+            dumpbin /symbols "$binary" >"$symbols" 2>/dev/null || error 'PE symbol scan failed'
+            dumpbin /imports "$binary" >"$deps" 2>/dev/null || error 'PE dependency scan failed'
+        else
+            error 'PE scanner unavailable (llvm-readobj or dumpbin required)'
+        fi
+        ;;
+esac
+
+for pattern in '__TEXT,__unwind_info|__LD,__compact_unwind|__gcc_except_tab|\.eh_frame|\.eh_frame_hdr|\.gcc_except_table|\.pdata|\.xdata'; do
+    grep -Eiq "$pattern" "$sections" && fail "forbidden-section:$pattern"
+done
+for pattern in '__gxx_personality_v0|__gcc_personality_v0|__cxa_throw|__cxa_rethrow|__cxa_begin_catch|__cxa_end_catch|_Unwind_|_ZTI|_ZTS|_ZTVN10__cxxabiv1|typeinfo for|vtable for __cxxabiv1|\?\?_R[0-4]'; do
+    grep -Eiq "$pattern" "$symbols" && fail "forbidden-symbol:$pattern"
+done
+grep -Eiq 'lib(unwind|gcc_s|c\+\+|stdc\+\+)|VCRUNTIME|MSVCP' "$deps" && fail 'forbidden-unwind-rtti-dependency'
+
+printf '%s\n' "STATUS: PASS release-small unwind/RTTI proof target=$target binary=$binary"

@@ -1,0 +1,120 @@
+# @req KPM-REQ-004 KPM-REQ-007 KPM-REQ-009 KPM-NFR-002
+use std.spec.*
+use common.plugin.iface_id.{IfaceId}
+use compiler.tools.lint.static_rules.{
+    LINT_RULE_ERROR_MAJOR, LINT_RULE_IFACE_NAME, LINT_RULE_IFACE_MINOR,
+    LintParamsV1, LintUnit, StaticLintCategory,
+    StaticLintFinding, StaticLintLevel, StaticLintRule,
+    lint_rule_contract_digest_v1, lint_rule_host_iface,
+    lint_rule_negotiate_v1, lint_rule_provider_digest_v1, lint_rule_provider_iface,
+    static_lint_rule, static_lint_rule_table, run_static_lint_rule_table
+}
+use compiler.tools.lint.rules.param_tag_rule.{param_tag_lint_rule}
+use compiler.tools.lint.rules.silent_default_rule.{silent_default_lint_rule}
+
+fn fixture_unit() -> LintUnit:
+    LintUnit("fixture.spl", "STATIC_LINT_FIXTURE\n")
+
+fn fixture_check(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    if unit.content.contains("STATIC_LINT_FIXTURE"):
+        return [StaticLintFinding(
+            "FIXTURE-LINT", StaticLintLevel.Warn, StaticLintCategory.Warning,
+            "registered fixture lint fired", "remove the fixture marker", 1, 0)]
+    []
+
+fn fixture_rule(major: i64 = 1) -> StaticLintRule:
+    val provider = lint_rule_provider_iface("fixture_marker")
+    static_lint_rule(
+        "fixture_marker",
+        IfaceId(LINT_RULE_IFACE_NAME, major, LINT_RULE_IFACE_MINOR,
+            provider.abi_digest),
+        fixture_check)
+
+describe "Static lint-rule table":
+    it "negotiates a bootstrap lint provider before table dispatch":
+        val verdict = lint_rule_negotiate_v1(fixture_rule())
+        expect(verdict.code()).to_equal("OK")
+        expect(verdict.accepted()).to_equal(true)
+        print("KPM_PHASE4_BOOTSTRAP_NEGOTIATION_RECEIPT=negotiate:Ok")
+    # KPM-NFR-002: registration dispatch occurs at the table seam, not per node.
+    it "runs a registered rule":
+        val run = run_static_lint_rule_table(
+            LintParamsV1.defaults(), fixture_unit(), [fixture_rule()])
+        expect(run.errors.len()).to_equal(0)
+        expect([finding.code for finding in run.findings]).to_contain("FIXTURE-LINT")
+
+    it "does not run an unregistered rule":
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), fixture_unit(), [])
+        expect(run.errors.len()).to_equal(0)
+        expect(run.findings.len()).to_equal(0)
+
+    it "refuses a mismatched major before dispatch":
+        val run = run_static_lint_rule_table(
+            LintParamsV1.defaults(), fixture_unit(), [fixture_rule(2)])
+        expect(run.findings.len()).to_equal(0)
+        expect(run.errors).to_contain("{LINT_RULE_ERROR_MAJOR}:fixture_marker")
+
+    it "refuses a provider that copied a sibling provider identity":
+        val copied = static_lint_rule(
+            "fixture_marker", lint_rule_provider_iface("silent_default"), fixture_check)
+        val run = run_static_lint_rule_table(
+            LintParamsV1.defaults(), fixture_unit(), [copied])
+        print("KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=BEGIN expected=PLUG-E-DIGEST:fixture_marker")
+        if run.errors.contains("PLUG-E-DIGEST:fixture_marker") == false:
+            print("KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=FAIL expected=PLUG-E-DIGEST:fixture_marker actual=missing-copied-provider-digest")
+        expect(run.findings.len()).to_equal(0)
+        expect(run.errors).to_contain("PLUG-E-DIGEST:fixture_marker")
+        print("KPM_PHASE4_COPIED_PROVIDER_ASSERTION_RECEIPT case=copied-provider state=PASS expected=PLUG-E-DIGEST:fixture_marker")
+
+    it "refuses a provider that copied the host contract digest":
+        val copied = static_lint_rule(
+            "fixture_marker", lint_rule_host_iface(), fixture_check)
+        val run = run_static_lint_rule_table(
+            LintParamsV1.defaults(), fixture_unit(), [copied])
+        expect(run.findings.len()).to_equal(0)
+        expect(run.errors).to_contain("PLUG-E-DIGEST:fixture_marker")
+
+    it "refuses a host with a prewritten or mutated contract digest":
+        val expected = lint_rule_host_iface()
+        val params = LintParamsV1(
+            LintParamsV1.defaults().hdr,
+            IfaceId(expected.name, expected.major, expected.minor, "forged"), [])
+        val run = run_static_lint_rule_table(params, fixture_unit(), [fixture_rule()])
+        expect(run.findings.len()).to_equal(0)
+        expect(run.errors).to_contain("PLUG-E-HOST-DIGEST")
+
+    it "derives every production row from its own canonical provider identity":
+        expect(lint_rule_host_iface().abi_digest).to_equal(lint_rule_contract_digest_v1())
+        var seen: [text] = []
+        for rule in static_lint_rule_table():
+            val expected = lint_rule_provider_digest_v1(rule.id())
+            expect(rule.iface().abi_digest).to_equal(expected)
+            expect(seen.contains(expected)).to_equal(false)
+            seen.push(expected)
+
+    it "runs two pre-existing sibling rules through table rows":
+        val param_tag_run = run_static_lint_rule_table(
+            LintParamsV1.defaults(),
+            LintUnit("src/lib/nogc_sync_mut/example.spl",
+                "pub fn hash_combine_pair(h1: i64, h2: i64) -> i64:\n    h1 + h2\n"),
+            [param_tag_lint_rule()])
+        val silent_run = run_static_lint_rule_table(
+            LintParamsV1.defaults(),
+            LintUnit("src/app/demo.spl",
+                "fn f():\n    val slot = table.slot_of(key).unwrap_or(0)\n"),
+            [silent_default_lint_rule()])
+        expect([finding.code for finding in param_tag_run.findings]).to_contain("PTAG001")
+        expect([finding.code for finding in silent_run.findings]).to_contain("W-MC-DEF-001")
+
+    it "removing one pre-existing row silences only that rule":
+        val unit = LintUnit("src/lib/nogc_sync_mut/example.spl",
+            "pub fn hash_combine_pair(h1: i64, h2: i64) -> i64:\n    val slot = table.slot_of(key).unwrap_or(0)\n")
+        val only_param_tag = run_static_lint_rule_table(
+            LintParamsV1.defaults(), unit, [param_tag_lint_rule()])
+        val only_silent = run_static_lint_rule_table(
+            LintParamsV1.defaults(), unit, [silent_default_lint_rule()])
+        expect([finding.code for finding in only_param_tag.findings]).to_contain("PTAG001")
+        expect([finding.code for finding in only_param_tag.findings].contains("W-MC-DEF-001")).to_equal(false)
+        expect([finding.code for finding in only_silent.findings]).to_contain("W-MC-DEF-001")
+        expect([finding.code for finding in only_silent.findings].contains("PTAG001")).to_equal(false)

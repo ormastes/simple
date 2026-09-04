@@ -1,0 +1,85 @@
+use app.spipe.testing.*
+use compiler.hir.demand.deferred_body.*
+use compiler.hir.demand.hir_demand_set.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn demand_body(
+    identity: text, materialized: bool, operations: [text],
+    dependencies: [HirDemandDependencyV1]
+) -> DeferredHirBodyV1:
+    DeferredHirBodyV1(
+        identity: identity,
+        owner_symbol: "symbol:{identity}",
+        snapshot_revision: "snapshot-v1",
+        semantic_digest: sha256_text("semantic:{identity}"),
+        materialized: materialized,
+        operations: operations,
+        dependencies: dependencies,
+        recorded_reads: [HirDemandReadV1(
+            identity, "source:{identity}", "semantic",
+            sha256_text("read:{identity}"))])
+
+describe "frozen minimum HIR demand closure":
+    it "selects only required body operation generic and provider facts":
+        val root = demand_body("root", true, ["call"], [
+            HirDemandDependencyV1(
+                "helper", HirDemandDependencyKindV1.operation, "invoke"),
+            HirDemandDependencyV1(
+                "shape:pointer", HirDemandDependencyKindV1.generic_shape, ""),
+            HirDemandDependencyV1(
+                "provider:allocator", HirDemandDependencyKindV1.provider, "")])
+        val helper = demand_body("helper", false, ["invoke"], [])
+        val unrelated = demand_body("unrelated", true, ["call"], [])
+        val result = hir_demand_close_v1(
+            "snapshot-v1", [unrelated, helper, root],
+            [HirDemandRequestV1("root", "call")])
+        expect(result.is_ok()).to_equal(true)
+        val demand = result.unwrap()
+        expect(demand.body_identities).to_equal(["helper", "root"])
+        expect(demand.operations).to_equal(["helper:invoke", "root:call"])
+        expect(demand.generic_shapes).to_equal(["shape:pointer"])
+        expect(demand.providers).to_equal(["provider:allocator"])
+        expect(demand.deferred_bodies).to_equal(["helper"])
+        expect(demand.recorded_reads.len()).to_equal(2)
+
+    it "returns deterministic SCCs independent of discovery order":
+        val left = demand_body("left", true, ["call"], [
+            HirDemandDependencyV1(
+                "right", HirDemandDependencyKindV1.body, "")])
+        val right = demand_body("right", true, ["call"], [
+            HirDemandDependencyV1(
+                "left", HirDemandDependencyKindV1.body, "")])
+        val forward = hir_demand_close_v1(
+            "snapshot-v1", [left, right],
+            [HirDemandRequestV1("left", "call")]).unwrap()
+        val reverse = hir_demand_close_v1(
+            "snapshot-v1", [right, left],
+            [HirDemandRequestV1("left", "call")]).unwrap()
+        expect(forward.sccs.len()).to_equal(1)
+        expect(forward.sccs[0].members).to_equal(["left", "right"])
+        expect(reverse.sccs[0].identity).to_equal(forward.sccs[0].identity)
+        expect(reverse.digest).to_equal(forward.digest)
+
+    it "fails closed rather than inventing a missing dependency":
+        val root = demand_body("root", true, ["call"], [
+            HirDemandDependencyV1(
+                "absent", HirDemandDependencyKindV1.body, "")])
+        val result = hir_demand_close_v1(
+            "snapshot-v1", [root], [HirDemandRequestV1("root", "call")])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(HirDemandErrorV1.missing_dependency)
+
+    it "rejects unsupported operations rather than guessing semantics":
+        val root = demand_body("root", true, ["call"], [])
+        val result = hir_demand_close_v1(
+            "snapshot-v1", [root], [HirDemandRequestV1("root", "invented")])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(HirDemandErrorV1.unsupported_operation)
+
+    it "rejects bodies from a different frozen snapshot":
+        var root = demand_body("root", true, ["call"], [])
+        root.snapshot_revision = "snapshot-v2"
+        val result = hir_demand_close_v1(
+            "snapshot-v1", [root], [HirDemandRequestV1("root", "call")])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal(HirDemandErrorV1.invalid_body)

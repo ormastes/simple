@@ -1,0 +1,236 @@
+# Immutable source-side authority for dirty package-index modules.
+
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_find_v1
+}
+use compiler.common.cache.phase_compatibility_path_io.{
+    phase_compatibility_existing_artifact_io_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_file_size(path: text) -> i64
+
+val DIRTY_MODULE_MAX_SOURCE_BYTES_V1: i64 = 256 * 1024 * 1024
+
+enum DirtyModuleRecordErrorV1:
+    outside_snapshot
+    identity_drift
+    inventory_mismatch
+    dependency_missing
+    dependency_ambiguous
+    read_set_invalid
+    producer_mismatch
+    variant_mismatch
+
+struct FrozenSourceReadSetV1:
+    source_identity: text
+    offset: i64
+    extent: i64
+    whole_file: bool
+    content_digest: text
+
+struct DirtyModuleRecordV1:
+    package_id: text
+    module_id: text
+    source_identity: text
+    scv_revision: text
+    scv_tree_digest: text
+    scv_inventory_digest: text
+    source_content_digest: text
+    semantic_digest: text
+    export_digest: text
+    initializer_digest: text
+    provider_digest: text
+    direct_dependency_module_ids: [text]
+    direct_dependency_package_ids: [text]
+    read_set: [FrozenSourceReadSetV1]
+    package_index_generation: text
+    producer_compatibility_id: text
+    configuration_variant: text
+
+fn dirty_module_text_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn dirty_module_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn dirty_module_strip_comments_v1(content: text) -> text:
+    var rows: [text] = []
+    for line in content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        rows = rows.push(trimmed.split_whitespace().join(" "))
+    rows.join("\n")
+
+fn dirty_module_facet_digest_v1(content: text, facet: text) -> text:
+    val canonical = dirty_module_strip_comments_v1(content)
+    if facet == "semantic":
+        return sha256_text(canonical)
+    var rows: [text] = []
+    for line in canonical.split("\n"):
+        if (facet == "export" and (line.starts_with("export ") or
+                line.starts_with("pub "))) or
+                (facet == "initializer" and (line.starts_with("val ") or
+                    line.starts_with("var ") or line.starts_with("init "))) or
+                (facet == "provider" and (line.starts_with("use ") or
+                    line.starts_with("impl ") or line.starts_with("provider "))):
+            rows = rows.push(line)
+    sha256_text(rows.join("\n"))
+
+fn dirty_module_sorted_unique_v1(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values.sorted():
+        if not dirty_module_text_valid_v1(value):
+            return []
+        if result.len() == 0 or result[result.len() - 1] != value:
+            result = result.push(value)
+    result
+
+fn dirty_module_record_validate_v1(record: DirtyModuleRecordV1) -> text:
+    if (not dirty_module_text_valid_v1(record.package_id) or
+            not dirty_module_text_valid_v1(record.module_id) or
+            not dirty_module_text_valid_v1(record.source_identity)):
+        return "identity_drift"
+    if (not dirty_module_text_valid_v1(record.scv_revision) or
+            not dirty_module_text_valid_v1(record.scv_tree_digest) or
+            not dirty_module_digest_valid_v1(record.scv_inventory_digest)):
+        return "inventory_mismatch"
+    if not dirty_module_digest_valid_v1(record.source_content_digest):
+        return "identity_drift"
+    for digest in [record.semantic_digest, record.export_digest,
+            record.initializer_digest, record.provider_digest]:
+        if not dirty_module_digest_valid_v1(digest):
+            return "inventory_mismatch"
+    if (not dirty_module_digest_valid_v1(record.producer_compatibility_id) or
+            not dirty_module_text_valid_v1(record.package_index_generation)):
+        return "producer_mismatch"
+    if not dirty_module_digest_valid_v1(record.configuration_variant):
+        return "variant_mismatch"
+    val modules = dirty_module_sorted_unique_v1(record.direct_dependency_module_ids)
+    val packages = dirty_module_sorted_unique_v1(record.direct_dependency_package_ids)
+    if modules.len() != record.direct_dependency_module_ids.len():
+        return "dependency_ambiguous"
+    if packages.len() != record.direct_dependency_package_ids.len():
+        return "dependency_ambiguous"
+    if record.read_set.len() != 1:
+        return "read_set_invalid"
+    val read = record.read_set[0]
+    if (read.source_identity != record.source_identity or read.offset != 0 or
+            read.extent <= 0 or not read.whole_file or
+            read.content_digest != record.source_content_digest):
+        return "read_set_invalid"
+    "ok"
+
+fn dirty_module_record_admit_v1(
+    generation: PackageModuleIndexGenerationV1,
+    entry: PackageModuleIndexEntryV1,
+    snapshot_root: text,
+    expected_revision: text,
+    expected_tree: text,
+    expected_inventory: text,
+    expected_producer: text,
+    expected_root_generation: text,
+    expected_variant: text
+) -> Result[DirtyModuleRecordV1, DirtyModuleRecordErrorV1]:
+    if (generation.scv_revision_id != expected_revision or
+            generation.scv_tree_id != expected_tree or
+            generation.inventory_digest != expected_inventory):
+        return Err(DirtyModuleRecordErrorV1.inventory_mismatch)
+    if (generation.producer_digest != expected_producer or
+            generation.root_generation != expected_root_generation):
+        return Err(DirtyModuleRecordErrorV1.producer_mismatch)
+    if not dirty_module_digest_valid_v1(expected_variant):
+        return Err(DirtyModuleRecordErrorV1.variant_mismatch)
+    val source = phase_compatibility_existing_artifact_io_v1(
+        snapshot_root, entry.source_identity)
+    if not source.valid:
+        if source.reason == "artifact-outside-root":
+            return Err(DirtyModuleRecordErrorV1.outside_snapshot)
+        return Err(DirtyModuleRecordErrorV1.identity_drift)
+    val extent = rt_file_size(source.canonical_path)
+    if extent <= 0 or extent > DIRTY_MODULE_MAX_SOURCE_BYTES_V1:
+        return Err(DirtyModuleRecordErrorV1.read_set_invalid)
+    val content = rt_file_read_regular_no_follow_bounded(source.canonical_path, extent)
+    if content == nil or content!.len() != extent or
+            sha256_text(content!) != entry.source_digest:
+        return Err(DirtyModuleRecordErrorV1.identity_drift)
+    var dependency_packages: [text] = []
+    for dependency_id in entry.direct_imports:
+        val dependency = package_module_index_find_v1(generation, dependency_id)
+        if dependency == nil:
+            return Err(DirtyModuleRecordErrorV1.dependency_missing)
+        dependency_packages = dependency_packages.push(dependency!.package_identity)
+    dependency_packages = dirty_module_sorted_unique_v1(dependency_packages)
+    val record = DirtyModuleRecordV1(
+        entry.package_identity, entry.module_identity, source.canonical_path,
+        generation.scv_revision_id, generation.scv_tree_id,
+        generation.inventory_digest, entry.source_digest,
+        dirty_module_facet_digest_v1(content!, "semantic"),
+        dirty_module_facet_digest_v1(content!, "export"),
+        dirty_module_facet_digest_v1(content!, "initializer"),
+        dirty_module_facet_digest_v1(content!, "provider"),
+        entry.direct_imports, dependency_packages,
+        [FrozenSourceReadSetV1(
+            source.canonical_path, 0, extent, true, entry.source_digest)],
+        generation.root_generation, generation.producer_digest,
+        expected_variant)
+    val reason = dirty_module_record_validate_v1(record)
+    if reason == "ok":
+        return Ok(record)
+    if reason == "dependency_ambiguous":
+        return Err(DirtyModuleRecordErrorV1.dependency_ambiguous)
+    if reason == "read_set_invalid":
+        return Err(DirtyModuleRecordErrorV1.read_set_invalid)
+    Err(DirtyModuleRecordErrorV1.identity_drift)
+
+fn dirty_module_records_sort_validate_v1(
+    records: [DirtyModuleRecordV1]
+) -> Result[[DirtyModuleRecordV1], DirtyModuleRecordErrorV1]:
+    var sorted = records
+    var left = 0
+    while left < sorted.len():
+        var least = left
+        var right = left + 1
+        while right < sorted.len():
+            val candidate = "{sorted[right].package_id}\n{sorted[right].module_id}"
+            val current = "{sorted[least].package_id}\n{sorted[least].module_id}"
+            if candidate < current:
+                least = right
+            right = right + 1
+        if least != left:
+            val swap = sorted[left]
+            sorted[left] = sorted[least]
+            sorted[least] = swap
+        left = left + 1
+    var previous = ""
+    for record in sorted:
+        val reason = dirty_module_record_validate_v1(record)
+        if reason != "ok":
+            if reason == "inventory_mismatch":
+                return Err(DirtyModuleRecordErrorV1.inventory_mismatch)
+            if reason == "producer_mismatch":
+                return Err(DirtyModuleRecordErrorV1.producer_mismatch)
+            if reason == "variant_mismatch":
+                return Err(DirtyModuleRecordErrorV1.variant_mismatch)
+            if reason == "dependency_ambiguous":
+                return Err(DirtyModuleRecordErrorV1.dependency_ambiguous)
+            if reason == "read_set_invalid":
+                return Err(DirtyModuleRecordErrorV1.read_set_invalid)
+            return Err(DirtyModuleRecordErrorV1.identity_drift)
+        val identity = "{record.package_id}\n{record.module_id}"
+        if identity == previous:
+            return Err(DirtyModuleRecordErrorV1.dependency_ambiguous)
+        previous = identity
+    Ok(sorted)
+
+export DirtyModuleRecordErrorV1, FrozenSourceReadSetV1, DirtyModuleRecordV1
+export dirty_module_record_validate_v1, dirty_module_record_admit_v1
+export dirty_module_records_sort_validate_v1

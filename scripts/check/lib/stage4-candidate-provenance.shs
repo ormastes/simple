@@ -76,7 +76,7 @@ stage4_validate_candidate_lane() (
 )
 
 stage4_write_candidate_provenance() (
-  [ "$#" -eq 12 ] || exit 1
+  [ "$#" -eq 13 ] || exit 1
   binary="$(bootstrap_stage3_canonical_file "$1")" || exit 1
   provenance="$2"
   root="$(CDPATH= cd -- "$3" && pwd -P)" || exit 1
@@ -89,6 +89,8 @@ stage4_write_candidate_provenance() (
   bootstrap_lock="$(bootstrap_stage3_canonical_path "${10}")" || exit 1
   build_log="$(bootstrap_stage3_canonical_file "${11}")" || exit 1
   smoke_log="$(bootstrap_stage3_canonical_file "${12}")" || exit 1
+  provenance_mode="${13}"
+  case "$provenance_mode" in generic|phase7-llvm) ;; *) exit 1 ;; esac
   helper="$(bootstrap_stage3_canonical_file "$STAGE4_PROVENANCE_HELPER_PATH")" || exit 1
 
   [ "$provenance" = "${binary}.provenance.env" ] || exit 1
@@ -103,6 +105,18 @@ stage4_write_candidate_provenance() (
     [ "$(bootstrap_stage3_manifest_value stage3_provenance_sha256 "$continuation")" = "$(bootstrap_stage3_hash_file "$stage3_manifest")" ] || exit 1
     [ "$(bootstrap_stage3_manifest_value parent_compiler_path "$continuation")" = "$parent_compiler" ] || exit 1
     [ "$(bootstrap_stage3_manifest_value parent_compiler_sha256 "$continuation")" = "$(bootstrap_stage3_hash_file "$parent_compiler")" ] || exit 1
+    planner_receipt="$(bootstrap_stage3_manifest_value planner_receipt_path "$continuation")" || exit 1
+    planner_receipt="$(bootstrap_stage3_canonical_file "$planner_receipt")" || exit 1
+    planner_sha="$(bootstrap_stage3_hash_file "$planner_receipt")" || exit 1
+    candidate_sha="$(bootstrap_stage3_hash_file "$parent_compiler")" || exit 1
+    source_sha="$(bootstrap_stage3_manifest_value source_fingerprint "$stage3_manifest")" || exit 1
+    backend_name="$(bootstrap_stage3_manifest_value backend "$stage3_manifest")" || exit 1
+    expected_binding=$(printf '%s\n' \
+      "planner_sha256=$planner_sha" \
+      "candidate_sha256=$candidate_sha" \
+      "source_fingerprint=$source_sha" \
+      "backend=$backend_name" | bootstrap_stage3_hash_stdin) || exit 1
+    [ "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$continuation")" = "$expected_binding" ] || exit 1
     [ "$(bootstrap_stage3_manifest_value bootstrap_lock_path "$continuation")" = "$bootstrap_lock" ] || exit 1
     recorded_pid="$(bootstrap_stage3_manifest_value bootstrap_lock_owner_pid "$continuation")" || exit 1
   else
@@ -145,11 +159,30 @@ stage4_write_candidate_provenance() (
     echo "essential_tools_log_path=$smoke_log"
     echo "essential_tools_log_sha256=$(bootstrap_stage3_hash_file "$smoke_log")"
     echo "completed_gate=stage4-essential-tools-smoke"
+    if [ "$provenance_mode" = phase7-llvm ]; then
+      [ -n "${SIMPLE_PHASE7_LLVM_RECEIPT:-}" ] || exit 1
+      llvm_receipt="$(bootstrap_stage3_canonical_file "$SIMPLE_PHASE7_LLVM_RECEIPT")" || exit 1
+      echo "llvm_toolchain_receipt_path=$llvm_receipt"
+      echo "llvm_toolchain_receipt_sha256=$(bootstrap_stage3_hash_file "$llvm_receipt")"
+    fi
+    if [ -n "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
+      echo "stage4_continuation_path=$continuation"
+      echo "stage4_continuation_sha256=$(bootstrap_stage3_hash_file "$continuation")"
+      echo "planner_stage4_binding_sha256=$expected_binding"
+    fi
   } >"$tmp" || exit 1
   mv "$tmp" "$provenance"
 )
 
-stage4_verify_candidate_provenance() (
+stage4_verify_phase7_llvm_binding() (
+  provenance="$1" root="$2"
+  llvm_receipt="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_path "$provenance")")" || exit 1
+  [ "$(bootstrap_stage3_manifest_value llvm_toolchain_receipt_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$llvm_receipt")" ] || exit 1
+  . "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+  kernel_phase7_verify_llvm_toolchain_receipt "$llvm_receipt"
+)
+
+stage4_verify_candidate_provenance_generic() (
   provenance="$(bootstrap_stage3_canonical_file "$1")" || exit 1
   binary="$(bootstrap_stage3_canonical_file "$2")" || exit 1
   root="$(CDPATH= cd -- "$3" && pwd -P)" || exit 1
@@ -189,4 +222,26 @@ stage4_verify_candidate_provenance() (
   [ "$(bootstrap_stage3_manifest_value essential_tools_log_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$smoke_log")" ] || exit 1
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
   [ "$(bootstrap_stage3_manifest_value completed_gate "$provenance")" = stage4-essential-tools-smoke ] || exit 1
+  if bootstrap_stage3_manifest_value stage4_continuation_path "$provenance" >/dev/null 2>&1; then
+    continuation="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")")" || exit 1
+    [ "$(bootstrap_stage3_manifest_value stage4_continuation_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$continuation")" ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$provenance")" = "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$continuation")" ] || exit 1
+  fi
+)
+
+stage4_verify_candidate_provenance() (
+  [ "$#" -ge 3 ] && [ "$#" -le 4 ] || exit 1
+  provenance="$1" binary="$2" root="$3" mode="${4:-generic}"
+  case "$mode" in
+    generic) stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root" ;;
+    phase7-llvm)
+      stage4_verify_phase7_llvm_binding "$provenance" "$root" || exit 1
+      stage4_verify_candidate_provenance_generic "$provenance" "$binary" "$root"
+      ;;
+    phase7-llvm-binding-test)
+      [ "${STAGE4_PROVENANCE_TEST_MODE:-0}" = 1 ] || exit 1
+      stage4_verify_phase7_llvm_binding "$provenance" "$root"
+      ;;
+    *) exit 1 ;;
+  esac
 )

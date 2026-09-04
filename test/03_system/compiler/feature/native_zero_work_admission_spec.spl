@@ -1,0 +1,242 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io.{dir_list}
+use std.env.variables.{env_get, env_set}
+use compiler.driver.cache.native_noop_admission.{
+    native_noop_request_v1, native_noop_admit_v1, native_noop_publish_v1,
+    native_noop_admission_hit_v1, native_noop_admission_reason_v1,
+    native_noop_admission_input_count_v1, native_noop_admission_generation_v1,
+    native_noop_request_generation_path_v1, native_noop_request_current_path_v1,
+    native_noop_request_generations_path_v1
+}
+use compiler.driver.cache.native_build_environment_identity.{
+    NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1,
+    native_build_environment_fingerprint_v1,
+    native_build_environment_fingerprint_rows_v1,
+    native_build_environment_snapshot_fingerprint_v1
+}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write(path: text, content: text) -> bool
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn zero_work_request(root: text, output: text):
+    zero_work_request_with_environment(root, output, sha256_text("env-1"))
+
+fn zero_work_request_with_environment(
+    root: text, output: text, environment_digest: text
+):
+    native_noop_request_v1(
+        root, output, "llvm", "aarch64-apple-darwin", 2, true, false,
+        false, "release", ["gc_sync_mut"], "", "rev-1", "tree-1",
+        "inventory-1", "authority-1", environment_digest,
+        "invocation-1", ["main.spl"])
+
+describe "MBH-NFR-002 native zero-work admission":
+    it "admits unchanged bounded inputs before scheduler work":
+        val root = "/tmp/simple-native-zero-work-admission-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "native-output-v1")).to_be(true)
+        val request = zero_work_request(root, output)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        val admitted = native_noop_admit_v1(request)
+        expect(native_noop_admission_hit_v1(admitted)).to_be(true)
+        expect(native_noop_admission_reason_v1(admitted)).to_equal("ok")
+        expect(native_noop_admission_input_count_v1(admitted)).to_equal(1)
+
+    it "fails closed on source, output, provenance, and interrupted pointer publication":
+        val root = "/tmp/simple-native-zero-work-mutation-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "native-output-v1")).to_be(true)
+        val request = zero_work_request(root, output)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        expect(rt_file_write(source, "fn main():\n    print 2\n")).to_be(true)
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(false)
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "corrupt-output")).to_be(true)
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(false)
+        val wrong_provenance = native_noop_request_v1(
+            root, output, "llvm", "aarch64-apple-darwin", 2, true, false,
+            false, "release", ["gc_sync_mut"], "", "rev-1", "tree-2",
+            "inventory-1", "authority-1", sha256_text("env-1"),
+            "invocation-1", ["main.spl"])
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(wrong_provenance))).to_be(false)
+        val interrupted_root = "/tmp/simple-native-zero-work-interrupted-spec"
+        val _removed_interrupted = rt_dir_remove_all(interrupted_root)
+        expect(rt_dir_create_all(interrupted_root)).to_be(true)
+        expect(rt_file_write("{interrupted_root}/CURRENT.tmp.999", "orphan")).to_be(true)
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(
+            zero_work_request(interrupted_root, output)))).to_be(false)
+
+    it "rejects stale invocation identity and deleted or corrupt generations":
+        val root = "/tmp/simple-native-zero-work-generation-mutation-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "native-output-v1")).to_be(true)
+        val request = zero_work_request(root, output)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        val admitted = native_noop_admit_v1(request)
+        val generation = native_noop_admission_generation_v1(admitted)
+        val stale_invocation = native_noop_request_v1(
+            root, output, "llvm", "aarch64-apple-darwin", 2, true, false,
+            false, "release", ["gc_sync_mut"], "", "rev-1", "tree-1",
+            "inventory-1", "authority-1", sha256_text("env-1"),
+            "invocation-2", ["main.spl"])
+        expect(native_noop_admission_hit_v1(
+            native_noop_admit_v1(stale_invocation))).to_be(false)
+        val stale_inputs = native_noop_request_v1(
+            root, output, "llvm", "aarch64-apple-darwin", 2, true, false,
+            false, "release", ["gc_sync_mut"], "", "rev-1", "tree-1",
+            "inventory-1", "authority-1", sha256_text("env-1"),
+            "invocation-1", ["other.spl"])
+        expect(native_noop_admission_hit_v1(
+            native_noop_admit_v1(stale_inputs))).to_be(false)
+        val generation_path = native_noop_request_generation_path_v1(
+            request, generation)
+        expect(rt_file_write(
+            generation_path,
+            "corrupt")).to_be(true)
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(false)
+        expect(rt_file_delete(generation_path)).to_be(true)
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(false)
+
+    it "recursively rejects deleted and corrupt ancestors":
+        step("Publish two authenticated generations for the same request")
+        val root = "/tmp/simple-native-zero-work-ancestry-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "native-output-v1")).to_be(true)
+        val request = zero_work_request(root, output)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        val first = native_noop_admission_generation_v1(native_noop_admit_v1(request))
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        val second = native_noop_admission_generation_v1(native_noop_admit_v1(request))
+        expect(second == first).to_be(false)
+        val first_path = native_noop_request_generation_path_v1(request, first)
+        val first_content = rt_file_read_regular_no_follow_bounded(
+            first_path, 64 * 1024 * 1024) ?? ""
+        step("Corrupt a non-current ancestor and require fail-closed admission")
+        expect(rt_file_write(first_path, "corrupt-ancestor")).to_be(true)
+        val corrupt = native_noop_admit_v1(request)
+        expect(native_noop_admission_hit_v1(corrupt)).to_be(false)
+        expect(native_noop_admission_reason_v1(corrupt)).to_equal(
+            "ancestry-authentication-failed")
+        step("Restore then delete the ancestor and require fail-closed admission")
+        expect(rt_file_write(first_path, first_content)).to_be(true)
+        expect(rt_file_delete(first_path)).to_be(true)
+        val deleted = native_noop_admit_v1(request)
+        expect(native_noop_admission_hit_v1(deleted)).to_be(false)
+        expect(native_noop_admission_reason_v1(deleted)).to_equal(
+            "ancestry-generation-missing")
+
+    it "preserves and recovers an unselected immutable generation collision":
+        step("Create an admitted generation, then make its name unselected")
+        val root = "/tmp/simple-native-zero-work-collision-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_be(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_be(true)
+        expect(rt_file_write(output, "native-output-v1")).to_be(true)
+        val request = zero_work_request(root, output)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        val generation = native_noop_admission_generation_v1(native_noop_admit_v1(request))
+        expect(rt_file_delete(native_noop_request_current_path_v1(request))).to_be(true)
+        expect(rt_file_write(native_noop_request_generation_path_v1(
+            request, generation), "hostile-collision")).to_be(true)
+        step("Republish, preserving collision evidence and restoring canonical content")
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_be(true)
+        val generation_entries = dir_list(
+            native_noop_request_generations_path_v1(request)) ?? []
+        var collision_count = 0
+        for entry in generation_entries:
+            if entry.contains(".collision."):
+                collision_count = collision_count + 1
+        expect(collision_count).to_equal(1)
+
+    it "misses when any representative canonical build control changes":
+        step("Publish under the centralized canonical environment fingerprint")
+        val root = "/tmp/simple-native-zero-work-environment-spec"
+        val _removed = rt_dir_remove_all(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val source = "{root}/main.spl"
+        val output = "{root}/app"
+        expect(rt_file_write(source, "fn main():\n    print 1\n")).to_equal(true)
+        expect(rt_file_write(output, "native-output-v1")).to_equal(true)
+        val baseline = native_build_environment_fingerprint_v1()
+        expect(baseline.valid).to_equal(true)
+        val request = zero_work_request_with_environment(
+            root, output, baseline.digest)
+        expect(native_noop_publish_v1(request, [source])).to_equal("ok")
+        expect(native_noop_admission_hit_v1(native_noop_admit_v1(request))).to_equal(true)
+        for name in [
+            "SIMPLE_NATIVE_BUILD_NO_MANGLE",
+            "SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST",
+            "SIMPLE_SAFETY_PROFILE",
+            "SIMPLE_TYPECHECK_PROFILE",
+            "SIMPLE_LINKER",
+            "SIMPLE_DETERMINISTIC",
+            "SIMPLE_COVERAGE",
+            "SIMPLE_STRICT_ARRAY_GLOBALS",
+            "SIMPLE_MIR_VERIFY_EACH",
+            "SIMPLE_NATIVE_BUILD_TRACE_CLOSURE",
+            "SIMPLE_MCDC_MODE",
+            "SIMPLE_FRONTEND_CACHE",
+            "SIMPLE_HIR_CACHE",
+            "SIMPLE_MIR_BULK_OPS",
+        ]:
+            val previous = env_get(name) ?? ""
+            expect(env_set(name, "mbh-mutation-{name}")).to_equal(true)
+            val mutated = native_build_environment_fingerprint_v1()
+            expect(mutated.valid).to_equal(true)
+            expect(mutated.digest == baseline.digest).to_equal(false)
+            val mutated_request = zero_work_request_with_environment(
+                root, output, mutated.digest)
+            expect(native_noop_admission_hit_v1(
+                native_noop_admit_v1(mutated_request))).to_equal(false)
+            expect(env_set(name, previous)).to_equal(true)
+
+    it "fails closed on unknown or omitted environment schema fields":
+        var names = NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1
+        var values: [text] = []
+        for name in names:
+            values.push("")
+        names[0] = "SIMPLE_FUTURE_UNCLASSIFIED_BUILD_CONTROL"
+        val unknown = native_build_environment_fingerprint_rows_v1(names, values)
+        expect(unknown.valid).to_equal(false)
+        expect(unknown.reason).to_contain("environment-field-unknown")
+        val omitted = native_build_environment_fingerprint_rows_v1(
+            NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1.slice(
+                0, NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1.len() - 1),
+            values.slice(0, values.len() - 1))
+        expect(omitted.valid).to_equal(false)
+        expect(omitted.reason).to_equal("environment-schema-incomplete")
+
+    it "snapshots every present SIMPLE control with explicit presence semantics":
+        val absent = native_build_environment_snapshot_fingerprint_v1([])
+        val present_empty = native_build_environment_snapshot_fingerprint_v1([
+            ("SIMPLE_FUTURE_BUILD_CONTROL", "")])
+        val present_value = native_build_environment_snapshot_fingerprint_v1([
+            ("SIMPLE_FUTURE_BUILD_CONTROL", "enabled")])
+        expect(absent.valid).to_equal(true)
+        expect(present_empty.valid).to_equal(true)
+        expect(present_value.valid).to_equal(true)
+        expect(absent.digest == present_empty.digest).to_equal(false)
+        expect(present_empty.digest == present_value.digest).to_equal(false)

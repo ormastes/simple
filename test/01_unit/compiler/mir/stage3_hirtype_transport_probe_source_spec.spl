@@ -1,0 +1,77 @@
+use std.spec
+use std.spec.step
+use std.io_runtime.{file_read}
+
+describe "Stage 3 HirType transport diagnostics":
+    it "keeps the transport probe default-off and zero-event bounded":
+        step("Pin the decisive caller/callee probe without broad MIR tracing")
+        val source = file_read(
+            "src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(source).to_contain("env_get(\"SIMPLE_MIR_TAG_PROBE\")")
+        expect(source).to_contain(
+            "mir_tag_probe_pending_site = \"param:{pmi}\"")
+        expect(source).to_contain("mir_tag_probe_pending_site = \"return\"")
+        expect(source).to_contain("val signature_param = fn_.params[pmi]")
+        expect(source).to_contain(
+            "val signature_param_type = signature_param.type_")
+        expect(source).to_contain("self.lower_type(signature_param_type)")
+        expect(source).to_contain("site={probe_site} caller_disc={caller_disc}")
+        expect(source).to_contain("if type_.kind == 0:")
+        expect(source).to_contain("E-MIR-TYPE-Transport")
+
+    it "retains bounded caller and callee invariant context":
+        step("Distinguish upstream corruption from the immediate MIR call boundary")
+        val source = file_read(
+            "src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(source).to_contain("val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16")
+        expect(source).to_contain("self.type_transport_context = \"signature-param\"")
+        expect(source).to_contain("self.type_transport_param_index = pmi")
+        expect(source).to_contain("caller_disc={self.type_transport_caller_disc}")
+        expect(source).to_contain("callee_disc={callee_disc}")
+        expect(source).to_contain("[mir-type-invariant]")
+        expect(source).to_contain(
+            "and self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT")
+
+    it "reports the active function instead of the scope-list tail":
+        step("Preserve exact function provenance on the next ZeroKind fatal")
+        val source = file_read(
+            "src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        expect(source).to_contain(
+            "self.mir_tag_probe_active_function = fn_.name + \"\"")
+        expect(source).to_contain(
+            "\"active-function:\" + self.mir_tag_probe_active_function")
+        val types = file_read(
+            "src/compiler/50.mir/mir_lowering_types.spl")
+        expect(types).to_contain("mir_tag_probe_active_function: text")
+        expect(types).to_contain("mir_tag_probe_pending_site: text")
+        expect(types).to_contain("mir_tag_probe_pending_caller_disc: i64")
+
+    it "retains full worker stderr outside cleanup-owned TMPDIR":
+        step("Prefer the provenance-bound native cache for failure evidence")
+        val source = file_read("src/app/cli/native_build_main.spl")
+        val cache_at = source.index_of(
+            "env_get(\"SIMPLE_NATIVE_BUILD_CACHE_DIR\")")
+        val tmp_at = source.index_of("env_get(\"TMPDIR\")")
+        expect(cache_at).to_be_greater_than(-1)
+        expect(tmp_at).to_be_greater_than(cache_at)
+        expect(source).to_contain(
+            "val durable_diagnostic_dir = \"{cache_dir_env}/diagnostics\"")
+        expect(source).to_contain("if dir_create_all(durable_diagnostic_dir):")
+        expect(source).to_contain(
+            "native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log")
+        expect(source).to_contain("while file_exists(spill_path):")
+        expect(source).to_contain("line.contains(\"[mir-type-invariant]\")")
+        expect(source).to_contain("line.contains(\"[mir-tag-probe]\")")
+
+    it "binds the probe gate into Stage 3 provenance":
+        step("Require the print-only probe in the hashed diagnostic allowlist")
+        val source = file_read(
+            "scripts/check/lib/bootstrap-stage3/authority.shs")
+        expect(source).to_contain("SIMPLE_MIR_TAG_PROBE")
+        val bootstrap = file_read(
+            "scripts/bootstrap/bootstrap-from-scratch.sh")
+        expect(bootstrap).to_contain(
+            "stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env)")
+        expect(bootstrap).to_contain(
+            "stage3_build_args_sha256=$(")
+        expect(bootstrap).to_contain("${stage3_diagnostic_env}")

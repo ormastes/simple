@@ -1,0 +1,284 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+. "$root/scripts/check/lib/kernel-phase7-runtime-admission.shs"
+. "$root/scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+work=$(mktemp -d "${TMPDIR:-/tmp}/phase7-runtime-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+runtime=$work/simple
+provenance=$work/simple.provenance.env
+cache=$work/cache.env
+runtime_receipt=$work/runtime.env
+llvm_receipt=$work/llvm-authority.env
+llvm_config=$work/llvm-config
+llvm_library=$work/libLLVM.dylib
+source_file=$work/source.spl
+printf 'source-v1\n' >"$source_file"
+cat >"$runtime" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo 'simple test fixture (pure-Simple full CLI)' ;;
+  --help) echo 'native-build' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$runtime"
+
+fixture_verify() {
+  fixture_provenance=$1 fixture_runtime=$2
+  [ "$(kernel_phase7_manifest_value schema "$fixture_provenance")" = simple-bootstrap-stage4-provenance-v1 ] &&
+  [ "$(kernel_phase7_manifest_value status "$fixture_provenance")" = pass ] &&
+  [ "$(kernel_phase7_manifest_value artifact_kind "$fixture_provenance")" = pure-simple-full-cli ] &&
+  [ "$(kernel_phase7_manifest_value output_sha256 "$fixture_provenance")" = "$(kernel_phase7_hash_file "$fixture_runtime")" ] &&
+  [ "$(kernel_phase7_manifest_value source_revision "$fixture_provenance")" = "$(kernel_phase7_hash_file "$source_file")" ]
+}
+write_receipts() {
+  cat >"$provenance" <<EOF
+schema=simple-bootstrap-stage4-provenance-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+output_sha256=$(kernel_phase7_hash_file "$runtime")
+source_revision=$(kernel_phase7_hash_file "$source_file")
+EOF
+  cat >"$cache" <<EOF
+schema=simple-kernel-phase7-runtime-cache-v1
+status=pass
+ttl_days=1
+runtime_sha256=$(kernel_phase7_hash_file "$runtime")
+provenance_sha256=$(kernel_phase7_hash_file "$provenance")
+source_revision=$(kernel_phase7_hash_file "$source_file")
+EOF
+  cat >"$llvm_config" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = --version ] && echo 18.1.8
+EOF
+  chmod +x "$llvm_config"
+  printf 'llvm-library\n' >"$llvm_library"
+  cat >"$llvm_receipt" <<EOF
+schema=simple-kernel-phase7-llvm-toolchain-v1
+status=pass
+llvm_major=18
+llvm_config_path=$llvm_config
+llvm_config_sha256=$(kernel_phase7_hash_file "$llvm_config")
+llvm_library_path=$llvm_library
+llvm_library_sha256=$(kernel_phase7_hash_file "$llvm_library")
+EOF
+  cat >"$runtime_receipt" <<EOF
+schema=simple-kernel-phase7-runtime-prerequisite-v1
+status=pass
+artifact_kind=pure-simple-full-cli
+runtime_path=$runtime
+runtime_sha256=$(kernel_phase7_hash_file "$runtime")
+provenance_path=$provenance
+provenance_sha256=$(kernel_phase7_hash_file "$provenance")
+cache_receipt_path=$cache
+cache_receipt_sha256=$(kernel_phase7_hash_file "$cache")
+llvm_toolchain_receipt_path=$llvm_receipt
+llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")
+EOF
+}
+admit() {
+  KERNEL_PHASE7_TEST_MODE=1 KERNEL_PHASE7_PROVENANCE_VERIFY_FN=fixture_verify \
+    kernel_phase7_admit_runtime "$runtime" "$provenance" "$cache" "$root" "$runtime_receipt"
+}
+reject() { if "$@"; then echo "FAIL: mutation admitted: $*" >&2; exit 1; fi; }
+real_stage4_verify() {
+  STAGE4_PROVENANCE_TEST_MODE=1 \
+    stage4_verify_candidate_provenance "$provenance" "$runtime" "$root" \
+      phase7-llvm-binding-test
+}
+write_phase7_llvm_binding() {
+  cat >>"$provenance" <<EOF
+llvm_toolchain_receipt_path=$llvm_receipt
+llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")
+EOF
+}
+
+write_receipts
+reject real_stage4_verify
+write_phase7_llvm_binding
+real_stage4_verify
+sed 's/llvm_toolchain_receipt_sha256=.*/llvm_toolchain_receipt_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' \
+  "$provenance" >"$work/altered-provenance.env"
+mv "$work/altered-provenance.env" "$provenance"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+sed 's/status=pass/status=forged/' "$llvm_receipt" >"$work/altered-llvm.env"
+mv "$work/altered-llvm.env" "$llvm_receipt"
+sed "s|llvm_toolchain_receipt_sha256=.*|llvm_toolchain_receipt_sha256=$(kernel_phase7_hash_file "$llvm_receipt")|" \
+  "$provenance" >"$work/rebound-provenance.env"
+mv "$work/rebound-provenance.env" "$provenance"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+printf '# altered binary\n' >>"$llvm_config"
+reject real_stage4_verify
+write_receipts
+write_phase7_llvm_binding
+printf 'altered library\n' >>"$llvm_library"
+reject real_stage4_verify
+
+write_receipts
+admit
+admitted_runtime=$runtime
+fabricated_runtime=$work/fabricated-native-build-simple
+cat >"$fabricated_runtime" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo 'simple fabricated fixture (pure-Simple full CLI)' ;;
+  --help) echo 'native-build' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$fabricated_runtime"
+"$fabricated_runtime" --help | grep -Fxq native-build
+runtime=$fabricated_runtime
+reject admit
+runtime=$admitted_runtime
+admit
+sed 's/status=pass/status=forged/' "$provenance" >"$work/p" && mv "$work/p" "$provenance"
+reject admit
+write_receipts
+printf '# altered\n' >>"$runtime"
+reject admit
+sed -i.bak '$d' "$runtime" && rm -f "$runtime.bak"
+write_receipts
+printf 'source-v2\n' >"$source_file"
+reject admit
+printf 'source-v1\n' >"$source_file"
+write_receipts
+sed 's/ttl_days=1/ttl_days=8/' "$cache" >"$work/c" && mv "$work/c" "$cache"
+reject admit
+write_receipts
+sed 's/simple test fixture (pure-Simple full CLI)/WARNING: Rust-built bootstrap seed only/' "$runtime" >"$work/r" && mv "$work/r" "$runtime" && chmod +x "$runtime"
+write_receipts
+reject admit
+sed 's/WARNING: Rust-built bootstrap seed only/simple test fixture (pure-Simple full CLI)/' "$runtime" >"$work/r" && mv "$work/r" "$runtime" && chmod +x "$runtime"
+write_receipts
+KERNEL_PHASE7_REQUIRED_TOOLS=phase7-tool-that-does-not-exist reject admit
+rm -f "$provenance"
+reject admit
+write_receipts
+rm -f "$runtime_receipt"
+reject admit
+write_receipts
+sed 's/status=pass/status=forged/' "$runtime_receipt" >"$work/forged-runtime.env"
+mv "$work/forged-runtime.env" "$runtime_receipt"
+reject admit
+write_receipts
+printf 'altered\n' >>"$llvm_receipt"
+reject admit
+write_receipts
+printf '# altered binary\n' >>"$llvm_config"
+reject admit
+write_receipts
+printf 'altered library\n' >>"$llvm_library"
+reject admit
+
+command_log=$work/commands.log
+fake_runner=$work/fake-runner
+cat >"$fake_runner" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$KERNEL_PHASE7_COMMAND_LOG"
+EOF
+chmod +x "$fake_runner"
+KERNEL_PHASE7_COMMAND_LOG=$command_log
+export KERNEL_PHASE7_COMMAND_LOG
+kernel_phase7_bootstrap_stage2 "$fake_runner" "$root" "$work/output"
+kernel_phase7_produce_stage4_admission "$fake_runner" "$root" "$work/output" \
+  "$work/output/stage2/host/simple" "$work/stage4.env"
+kernel_phase7_bootstrap_stage4 "$fake_runner" "$root" "$work/output" "$work/stage4.env"
+grep -Fq -- '--stop-after-stage2' "$command_log"
+grep -Fq -- '--output='"$work/output" "$command_log"
+grep -Fq -- '--target=//bootstrap:stage4' "$command_log"
+grep -Fq -- '--reason=self-host-convergence-check' "$command_log"
+grep -Fq -- '--bootstrap-output='"$work/output" "$command_log"
+grep -Fq -- '--bootstrap-receipt='"$work/stage4.env" "$command_log"
+grep -Fq -- '--full-cli' "$command_log"
+if grep -Fq -- '--output-dir=' "$command_log"; then
+  echo 'FAIL: obsolete bootstrap option constructed' >&2
+  exit 1
+fi
+
+wrapper_fixture=$work/wrapper
+mkdir -p "$wrapper_fixture/scripts/check"
+cp "$root/scripts/check/run-kernel-phase7-runtime-prerequisite.shs" \
+  "$wrapper_fixture/scripts/check/"
+cat >"$wrapper_fixture/scripts/check/prepare-kernel-phase7-runtime.shs" <<'EOF'
+#!/bin/sh
+echo fixture-output
+exit 23
+EOF
+chmod +x "$wrapper_fixture/scripts/check/prepare-kernel-phase7-runtime.shs"
+: >"$work/github-env"
+set +e
+GITHUB_ENV=$work/github-env sh \
+  "$wrapper_fixture/scripts/check/run-kernel-phase7-runtime-prerequisite.shs" \
+  ignored ignored "$work/captured.env" >"$work/wrapper.out" 2>&1
+wrapper_rc=$?
+set -e
+[ "$wrapper_rc" -eq 23 ] || {
+  echo "FAIL: prerequisite wrapper masked exit 23 as $wrapper_rc" >&2
+  exit 1
+}
+grep -Fq fixture-output "$work/captured.env"
+[ ! -s "$work/github-env" ] || {
+  echo 'FAIL: failed prerequisite polluted GITHUB_ENV' >&2
+  exit 1
+}
+
+for trigger in scripts/check/prepare-kernel-phase7-runtime.shs \
+  scripts/check/prepare-kernel-phase7-llvm-toolchain.shs \
+  scripts/check/run-kernel-phase7-runtime-prerequisite.shs \
+  scripts/check/lib/kernel-phase7-runtime-bootstrap-commands.shs \
+  scripts/check/test-kernel-phase7-runtime-prerequisite-contract.shs \
+  scripts/check/lib/kernel-phase7-runtime-admission.shs \
+  scripts/check/lib/stage4-candidate-provenance.shs \
+  scripts/check/lib/bootstrap-stage3-provenance.shs; do
+  grep -Fq -- "- '$trigger'" "$root/.github/workflows/kernel-phase7-qualification.yml"
+done
+for trigger in .github/workflows/kernel-phase7-qualification.yml \
+  scripts/setup/platform-detect.shs scripts/setup/llvm-toolchain-env.shs; do
+  grep -Fq -- "- '$trigger'" "$root/.github/workflows/kernel-phase7-qualification.yml"
+done
+
+llvm_fixture=$work/llvm
+mkdir -p "$llvm_fixture/bin" "$llvm_fixture/lib" "$work/fake-bin"
+cat >"$llvm_fixture/bin/llvm-config" <<EOF
+#!/bin/sh
+case "\${1:-}" in
+  --version) echo 18.1.8 ;;
+  --prefix) echo "$llvm_fixture" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$llvm_fixture/bin/llvm-config"
+: >"$llvm_fixture/lib/libLLVM.dylib"
+cat >"$work/fake-bin/brew" <<EOF
+#!/bin/sh
+[ "\${1:-}" = --prefix ] && [ "\${2:-}" = llvm@18 ] || exit 1
+echo "$llvm_fixture"
+EOF
+chmod +x "$work/fake-bin/brew"
+llvm_receipt=$work/llvm.env
+llvm_exports=$work/llvm.github-env
+PATH="$work/fake-bin:$PATH" sh "$root/scripts/check/prepare-kernel-phase7-llvm-toolchain.shs" \
+  "$llvm_receipt" "$llvm_exports" >/dev/null
+grep -Fxq llvm_major=18 "$llvm_receipt"
+grep -Fxq LLVM_VERSIONS=18 "$llvm_exports"
+sed 's/echo 18\.1\.8/echo 19.1.0/' "$llvm_fixture/bin/llvm-config" >"$work/llvm-config-wrong"
+mv "$work/llvm-config-wrong" "$llvm_fixture/bin/llvm-config"
+chmod +x "$llvm_fixture/bin/llvm-config"
+if PATH="$work/fake-bin:$PATH" sh "$root/scripts/check/prepare-kernel-phase7-llvm-toolchain.shs" \
+    "$work/wrong-llvm.env" "$work/wrong-llvm.github-env" >/dev/null 2>&1; then
+  echo 'FAIL: wrong LLVM version admitted' >&2
+  exit 1
+fi
+echo KERNEL_PHASE7_RUNTIME_PREREQUISITE_MUTATION_PASS

@@ -1,0 +1,143 @@
+use lib.compiler_artifact_service.profile.{ArtifactServiceProfileV1, artifact_service_profile_digest_v1}
+use lib.compiler_artifact_service.protocol.{ArtifactResultV1, artifact_result_validate_v1}
+
+enum ArtifactRequestStateV1:
+    queued
+    leased
+    completed
+    failed
+    cancelled
+    rejected
+
+struct ArtifactRequestV1:
+    action_id: text
+    compatibility_id: text
+    snapshot_revision: text
+    priority: i64
+    memory_budget_bytes: i64
+
+struct ArtifactLeaseV1:
+    lease_id: text
+    action_id: text
+    owner_id: text
+    generation: i64
+    cancelled: bool
+
+struct ArtifactQueueEntryV1:
+    request: ArtifactRequestV1
+    state: ArtifactRequestStateV1
+    lease: ArtifactLeaseV1?
+    cas_artifact_digest: text
+    error_code: text
+
+struct ArtifactServiceV1:
+    profile: ArtifactServiceProfileV1
+    entries: [ArtifactQueueEntryV1]
+
+fn artifact_request_validate_v1(
+    profile: ArtifactServiceProfileV1, request: ArtifactRequestV1
+) -> text:
+    if artifact_service_profile_digest_v1(profile) == "":
+        return "profile-invalid"
+    if request.action_id == "" or request.snapshot_revision == "":
+        return "request-identity-missing"
+    if request.compatibility_id != profile.compatibility_id:
+        return "compatibility-mismatch"
+    if request.priority < 0:
+        return "request-priority-invalid"
+    if request.memory_budget_bytes <= 0 or request.memory_budget_bytes > profile.memory_budget_bytes:
+        return "request-memory-budget-invalid"
+    "ok"
+
+fn artifact_service_enqueue_v1(
+    service: ArtifactServiceV1, request: ArtifactRequestV1
+) -> ArtifactServiceV1:
+    for entry in service.entries:
+        if entry.request.action_id == request.action_id:
+            return service
+    val reason = artifact_request_validate_v1(service.profile, request)
+    val state = if reason == "ok": ArtifactRequestStateV1.queued else: ArtifactRequestStateV1.rejected
+    var entries = service.entries
+    entries = entries.push(ArtifactQueueEntryV1(request, state, nil, "", if reason == "ok": "" else: reason))
+    ArtifactServiceV1(service.profile, entries)
+
+fn artifact_service_claim_v1(
+    service: ArtifactServiceV1, owner_id: text, lease_id: text,
+    generation: i64, available_memory_bytes: i64,
+    foreground_priority: i64
+) -> ArtifactServiceV1:
+    if owner_id == "" or lease_id == "" or generation < 0:
+        return service
+    var best_index: i64 = -1
+    var best_priority: i64 = -1
+    for index in 0..service.entries.len():
+        val entry = service.entries[index]
+        if entry.state == ArtifactRequestStateV1.queued and
+                entry.request.priority > foreground_priority and
+                entry.request.memory_budget_bytes <= available_memory_bytes and
+                entry.request.priority > best_priority:
+            best_index = index
+            best_priority = entry.request.priority
+    if best_index < 0:
+        return service
+    var entries: [ArtifactQueueEntryV1] = []
+    for index in 0..service.entries.len():
+        val entry = service.entries[index]
+        if index == best_index:
+            val lease = ArtifactLeaseV1(lease_id, entry.request.action_id, owner_id, generation, false)
+            entries = entries.push(ArtifactQueueEntryV1(
+                entry.request, ArtifactRequestStateV1.leased, Some(lease), "", ""))
+        else:
+            entries = entries.push(entry)
+    ArtifactServiceV1(service.profile, entries)
+
+fn artifact_service_cancel_v1(
+    service: ArtifactServiceV1, action_id: text
+) -> ArtifactServiceV1:
+    var entries: [ArtifactQueueEntryV1] = []
+    for entry in service.entries:
+        if entry.request.action_id == action_id and
+                (entry.state == ArtifactRequestStateV1.queued or entry.state == ArtifactRequestStateV1.leased):
+            var lease = entry.lease
+            match lease:
+                Some(value):
+                    lease = Some(ArtifactLeaseV1(
+                        value.lease_id, value.action_id, value.owner_id, value.generation, true))
+                _: nil
+            entries = entries.push(ArtifactQueueEntryV1(
+                entry.request, ArtifactRequestStateV1.cancelled, lease, "", "cancelled"))
+        else:
+            entries = entries.push(entry)
+    ArtifactServiceV1(service.profile, entries)
+
+fn artifact_service_complete_v1(
+    service: ArtifactServiceV1, lease: ArtifactLeaseV1, result: ArtifactResultV1
+) -> ArtifactServiceV1:
+    var entries: [ArtifactQueueEntryV1] = []
+    for entry in service.entries:
+        var updated = entry
+        if entry.request.action_id == lease.action_id and entry.state == ArtifactRequestStateV1.leased:
+            val owned = match entry.lease:
+                Some(value): value.lease_id == lease.lease_id and value.owner_id == lease.owner_id and value.generation == lease.generation
+                _: false
+            if not owned:
+                updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.rejected, entry.lease, "", "lease-mismatch")
+            elif lease.cancelled or result.cancelled:
+                updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.cancelled, entry.lease, "", "cancelled")
+            elif result.compatibility_id != entry.request.compatibility_id or result.snapshot_revision != entry.request.snapshot_revision:
+                updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.rejected, entry.lease, "", "result-authority-mismatch")
+            else:
+                val reason = artifact_result_validate_v1(result, service.profile.frame_budget_bytes)
+                if reason != "ok":
+                    updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.rejected, entry.lease, "", reason)
+                elif result.success:
+                    updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.completed, entry.lease, result.cas_artifact_digest, "")
+                else:
+                    updated = ArtifactQueueEntryV1(entry.request, ArtifactRequestStateV1.failed, entry.lease, "", result.error_code)
+        entries = entries.push(updated)
+    ArtifactServiceV1(service.profile, entries)
+
+export ArtifactRequestStateV1, ArtifactRequestV1, ArtifactLeaseV1
+export ArtifactQueueEntryV1, ArtifactServiceV1, artifact_request_validate_v1
+export artifact_service_enqueue_v1, artifact_service_claim_v1
+export artifact_service_cancel_v1, artifact_service_complete_v1

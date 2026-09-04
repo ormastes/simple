@@ -1,0 +1,32 @@
+use std.spec.*
+use std.file_system.{file_read}
+
+describe "host-shared cache bounded GC lifecycle":
+    it "uses the real L2 open lifecycle and project-global lock":
+        val router = file_read("src/compiler/80.driver/cache/tier_router/tier_router.spl")
+        val gc = file_read("src/compiler/80.driver/cache/gc/fast_gc.spl")
+        expect(router).to_contain("gc_run_if_needed(l2, cache_limits_load())")
+        expect(gc).to_contain("file_lock(\"{root}/gc.lock\", 1)")
+
+    it "fails closed before GC when project provenance mismatches":
+        val router = file_read("src/compiler/80.driver/cache/tier_router/tier_router.spl")
+        val cas = file_read("src/compiler/80.driver/cache/cas_store.spl")
+        expect(router).to_contain("if not cas_open(l2)")
+        expect(cas).to_contain("stored_project.trim() != project_namespace")
+
+    it "uses 90 percent trigger and 75 percent target defaults":
+        val limits = file_read("src/compiler/80.driver/cache/metadata/cache_limits.spl")
+        expect(limits).to_contain("DEFAULT_MAX_BYTES: i64 = 10737418240")
+        expect(limits).to_contain("DEFAULT_HIGH_WATERMARK: f64 = 0.90")
+        expect(limits).to_contain("DEFAULT_LOW_WATERMARK: f64 = 0.75")
+
+    it "reclaims only CAS blobs unreachable from manifests and live leases":
+        val gc = file_read("src/compiler/80.driver/cache/gc/fast_gc.spl")
+        expect(gc).to_contain("gc_reachable_blob_paths(root, active_leases)")
+        expect(gc).to_contain("lease.referenced_artifacts")
+        expect(gc).to_contain("gc_manifest_artifacts(path)")
+        expect(gc).to_contain("move_to_trash(root, victim)")
+
+    it "never ages out a live lease":
+        val lease = file_read("src/compiler/80.driver/cache/lease/lease.spl")
+        expect(lease).to_contain("not lease_process_exists_raw(lease.process_id)")

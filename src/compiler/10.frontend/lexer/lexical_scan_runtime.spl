@@ -1,0 +1,81 @@
+use compiler.frontend.lexer.lexical_scan_capability.{
+    LexicalGpuCandidateV1, LexicalScanBenchmarkV1, LexicalScanCapabilityError,
+    LexicalScanCapabilityV1, LexicalScanProvider, lexical_scan_admit_cpu_simd,
+    lexical_scan_capability_scalar, lexical_scan_gpu_candidate
+}
+use compiler.frontend.lexer.lexical_scan_simd.{LexicalScanResultV1, lexical_scan_with_capability}
+
+struct LexicalScanCountersV1:
+    scalar_scan_count: i64
+    simd_scan_count: i64
+    divergence_fallback_count: i64
+    gpu_notification_count: i64
+    scanned_byte_count: i64
+
+struct LexicalScanRuntimeResultV1:
+    scan: LexicalScanResultV1
+    gpu_candidate: LexicalGpuCandidateV1
+
+var lexical_scan_capability_slot: [LexicalScanCapabilityV1] = []
+var lexical_scan_counters_slot: [LexicalScanCountersV1] = []
+var lexical_scan_gpu_crossover_slot: [i64] = [0]
+
+fn lexical_scan_counters_zero_v1() -> LexicalScanCountersV1:
+    LexicalScanCountersV1(
+        scalar_scan_count: 0,
+        simd_scan_count: 0,
+        divergence_fallback_count: 0,
+        gpu_notification_count: 0,
+        scanned_byte_count: 0)
+
+fn lexical_scan_runtime_reset_v1():
+    lexical_scan_capability_slot = [lexical_scan_capability_scalar()]
+    lexical_scan_counters_slot = [lexical_scan_counters_zero_v1()]
+    lexical_scan_gpu_crossover_slot = [0]
+
+fn lexical_scan_runtime_ensure_v1():
+    if lexical_scan_capability_slot.len() == 0:
+        lexical_scan_runtime_reset_v1()
+
+fn lexical_scan_runtime_admit_cpu_simd_v1(
+    cpu_simd_available: bool,
+    crossover_bytes: i64,
+    benchmark: LexicalScanBenchmarkV1
+) -> Result<bool, LexicalScanCapabilityError>:
+    lexical_scan_runtime_ensure_v1()
+    val admitted = lexical_scan_admit_cpu_simd(cpu_simd_available, crossover_bytes, benchmark)
+    if admitted.is_err():
+        return Err(admitted.unwrap_err())
+    lexical_scan_capability_slot[0] = admitted.unwrap()
+    Ok(true)
+
+fn lexical_scan_runtime_set_gpu_notification_crossover_v1(crossover_bytes: i64):
+    lexical_scan_runtime_ensure_v1()
+    lexical_scan_gpu_crossover_slot[0] = if crossover_bytes > 0: crossover_bytes else: 0
+
+fn lexical_scan_runtime_scan_v1(source: text) -> LexicalScanRuntimeResultV1:
+    lexical_scan_runtime_ensure_v1()
+    val scan = lexical_scan_with_capability(source, lexical_scan_capability_slot[0])
+    val gpu_candidate = lexical_scan_gpu_candidate(source.len(), lexical_scan_gpu_crossover_slot[0])
+    var counters = lexical_scan_counters_slot[0]
+    counters.scanned_byte_count = counters.scanned_byte_count + source.len()
+    if scan.used_provider == LexicalScanProvider.CpuSimd:
+        counters.simd_scan_count = counters.simd_scan_count + 1
+    else:
+        counters.scalar_scan_count = counters.scalar_scan_count + 1
+    if scan.divergence_fallback:
+        counters.divergence_fallback_count = counters.divergence_fallback_count + 1
+    if gpu_candidate.notify:
+        counters.gpu_notification_count = counters.gpu_notification_count + 1
+    lexical_scan_counters_slot[0] = counters
+    LexicalScanRuntimeResultV1(scan: scan, gpu_candidate: gpu_candidate)
+
+fn lexical_scan_runtime_counters_v1() -> LexicalScanCountersV1:
+    lexical_scan_runtime_ensure_v1()
+    lexical_scan_counters_slot[0]
+
+export LexicalScanCountersV1, LexicalScanRuntimeResultV1
+export lexical_scan_counters_zero_v1, lexical_scan_runtime_reset_v1
+export lexical_scan_runtime_admit_cpu_simd_v1
+export lexical_scan_runtime_set_gpu_notification_crossover_v1
+export lexical_scan_runtime_scan_v1, lexical_scan_runtime_counters_v1

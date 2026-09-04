@@ -33,6 +33,15 @@ use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use std.array.{array_sort_by}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_initializer_v1
+}
+
+pub fn module_lowering_publish_initializer_dependency_v1(subject: text,
+        consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("initializer-dependent")
+    reverse_reference_register_initializer_v1(subject, consumer, evidence)
 use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}
 use std.io_runtime.{env_get_opt}
 
@@ -289,6 +298,14 @@ impl MirLowering:
             composite_layout_digests: {},
             composite_layout_owner_counts: {},
             external_layout_traces: [],
+            type_transport_receipts: 0,
+            type_transport_owner: "",
+            type_transport_context: "",
+            type_transport_param_index: -1,
+            type_transport_caller_disc: -2,
+            mir_tag_probe_active_function: "",
+            mir_tag_probe_pending_site: "untracked",
+            mir_tag_probe_pending_caller_disc: -2,
             field_map: {},
             bitfield_map: {},
             bitfield_value_syms: {},
@@ -1821,6 +1838,7 @@ impl MirLowering:
             case _: false
 
     me lower_runtime_module_initializers_named(module_name_raw: text, consts: [HirConst], bootstrap_module_index: i64 = -1):
+        reverse_reference_owner_mark_known_v1("initializer-dependent")
         var dynamic = runtime_module_initializers_in_declaration_order(consts)
         # Function-pointer slots need the same runtime-initialized global
         # storage, but cannot be recognised by the free type-driven predicate
@@ -1838,6 +1856,13 @@ impl MirLowering:
                     dynamic = dynamic.push(slot_const)
         if dynamic.len() == 0:
             return
+        var init_index = 1
+        while init_index < dynamic.len():
+            module_lowering_publish_initializer_dependency_v1(
+                "{module_name_raw}::{dynamic[init_index - 1].name}",
+                "{module_name_raw}::{dynamic[init_index].name}",
+                "declaration-order:{init_index - 1}:{init_index}")
+            init_index = init_index + 1
 
         # This symbol is external because the aggregate linker discovers and
         # calls it, but it must be unique in every per-module worker object.

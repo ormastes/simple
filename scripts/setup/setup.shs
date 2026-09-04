@@ -7,18 +7,14 @@ set -eu
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 . "${repo_root}/scripts/setup/platform-detect.shs"
+. "${repo_root}/scripts/setup/release-platform.shs"
 
-# platform-detect emits the 3-part Rust triple (e.g. aarch64-apple-darwin), but
-# release binaries live under the 4-part Simple-native triple (…-macho on macOS).
-# Resolve PLATFORM_TRIPLE to whichever release dir actually exists.
-if [ ! -x "${repo_root}/bin/release/${PLATFORM_TRIPLE}/simple" ]; then
-  for cand in "${PLATFORM_TRIPLE}-macho" "${PLATFORM_ARCH}-apple-darwin-macho"; do
-    if [ -x "${repo_root}/bin/release/${cand}/simple" ]; then
-      PLATFORM_TRIPLE="${cand}"
-      break
-    fi
-  done
-fi
+# macOS has one canonical Simple-native release directory. Never select a
+# legacy three-part directory merely because a stale binary exists there.
+PLATFORM_TRIPLE=$(simple_release_platform_dir "${PLATFORM_TRIPLE}") || {
+  echo "setup: unsupported release platform: ${PLATFORM_TRIPLE}" >&2
+  exit 1
+}
 
 release_dir="${repo_root}/bin/release/${PLATFORM_TRIPLE}"
 
@@ -380,17 +376,10 @@ if [ -n "${SIMPLE_LSP_MCP_NATIVE:-}" ]; then
     exit 127
   fi
 else
-  for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server" \
-    "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server"
-  do
-    if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "${candidate}"; then
-      native="${candidate}"
-      break
-    fi
-  done
+  candidate="${release_dir}/simple_lsp_mcp_server"
+  if [ -x "${candidate}" ] && native_hash_is_valid "${candidate}" && mcp_probe_lsp_native "${candidate}"; then
+    native="${candidate}"
+  fi
 fi
 
 if [ ! -x "${native}" ]; then

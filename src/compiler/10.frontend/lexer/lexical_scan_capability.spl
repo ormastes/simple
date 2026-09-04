@@ -1,0 +1,90 @@
+# Lexical scan acceleration policy. Correctness always belongs to the scalar
+# scanner; accelerated providers are admitted only after matched parity and
+# benchmark evidence.
+
+enum LexicalScanProvider:
+    Scalar
+    CpuSimd
+
+enum LexicalScanCapabilityError:
+    InvalidBenchmark
+    ParityMismatch
+    InsufficientSamples
+    BelowCrossover
+    NoSpeedup
+
+struct LexicalScanBenchmarkV1:
+    source_bytes: i64
+    scalar_ns: i64
+    simd_ns: i64
+    matched_samples: i64
+    scalar_digest: text
+    simd_digest: text
+
+struct LexicalScanCapabilityV1:
+    cpu_simd_available: bool
+    cpu_simd_admitted: bool
+    crossover_bytes: i64
+    benchmark_digest: text
+
+struct LexicalGpuCandidateV1:
+    notify: bool
+    source_bytes: i64
+    crossover_bytes: i64
+    reason: text
+
+fn lexical_scan_capability_scalar() -> LexicalScanCapabilityV1:
+    LexicalScanCapabilityV1(
+        cpu_simd_available: false,
+        cpu_simd_admitted: false,
+        crossover_bytes: 0,
+        benchmark_digest: ""
+    )
+
+fn lexical_scan_admit_cpu_simd(
+    cpu_simd_available: bool,
+    crossover_bytes: i64,
+    benchmark: LexicalScanBenchmarkV1
+) -> Result<LexicalScanCapabilityV1, LexicalScanCapabilityError>:
+    if benchmark.source_bytes <= 0 or benchmark.scalar_ns <= 0 or benchmark.simd_ns <= 0:
+        return Err(LexicalScanCapabilityError.InvalidBenchmark)
+    if crossover_bytes < 0:
+        return Err(LexicalScanCapabilityError.InvalidBenchmark)
+    if benchmark.matched_samples < 5:
+        return Err(LexicalScanCapabilityError.InsufficientSamples)
+    if benchmark.scalar_digest == "" or benchmark.scalar_digest != benchmark.simd_digest:
+        return Err(LexicalScanCapabilityError.ParityMismatch)
+    if benchmark.source_bytes < crossover_bytes:
+        return Err(LexicalScanCapabilityError.BelowCrossover)
+    if benchmark.simd_ns >= benchmark.scalar_ns:
+        return Err(LexicalScanCapabilityError.NoSpeedup)
+    Ok(LexicalScanCapabilityV1(
+        cpu_simd_available: cpu_simd_available,
+        cpu_simd_admitted: cpu_simd_available,
+        crossover_bytes: crossover_bytes,
+        benchmark_digest: benchmark.scalar_digest
+    ))
+
+fn lexical_scan_select_provider(capability: LexicalScanCapabilityV1, source_bytes: i64) -> LexicalScanProvider:
+    if capability.cpu_simd_available and capability.cpu_simd_admitted and source_bytes >= capability.crossover_bytes:
+        return LexicalScanProvider.CpuSimd
+    LexicalScanProvider.Scalar
+
+fn lexical_scan_gpu_candidate(source_bytes: i64, crossover_bytes: i64) -> LexicalGpuCandidateV1:
+    val candidate = crossover_bytes > 0 and source_bytes >= crossover_bytes
+    LexicalGpuCandidateV1(
+        notify: candidate,
+        source_bytes: source_bytes,
+        crossover_bytes: crossover_bytes,
+        reason: if candidate: "transfer-inclusive-benchmark-required" else: "below-crossover"
+    )
+
+export LexicalScanProvider
+export LexicalScanCapabilityError
+export LexicalScanBenchmarkV1
+export LexicalScanCapabilityV1
+export LexicalGpuCandidateV1
+export lexical_scan_capability_scalar
+export lexical_scan_admit_cpu_simd
+export lexical_scan_select_provider
+export lexical_scan_gpu_candidate

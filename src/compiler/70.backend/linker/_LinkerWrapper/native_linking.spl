@@ -24,7 +24,8 @@ use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
 # Split into modules:
 #   linker_wrapper_helpers.spl — SMF linking, self-contained linking, binary helpers
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, file_write, file_hash_sha256, env_get, process_run, cwd}
+use std.common.crypto.sha256.{sha256_text}
 use std.platform.{host_os, host_arch}
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
@@ -64,6 +65,7 @@ struct NativeLinkConfig:
     linker_abi: text = ""
     pie: bool
     debug: bool
+    strip_output: bool = false
     verbose: bool
     allow_duplicate_definitions: bool
     allow_cc_fallback: bool
@@ -78,6 +80,7 @@ impl NativeLinkConfig:
             runtime_path: "",
             pie: true,
             debug: false,
+            strip_output: false,
             verbose: false,
             allow_duplicate_definitions: true,
             allow_cc_fallback: true,
@@ -240,6 +243,11 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] linker_info unwrapped"
     val linker_path = linker_info[0]
+    val execution_linker_path = if os == "macos" or os == "darwin":
+        darwin_resolve_link_tool(linker_path)
+    else:
+        linker_path
+    if execution_linker_path == "": return Err("darwin-link-tool-unresolved")
     if trace:
         print "[LINKER] got linker_path={linker_path}"
     val linker_type = linker_info[1]
@@ -282,7 +290,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-dynamic-linker")
         args.push(crt.dynamic_linker)
 
-    for flag in native_direct_platform_flags(os, linker_type.to_string()):
+    for flag in native_direct_platform_flags(os, linker_type.to_string(), config.strip_output):
         args.push(flag)
     if config.allow_duplicate_definitions:
         for flag in unresolved_symbol_flags_for_unix_linker(os):
@@ -402,7 +410,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         return Ok(output)
 
     # Execute linker
-    val exec_result = execute_linker(linker_path, args)
+    val exec_result = execute_linker(execution_linker_path, args)
     if exec_result.is_err():
         if not config.allow_cc_fallback:
             return Err("Strict direct native link failed: " + exec_result.unwrap_err())
@@ -414,6 +422,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if config.verbose:
         val size = linker_file_size(output)
         print "[linker-wrapper] Native binary: {output} ({size} bytes)"
+
+    val darwin_tool_error = publish_darwin_link_tool_identity(execution_linker_path)
+    if darwin_tool_error != "": return Err(darwin_tool_error)
 
     Ok(output)
 
@@ -635,14 +646,67 @@ fn hosted_cross_cc_required(target: text, os: text, arch: text) -> bool:
     val plan = hosted_c_compiler_plan(target, os, arch)
     plan.requires_cross and plan.supported
 
-fn native_direct_platform_flags(os: text, linker_type: text) -> [text]:
+fn darwin_resolve_link_tool(command: text) -> text:
+    if file_exists(command): return command
+    val (stdout, _, code) = process_run("/usr/bin/which", [command])
+    if code != 0: return ""
+    val resolved = stdout.trim().split("\n")[0]
+    if file_exists(resolved): resolved else: ""
+
+fn publish_darwin_link_tool_identity(tool_path: text) -> text:
+    val os = host_os()
+    if os != "macos" and os != "darwin": return ""
+    val resolved = darwin_resolve_link_tool(tool_path)
+    if resolved == "": return "darwin-link-tool-unresolved"
+    val artifact = file_hash_sha256(resolved)
+    if artifact.len() != 64: return "darwin-link-tool-digest-failed"
+    val behavior = sha256_text(
+        "simple-darwin-link-tool-behavior-v1|artifact=64:" + artifact +
+        "|policy=darwin-dead-strip-v1"
+    )
+    val identity = sha256_text(
+        "simple-darwin-link-tool-identity-v1|artifact=64:" + artifact +
+        "|behavior=64:" + behavior
+    )
+    val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val cache_root = if configured_cache_root == "":
+        "build/native_cache"
+    else:
+        configured_cache_root
+    if not file_write(
+        cache_root + "/native_link_tool_identity.receipt",
+        "simple-darwin-link-tool-identity-v1\npath=" + resolved +
+        "\nartifact=" + artifact + "\nbehavior=" + behavior +
+        "\nidentity=" + identity + "\npolicy=darwin-dead-strip-v1\n"
+    ):
+        return "darwin-link-tool-identity-write-failed"
+    ""
+
+pub fn native_direct_platform_flags(os: text, linker_type: text, strip_output: bool = false) -> [text]:
     if os == "linux" or os == "freebsd":
         var flags = ["--eh-frame-hdr", "--build-id", "--hash-style=gnu",
             "-z", "relro", "-z", "now", "--gc-sections"]
         if linker_type == "mold" or linker_type == "lld": flags.push("--icf=all")
         elif linker_type == "gold": flags.push("--icf=safe")
+        if strip_output: flags.push("--strip-all")
         return flags
-    if os == "macos" or os == "darwin": return ["-dead_strip"]
+    if os == "macos" or os == "darwin":
+        var flags = ["-dead_strip"]
+        if strip_output:
+            flags.push("-S")
+            flags.push("-x")
+        return flags
+    []
+
+pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
+    if os == "macos" or os == "darwin" or os == "Darwin":
+        var flags = ["-Wl,-dead_strip"]
+        if strip_output: flags.push("-Wl,-S,-x")
+        return flags
+    if os == "linux" or os == "Linux" or os == "freebsd" or os == "FreeBSD":
+        var flags = ["-Wl,-z,relro", "-Wl,-z,now", "-Wl,--gc-sections"]
+        if strip_output: flags.push("-Wl,--strip-all")
+        return flags
     []
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
@@ -677,6 +741,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
                 return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
             cc = "cc"
+    if os_name == "macos" or os_name == "darwin":
+        cc = darwin_resolve_link_tool(cc)
+        if cc == "": return Err("darwin-link-tool-unresolved")
 
     # Keep the fallback complete: native-build links user objects, runtime
     # objects, and a generated entry object. Truncating this list produces a
@@ -710,10 +777,14 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        for flag in ["-Wl,-dead_strip", "-o", output]:
+        for flag in native_cc_platform_flags(os_name, config.strip_output):
+            args.push(flag)
+        for flag in ["-o", output]:
             args.push(flag)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
+            val tool_error = publish_darwin_link_tool_identity(cc)
+            if tool_error != "": return Err(tool_error)
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
@@ -741,6 +812,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
         args.push("-o")
         args.push(output)
         val (stdout, stderr, code) = process_run(cc, args)
@@ -778,6 +851,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
         args.push("-Wl,--gc-sections")
+        if config.strip_output:
+            args.push("-Wl,--strip-all")
         if not hosted_cross:
             args.push("-Wl,--icf=safe")
         args.push("-o")
@@ -867,6 +942,8 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
         extra.push("/OPT:REF,ICF")
+    if config.strip_output:
+        extra.push("/DEBUG:NONE")
     # Runtime library and compiled objects may define the same symbol.
     # Missing symbols remain fatal.
     if config.allow_duplicate_definitions:

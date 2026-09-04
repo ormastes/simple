@@ -1,0 +1,42 @@
+use common.lint_kernel.output.model.*
+use common.lint_kernel.output.common.*
+
+fn _sarif_region(location: LintOutputLocationV1) -> text:
+    val byte_length = if location.span.end_byte >= location.span.start_byte: location.span.end_byte - location.span.start_byte else: 0u64
+    "{\"startLine\":" + (location.start_line + 1).to_string() + ",\"startColumn\":" + (location.start_column + 1).to_string() + ",\"endLine\":" + (location.end_line + 1).to_string() + ",\"endColumn\":" + (location.end_column + 1).to_string() + ",\"byteOffset\":" + location.span.start_byte.to_string() + ",\"byteLength\":" + byte_length.to_string() + "}"
+
+fn _sarif_physical_location(location: LintOutputLocationV1) -> text:
+    "{\"artifactLocation\":{\"uri\":" + lint_output_quote(location.uri) + "},\"region\":" + _sarif_region(location) + "}"
+
+fn _sarif_location(location: LintOutputLocationV1) -> text:
+    "{\"physicalLocation\":" + _sarif_physical_location(location) + "}"
+
+fn _sarif_related(items: [LintRelatedLocationV1]) -> text:
+    var result = "["
+    for index in 0..items.len():
+        if index > 0: result = result + ","
+        result = result + "{\"id\":" + index.to_string() + ",\"message\":{\"text\":" + lint_output_quote(items[index].message) + "},\"physicalLocation\":" + _sarif_physical_location(items[index].location) + "}"
+    result + "]"
+
+fn _sarif_fixes(items: [LintTextEditV1]) -> text:
+    var result = "["
+    for index in 0..items.len():
+        if index > 0: result = result + ","
+        val item = items[index]
+        val metadata = item.metadata
+        result = result + "{\"description\":{\"text\":\"lint fix\"},\"properties\":{\"providerId\":" + lint_output_quote(lint_output_id(metadata.provider_id)) + ",\"languageId\":" + lint_output_quote(lint_output_id(metadata.language_id)) + ",\"conflictGroup\":" + metadata.conflict_group.to_string() + ",\"applicability\":" + lint_output_quote(metadata.applicability.to_string()) + "},\"artifactChanges\":[{\"artifactLocation\":{\"uri\":" + lint_output_quote(item.location.uri) + "},\"replacements\":[{\"deletedRegion\":" + _sarif_region(item.location) + ",\"insertedContent\":{\"text\":" + lint_output_quote(item.replacement) + "}}]}]}"
+    result + "]"
+
+fn _sarif_result(item: NormalizedLintDiagnosticV1) -> text:
+    "{\"ruleId\":" + lint_output_quote(item.rule_name) + ",\"level\":" + lint_output_quote(lint_output_sarif_level(item.diagnostic.severity)) + ",\"message\":{\"text\":" + lint_output_quote(item.message) + "},\"locations\":[" + _sarif_location(item.location) + "],\"relatedLocations\":" + _sarif_related(item.related) + ",\"fixes\":" + _sarif_fixes(item.fixes) + "}"
+
+pub fn lint_output_to_sarif(output: NormalizedLintOutputV1) -> text:
+    val sorted = lint_output_sorted(output.diagnostics)
+    var results = "["
+    for index in 0..sorted.len():
+        if index > 0: results = results + ","
+        results = results + _sarif_result(sorted[index])
+    results = results + "]"
+    val coverage = output.result.coverage
+    val invocation = "{\"executionSuccessful\":" + (if output.result.infrastructure_failed: "false" else: "true") + ",\"properties\":{\"verdict\":" + lint_output_quote(lint_output_verdict(output.result.verdict)) + ",\"requestedUnits\":" + coverage.requested_unit_count.to_string() + ",\"completedUnits\":" + coverage.completed_unit_count.to_string() + ",\"partialUnits\":" + coverage.partial_unit_count.to_string() + ",\"notAnalyzedUnits\":" + coverage.not_analyzed_unit_count.to_string() + ",\"requestedRules\":" + coverage.requested_rule_count.to_string() + ",\"completedRules\":" + coverage.completed_rule_count.to_string() + ",\"skippedRules\":" + coverage.skipped_rule_count.to_string() + "}}"
+    "{\"version\":\"2.1.0\",\"$schema\":\"https://json.schemastore.org/sarif-2.1.0.json\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"Simple Lint Kernel\"}},\"invocations\":[" + invocation + "],\"results\":" + results + "}]}"
