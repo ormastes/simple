@@ -14,6 +14,7 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.env.platform.{is_windows as platform_is_windows}
 
 extern fn rt_path_absolute(path: text) -> text?
 # Signatures mirror the canonical declarations in
@@ -33,11 +34,12 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 # Platform Helpers
 # ============================================================================
 
+# FAIL-OPEN FIX (2026-09-02): read ONLY `OS` and returned false when unset --
+# a silent "not Windows" under a stripped environment (where a bootstrap runs).
+# Delegate to the single resolver in std.nogc_sync_mut.env.platform, which
+# consults the in-process rt_platform_name() primitive first.
 fn _is_windows() -> bool:
-    val os_env = env_get_nullable("OS")
-    if os_env != "" and os_env != nil:
-        return os_env.lower().contains("windows")
-    false
+    platform_is_windows()
 
 fn _is_msvc_cc(cc: text) -> bool:
     val normalized = cc.lower().replace("\\", "/")
@@ -59,16 +61,53 @@ fn _is_mingw() -> bool:
     val msystem = env_get_nullable("MSYSTEM")
     msystem != "" and msystem != nil
 
+fn _msys_drive_path(p: text) -> text:
+    """On Windows, rewrite an MSYS/Cygwin '/d/foo' path to native 'd:/foo'.
+
+    TMPDIR/TMP/TEMP under Git Bash / MSYS2 hold POSIX-form paths. Every
+    consumer below hands the result to a NATIVE Windows tool via
+    rt_process_run (no shell, so no MSYS argv conversion happens), and such a
+    tool cannot open '/d/...' at all.
+
+    Measured 2026-09-02 on the MSVC bootstrap lane, clang-cl 18.1.8, same
+    probe source, argv differing only in path form:
+      clang-cl /nologo /c /Fo/d/.../ccprobe.o /d/.../ccprobe.c
+        -> "no such file or directory: '/d/.../ccprobe.c'", rc=1
+      clang-cl /nologo /c /Fod:\...\ccprobe.o d:\...\ccprobe.c
+        -> rc=0, 753-byte object
+    This is why _cc_verify_compiles rejected EVERY candidate and
+    find_c_compiler() returned "", producing "No C compiler found. Install
+    clang or gcc." from llvm_native_link_orchestrator.spl:125 — the Stage 2
+    receiver gate's real failure.
+
+    Drive letters are case-insensitive on Windows, so no case folding is
+    needed. CROSS-PLATFORM IMPACT: guarded by _is_windows(); on every other
+    platform this returns its argument unchanged, and '/d/foo' is a perfectly
+    ordinary POSIX path that must NOT be rewritten.
+    """
+    if not _is_windows():
+        return p
+    if p.len() < 3:
+        return p
+    if not p.starts_with("/"):
+        return p
+    if p.substring(2, 3) != "/":
+        return p
+    val drive = p.substring(1, 2)
+    if drive == "/" or drive == "":
+        return p
+    "{drive}:{p.substring(2)}"
+
 fn _get_temp_dir() -> text:
     val tmpdir = env_get_nullable("TMPDIR")
     if tmpdir != "" and tmpdir != nil:
-        return tmpdir
+        return _msys_drive_path(tmpdir)
     val tmp = env_get_nullable("TMP")
     if tmp != "" and tmp != nil:
-        return tmp
+        return _msys_drive_path(tmp)
     val temp = env_get_nullable("TEMP")
     if temp != "" and temp != nil:
-        return temp
+        return _msys_drive_path(temp)
     if _is_windows():
         return "C:/Windows/Temp"
     "/tmp"
@@ -194,7 +233,21 @@ fn _cc_verify_compiles(cc: text) -> bool:
     shadowing MSYS2's), and the llc bug this lane started from was the same
     exists-but-never-executed probe shape. Never assume; execute."""
     val tmp = _get_temp_dir()
-    val pid = rt_getpid()
+    # getpid(), NOT the bare extern rt_getpid(): `rt_getpid` is not declared
+    # `extern fn` anywhere in this file, so under native codegen `{pid}`
+    # interpolated an opaque handle as the literal text `<value:0x34d4>`.
+    # `<` and `>` are ILLEGAL in a Windows filename, so rt_file_write_text
+    # below failed for EVERY candidate, _cc_verify_compiles returned false
+    # four times, and find_c_compiler() returned "" -- the real
+    # `reason=stage2-struct-receiver-failed` on the MSVC lane (measured
+    # 2026-09-02). The typed wrapper was already imported at the top of this
+    # file and simply unused. Third instance of the undeclared-extern
+    # silent-value class; see
+    # doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md.
+    # CROSS-PLATFORM: on Unix `<value:0x...>` is a legal filename, so the
+    # probe worked there; the numeric name is strictly cleaner with no
+    # behaviour change.
+    val pid = getpid()
     # Staging names, not durable artifacts: the write-temp-then-rename idiom's
     # temp half. Nothing here is ever reused across runs -- the probe MUST
     # execute every time (a cached verdict would call a compiler healthy after
@@ -208,8 +261,12 @@ fn _cc_verify_compiles(cc: text) -> bool:
     val src = "{tmp}/simple-cc-verify.{pid}.tmp.c"
     val obj = "{tmp}/simple-cc-verify.{pid}.tmp.o"
     if not rt_file_write_text(src, "int main(void) { return 0; }\n"):
-        if runtime_compile_trace_enabled():
-            print "[CC-VERIFY] {cc}: could not write probe source {src}"
+        # UNGATED, exactly like the REJECTED branch below and for the same
+        # reason its own comment already gives: gating this behind
+        # SIMPLE_COMPILER_TRACE meant the only lane that ever hits it never
+        # printed it. The resulting silence was read as "every `where` probe
+        # failed" and cost a full diagnosis cycle on 2026-09-02.
+        print "[CC-VERIFY] {cc}: REJECTED could not write probe source {src}"
         return false
     var args: [text] = []
     if _is_msvc_cc(cc):
@@ -220,6 +277,11 @@ fn _cc_verify_compiles(cc: text) -> bool:
     val ok = code == 0 and rt_file_exists(obj)
     if runtime_compile_trace_enabled():
         print "[CC-VERIFY] {cc}: exit={code} obj_exists={ok}"
+    elif not ok:
+        # A failing probe is the thing worth reporting, and gating it behind a
+        # trace flag meant the only lane that ever hits it never printed it.
+        print "[CC-VERIFY] {cc}: REJECTED exit={code} src={src} obj={obj}"
+        print "[CC-VERIFY] {cc}: stderr={err}"
     rt_file_delete(src)
     rt_file_delete(obj)
     ok
@@ -237,17 +299,38 @@ fn _find_c_compiler_windows() -> text:
             if code == 0 and _cc_verify_compiles(candidate):
                 return candidate
 
-    # MSVC: try cl.exe (available in VS Developer Command Prompt)
-    val (cl_out, cl_err, cl_code) = backend_shell_tuple("where cl.exe 2>nul")
-    if cl_code == 0 and _cc_verify_compiles("cl.exe"):
-        return "cl.exe"
+    # clang-cl BEFORE cl.exe on the MSVC lane. cl.exe passes the trivial
+    # _cc_verify_compiles probe and then cannot compile the C runtime at all:
+    # measured 2026-09-01 on cl.exe 19.44.35228, src/runtime/runtime.c yields
+    # C1189 ("C atomic support is not enabled" — stdatomic needs BOTH /std:c11
+    # and /experimental:c11atomics), then C2099 non-constant initializers, then
+    # C2143/C2091 on the GNU `__attribute__(...)` the runtime uses throughout.
+    # clang-cl compiles the same file clean with the flags below. clang-cl is
+    # also the compiler the stage-2 candidate itself was built with, so probing
+    # the candidate with a DIFFERENT compiler than built it is its own defect.
+    # Windows-only ordering change: the MinGW branch above and the Unix path in
+    # find_c_compiler are untouched.
+    val msvc_candidates = ["clang-cl", "cl.exe"]
+    for candidate in msvc_candidates:
+        val (mout, merr, mcode) = backend_shell_tuple("where {candidate} 2>nul")
+        if mcode == 0 and _cc_verify_compiles(candidate):
+            return candidate
 
     # Try clang/gcc on PATH (works in both MSVC and MinGW)
-    val candidates = ["clang-cl", "clang", "gcc"]
+    val candidates = ["clang", "gcc"]
     for candidate in candidates:
         val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
         if code == 0 and _cc_verify_compiles(candidate):
             return candidate
+
+    # Returning "" here yields the bare message "No C compiler found. Install
+    # clang or gcc." at two DIFFERENT call sites with identical text, and names
+    # neither the candidates tried nor the temp dir the probe used. That cost a
+    # full bootstrap cycle to re-diagnose. Always say what was attempted.
+    print "[cc-detect] no C compiler verified on Windows."
+    print "[cc-detect] temp dir: {_get_temp_dir()}"
+    print "[cc-detect] tried: clang-cl, cl.exe, clang, gcc (each `where` + a real compile)"
+    print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
 # ============================================================================
@@ -515,7 +598,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         if use_msvc:
             # MSVC cl.exe flags (/Gy enables function-level linking for /OPT:REF)
             val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
-            comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+            # /std:c11 is required: the runtime uses <stdatomic.h>, which the MS
+            # CRT header guards behind C11 (fatal C1189 otherwise). clang-cl
+            # accepts it and it matches the -std=gnu11 the clang branch passes.
+            comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/std:c11", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
             # runtime_memory.c is always in this bundle and canonically owns
             # the overlapping allocator/pointer ABI, including native-all.
             comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
@@ -528,6 +614,17 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
                 comp_args.push("/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                # This composition sets SIMPLE_CORE_C_STANDALONE but does NOT
+                # include runtime_legacy_core.c (see include_stage4_legacy_compat
+                # below), and legacy_core.c is the sole owner of
+                # spl_thread_cpu_count under that define -- so without this the
+                # link fails with `runtime_thread.obj : error LNK2019:
+                # unresolved external symbol spl_thread_cpu_count referenced in
+                # function rt_pool_get_parallelism` (measured 2026-09-02). State
+                # the ownership explicitly rather than letting runtime_thread.c
+                # guess from the platform.
+                if not include_stage4_legacy_compat:
+                    comp_args.push("/DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
         else:
             # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
             # -ffunction-sections -fdata-sections: emit each function/data in its own
@@ -551,6 +648,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
                 comp_args.push("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                # Same ownership statement as the MSVC branch above. Inert
+                # wherever runtime_legacy_core.c IS in the list.
+                if not include_stage4_legacy_compat:
+                    comp_args.push("-DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.

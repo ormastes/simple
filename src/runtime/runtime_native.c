@@ -5394,6 +5394,32 @@ int64_t rt_string_to_int(int64_t value) {
     return result;
 }
 
+/* Receiver-dispatched `.to_i64()` / `.to_int()` for the LLVM native lane when
+ * the receiver TYPE WAS ERASED.
+ *
+ * `pipeline/native_project/mangle.rs` deliberately leaves `to_i64`/`to_int`
+ * BARE in that case, on the contract that codegen routes bare string builtins
+ * through its redirect table (-> rt_string_to_int). The LLVM arm broke that
+ * contract: an unconditional integer-cast block matched `to_i64` FIRST and
+ * emitted an identity coercion, so `text.to_i64()` evaluated to the receiver's
+ * own tagged word. Measured live: the Windows MSVC Stage 2 candidate compiled
+ * `(value.to_i64() ?? 0) > 0` to `test %rsi,%rsi; setle` on the text handle,
+ * which made `--threads 1` "not a positive integer" while `--threads 0` WAS
+ * accepted. See
+ * doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md.
+ *
+ * Routing bare `to_i64` unconditionally to rt_string_to_int is NOT a fix: that
+ * returns 0 for a non-string, which would silently zero every erased NUMERIC
+ * `.to_i64()`. So dispatch on the receiver, with an IDENTITY fallback that is
+ * byte-identical to the cast block's existing behaviour for everything that is
+ * not a registry-validated string. The guard is rt_core_as_string() for the
+ * reason documented at rt_value_as_int: a bare TAG_HEAP bit test would
+ * misclassify every odd RAW i64 that pure-Simple call sites legitimately pass. */
+int64_t rt_to_int_dynamic(int64_t value) {
+    if (rt_core_as_string(value)) return rt_string_to_int(value);
+    return value;
+}
+
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
  * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
  * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the

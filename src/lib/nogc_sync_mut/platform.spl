@@ -16,6 +16,16 @@ use std.io_runtime.{file_exists}
 # module (`path`) as a runtime value produced an undeclared LLVM global.
 export use nogc_sync_mut.path.{normalize_path, is_absolute_path, join_path}
 use nogc_sync_mut.target_ext.{target_lib_ext, target_exe_ext}
+use nogc_sync_mut.fs.host_path.{host_path_native}
+# SELF-RECURSION FIX (2026-09-03): importing `is_windows` into a file that also
+# DEFINES `is_windows` makes the AOT lowering bind the alias to the LOCAL
+# definition -- a silent infinite self-call (stack overflow), which is what
+# killed the Windows MSVC stage 2 candidate. Import the underlying resolver
+# `detect_os`, whose bare name collides with nothing here; `env.platform`s
+# `is_windows` is literally `detect_os() == "windows"`, so semantics are
+# unchanged. Compiler defect:
+# doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md
+use std.nogc_sync_mut.env.platform.{detect_os as platform_detect_os}
 
 # Re-export path operations from std.path
 
@@ -33,14 +43,13 @@ fn shell_output_trim(command: text) -> text:
     else:
         ""
 
+# FAIL-OPEN FIX (2026-09-02): read ONLY `OS` and returned false when unset --
+# a silent "not Windows" under a stripped environment (where a bootstrap runs).
+# Delegate to the single resolver in std.nogc_sync_mut.env.platform, which
+# consults the in-process rt_platform_name() primitive first.
 fn is_windows_env() -> bool:
-    """Check if running on Windows by checking OS environment variable."""
-    val os_env = env_get("OS")
-    if os_env == nil:
-        false  # Default to Unix/Linux
-    else:
-        val os_lower = os_env.lower()
-        os_lower.contains("windows")
+    """True when the running host is Windows."""
+    platform_detect_os() == "windows"
 
 pub fn host_os() -> text:
     """Internal helper to get host OS using Pure Simple implementation."""
@@ -154,11 +163,21 @@ pub fn to_native_path(path: text) -> text:
     Example:
         to_native_path("C:/tmp/a.txt")   # Windows -> "C:\tmp\a.txt"
                                          # POSIX   -> "C:/tmp/a.txt" (unchanged)
+
+    IMPLEMENTATION: this is now a thin alias for std.nogc_sync_mut.fs.host_path
+    host_path_native, which is THE one boundary converter (see the collision note
+    in that file). Two independent conversion points is how a boundary rots; this
+    name survives because it is the documented public spelling and has specs, but
+    the logic lives in exactly one place. host_path_native additionally handles
+    the MinGW /d/foo -> d:\foo drive form, which this branch never did -- a
+    superset, so no existing caller changes behaviour.
+
+    It is also strictly cheaper: is_windows() -> host_os() SPAWNS `/bin/sh -c
+    "uname -s"` on every non-Windows call. host_path_native caches its platform
+    decision for the life of the process and returns the argument itself off
+    Windows.
     """
-    if is_windows():
-        path.replace("/", "\\")
-    else:
-        path
+    host_path_native(path)
 
 pub fn path_sep() -> text:
     """Returns the PATH environment variable separator."""

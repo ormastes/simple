@@ -24,34 +24,111 @@ fn target_uses_x86_intel_asm(target: Option<(&str, &str, &str)>) -> bool {
         .unwrap_or(false)
 }
 
+/// Architecture families the emitter can recognise from an instruction's
+/// mnemonic. `Neutral` means "no evidence either way" — a directive, a label,
+/// a comment, or a mnemonic several families share (`nop`, `ret`, `j`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AsmArch {
+    X86,
+    Riscv,
+    Arm,
+    Neutral,
+}
+
+fn target_asm_arch(triple: &str) -> AsmArch {
+    if triple.contains("x86_64") || triple.starts_with("i386") || triple.starts_with("i686") {
+        AsmArch::X86
+    } else if triple.starts_with("riscv") {
+        AsmArch::Riscv
+    } else if triple.starts_with("aarch64") || triple.starts_with("arm") || triple.starts_with("thumb") {
+        AsmArch::Arm
+    } else {
+        AsmArch::Neutral
+    }
+}
+
+/// Classify one instruction line. Only UNMISTAKABLE evidence counts: a line the
+/// emitter cannot attribute stays `Neutral` and is therefore kept for every
+/// target, so this filter can never silently drop a block it merely failed to
+/// understand.
+fn instruction_asm_arch(instruction: &str) -> AsmArch {
+    let text = instruction.trim_start();
+    let mnemonic = text.split(|c: char| c.is_whitespace() || c == ',').next().unwrap_or("");
+
+    // x86 / x86_64
+    const X86_MNEMONICS: &[&str] = &[
+        "in", "out", "inb", "outb", "inw", "outw", "inl", "outl", "invlpg", "hlt", "cli", "sti",
+        "iret", "iretq", "lgdt", "lidt", "lldt", "ltr", "cpuid", "rdmsr", "wrmsr", "rdtsc",
+        "sysret", "sysexit", "swapgs", "pushfq", "popfq", "xchg", "movq", "movl", "movw", "movb",
+        "leaq", "lea", "int3", "ud2", "wbinvd", "clts", "stac", "clac", "sgdt", "sidt", "verr",
+    ];
+    if X86_MNEMONICS.contains(&mnemonic) || text.starts_with(".intel_syntax") || text.starts_with(".att_syntax") {
+        return AsmArch::X86;
+    }
+    // `mov` is shared between x86 and ARM, but it is NOT a RISC-V mnemonic
+    // (RISC-V spells the same thing `mv`), and the only two targets this
+    // predicate can reject for are x86 and RISC-V — `compile_inline_asm_c`
+    // bails out of the C sidecar entirely for aarch64/arm before reaching
+    // here. Classifying it as x86 is therefore decisive where it matters and
+    // unreachable where it would be wrong.
+    if mnemonic == "mov" || mnemonic == "movzx" || mnemonic == "movsx" {
+        return AsmArch::X86;
+    }
+
+    // RISC-V
+    const RISCV_MNEMONICS: &[&str] = &[
+        "mv", "addi", "sw", "lw", "sd", "ld", "li", "la", "sret", "mret", "ecall", "ebreak", "wfi", "auipc",
+    ];
+    if RISCV_MNEMONICS.contains(&mnemonic)
+        || mnemonic.starts_with("csrr")
+        || mnemonic.starts_with("csrw")
+        || mnemonic.starts_with("csrs")
+        || mnemonic.starts_with("csrc")
+        || mnemonic.starts_with("sfence.vma")
+        || mnemonic.starts_with("fence.i")
+        || text.starts_with(".option ")
+    {
+        return AsmArch::Riscv;
+    }
+
+    // ARM / AArch64
+    const ARM_MNEMONICS: &[&str] = &[
+        "mrs", "msr", "dmb", "dsb", "isb", "wfe", "eret", "ldp", "stp", "ldr", "str", "bl", "blr",
+        "cbz", "cbnz", "svc", "hvc", "smc", "cpsie", "cpsid", "adrp",
+    ];
+    if ARM_MNEMONICS.contains(&mnemonic) {
+        return AsmArch::Arm;
+    }
+
+    AsmArch::Neutral
+}
+
+/// Decide whether a collected block belongs in this target's translation unit.
+///
+/// Full entry-closure discovery visits architecture-specific modules whose
+/// `@cfg` functions are not selected for this target, and the inline-asm
+/// registry is PROCESS-GLOBAL, so every arch's blocks are present here
+/// regardless of target. This filter is the designed mechanism for that.
+///
+/// It used to have only the x86 arm — a riscv64 or aarch64 build emitted every
+/// x86 block into its own TU, and `in eax, dx` / `mov cr3, pd` / `invlpg` went
+/// to the riscv64 assembler (8 of the 18 errors in
+/// `doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md`).
+/// It is now symmetric: a block is rejected when it carries UNMISTAKABLE
+/// evidence of a family other than the target's. Blocks with no such evidence
+/// are kept, exactly as before.
 fn block_matches_target(instructions: &[String], target: Option<(&str, &str, &str)>) -> bool {
     let Some((triple, _, _)) = target else {
         return true;
     };
-    if triple.contains("x86_64") || triple.starts_with("i386") || triple.starts_with("i686") {
-        // Full entry-closure discovery may visit architecture-specific modules
-        // whose @cfg functions are not selected for this target. The inline-asm
-        // registry is process-global, so reject unmistakably ARM/RISC-V blocks
-        // before emitting the one target-specific C translation unit.
-        return !instructions.iter().any(|instruction| {
-            let text = instruction.trim_start();
-            text.starts_with(".option ")
-                || text.starts_with("mv ")
-                || text.starts_with("addi ")
-                || text.starts_with("sw ")
-                || text.starts_with("lw ")
-                || text.starts_with("li ")
-                || text.starts_with("la ")
-                || text.starts_with("csrr")
-                || text.starts_with("csrw")
-                || text.starts_with("sfence.vma")
-                || text == "sret"
-                || text == "wfi"
-                || text.contains(" cr3, pd")
-                || text.contains("out, cr3")
-        });
+    let want = target_asm_arch(triple);
+    if want == AsmArch::Neutral {
+        return true;
     }
-    true
+    !instructions.iter().any(|instruction| {
+        let found = instruction_asm_arch(instruction);
+        found != AsmArch::Neutral && found != want
+    })
 }
 
 fn has_unresolved_simple_operand(instruction: &str) -> bool {

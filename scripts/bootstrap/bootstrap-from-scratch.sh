@@ -1575,6 +1575,7 @@ bootstrap_native_build_main() {
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
@@ -2629,6 +2630,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
       stage2_rejected_receipt="${stage2_rejected_dir}/rejection.env"
       mkdir -p "${stage2_rejected_dir}"
+      # A previous rejection left both artifacts chmod 400/0500, so `mv` onto the
+      # binary and `>` onto the receipt both fail with "Permission denied" and the
+      # run silently keeps the PREVIOUS run's rejection.env -- a stale receipt that
+      # reads as authoritative. Clear them first so every run records truthfully.
+      rm -f "${stage2_rejected_bin}" "${stage2_rejected_receipt}"
       mv "${stage2_bin}" "${stage2_rejected_bin}"
       chmod 400 "${stage2_rejected_bin}"
       {
@@ -2820,6 +2826,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
+    SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
+    SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=0 \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=0 \
@@ -2917,7 +2925,22 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     fi
     if [ "${stage3_status}" -eq 0 ]; then
       echo "  warning: stage3 self-host produced no executable; Stage 4 unavailable"
-    elif [ "${stage3_status}" -gt 128 ]; then
+    elif [ "${stage3_status}" -eq 255 ]; then
+      # 255 is NOT a signal death. It is the conventional shell rendering of an
+      # exit(-1), and the old `-gt 128` arm below claimed "KILLED by signal 127"
+      # -- a signal that does not exist (POSIX tops out near 64). That phantom
+      # sent one investigation chasing an OOM kill for four runs before the real
+      # cause (a SIGSEGV, and separately a worker exit(-1)) was found. See
+      # doc/08_tracking/bug/bootstrap_exit_255_misreported_as_signal_127_2026-09-02.md
+      # CORRECTED 2026-09-03. An earlier revision of this arm asserted 255 was
+      # "NOT a signal death". That is backwards. 255 here is the shell rendering
+      # of the -1 returned by runtime_process.c's waitpid loop, and that -1 is
+      # returned ONLY on the !WIFEXITED path -- i.e. the child WAS killed by a
+      # signal, and WTERMSIG was being discarded. The runtime now reports
+      # -(128+signo) so the number survives; a bare 255 means an older runtime
+      # or a genuine wait failure.
+      echo "  warning: stage3 self-host worker was KILLED (reaped without a normal exit; the signal number was discarded by an older runtime -- rebuild to get -(128+signo)); NOT a compile failure; Stage 4 unavailable"
+    elif [ "${stage3_status}" -gt 128 ] && [ "${stage3_status}" -le 192 ]; then
       # A signal death is not a compile failure. earlyoom(1) is userspace, so an
       # out-of-memory kill leaves nothing in dmesg and used to surface here as a
       # bare "failed (exit 143)" -- which reads as a compiler defect. Name it.

@@ -92,3 +92,51 @@ at two different call sites. They are **one defect, two faces**: the same
 stolen-unwrap mechanism, independently triggered in two places, which is why
 building the tag probe recommended above was never necessary to explain the
 roaming count.
+
+---
+
+## Addendum 2026-09-02 (late): "zerokind=0" was VACUOUS a third way — retracted
+
+I reported twice that the `expression_core.spl:50` stolen-`unwrap` fix had
+eliminated E-MIR-TYPE-ZeroKind, citing `zerokind=0`. **Both claims are
+retracted.** The fix is real and stays, but it did NOT clear the class.
+
+### How the zero was vacuous
+
+The two earlier "0" readings came from runs that TERMINATED BEFORE REACHING the
+sites that produce ZeroKind:
+
+| run | log bytes | reached | zerokind | meaning |
+|---|---|---|---|---|
+| A | 0 | nothing | 0 | obviously vacuous (caught) |
+| B | 60,181 | `hir 13/760`, worker exit -1 | 0 | **vacuous — looked real** |
+| C | 133,857 | as far as `pipeline_fn.spl` | **2** | first non-vacuous reading |
+
+Run B is the dangerous one. My standing guard was "a zero on a ZERO-BYTE log is
+vacuous — always report byte size next to the count." That guard PASSED: 60 KB is
+not zero. But byte size only proves the run produced output, not that it reached
+the code under test. Run B died at file 13 of 760.
+
+### The corrected guard
+
+A count of 0 is evidence only if the run REACHED the sites that would produce a
+non-zero. Report, alongside every count, **how far the run got** — for stage 3
+that is the last `hir N/760` and the last `phase3:hir:file:start`. A zero from a
+run that stopped at 13/760 says nothing about a defect that fires at 700/760.
+
+### What is actually established
+
+- `expression_core.spl:50` WAS a genuine stolen `unwrap` (`.?` guard followed by
+  a bare `.unwrap()`), and the `if val` fix is correct on its own merits. Keep it.
+- It is NOT the only producer. With `prim_kind_v` verified present in the build
+  tree (2 occurrences), run C still reports 2 ZeroKind.
+- `hir-fatals` reaching 0 IS established — run C confirms it at 133 KB having
+  travelled far past where the fatals used to appear.
+
+### The relabel earned its keep
+
+Run C's fatal reads `'scope-tail:compiler.driver.pipeline_fn.compile…'`. The
+`scope-tail:` prefix added alongside the fix is doing exactly its job: the
+message now announces that the name is a scope label, not the offending
+function. Without it this run would have pointed a third investigation at
+`pipeline_fn.spl`, which is where the FIRST wrong diagnosis in this arc went.

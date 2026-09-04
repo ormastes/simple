@@ -54,8 +54,34 @@
 #include <io.h>
 #include <time.h>
 #include <sys/types.h>
+/* MSVC/clang-cl compatibility shims. Windows-only: every definition below is
+ * inside this `#else` branch of `#ifndef _WIN32`, so the POSIX build is
+ * byte-identical. Without them this TU has never compiled on Windows at all
+ * (`alloca`, `ssize_t`, `S_ISDIR`/`S_ISREG` are all absent from the MS CRT),
+ * which is why the seed's core-C list in
+ * src/compiler_rust/compiler/src/pipeline/native_project/tools.rs deliberately
+ * omits runtime.c while the pure-Simple list in
+ * src/compiler/70.backend/backend/runtime_compiler.spl includes it. */
+#include <malloc.h>
+#ifndef alloca
+#define alloca _alloca
+#endif
+#if defined(_MSC_VER) && !defined(_SSIZE_T_DEFINED)
+#define _SSIZE_T_DEFINED
+typedef long long ssize_t;
+#endif
 #endif
 #include <sys/stat.h>
+#ifdef _WIN32
+/* <sys/stat.h> on Windows defines _S_IFMT/_S_IFDIR/_S_IFREG but not the
+ * POSIX classification macros. Windows-only; POSIX already provides them. */
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#endif
 #ifndef _WIN32
 #include <dirent.h>
 #endif
@@ -2247,7 +2273,46 @@ int64_t rt_shell_output(int64_t cmd_value) {
     return result;
 }
 
-__attribute__((weak)) SplArray* rt_cli_get_args(void) {
+/* SPL_CLI_ARGS_WEAK: weak everywhere except Windows.
+ *
+ * runtime_native.c ALSO defines these three, also weak. On ELF and Mach-O two
+ * weak definitions are simply resolved to one and nothing is reported. On COFF
+ * they are not: clang-cl lowers `__attribute__((weak))` to a weak EXTERNAL
+ * carrying a default-resolution symbol named after the object it lives in, so
+ * the two translation units declare the same weak external with DIFFERENT
+ * defaults and link.exe fails
+ *
+ *   fatal error LNK1227: conflicting weak extern definition for
+ *   'rt_cli_get_args'. new default '.weak.rt_cli_get_args.default.
+ *   rt_random_hex' conflicts with previous default
+ *   '.weak.rt_cli_get_args.default.rt_dir_create_cpath'
+ *
+ * measured 2026-09-02 on the MSVC Stage 2 receiver probe (link.exe 14.44,
+ * exit 1227). `/FORCE:MULTIPLE` does NOT cover this -- it downgrades duplicate
+ * STRONG definitions to LNK4006 warnings (about 40 of those ride the same
+ * link), but conflicting weak-external defaults are a separate, unforceable
+ * rule.
+ *
+ * Making THIS file the strong owner on Windows fixes it while leaving exactly
+ * one weak external (runtime_native.c's), which resolves against a strong
+ * definition normally. The reverse -- compiling runtime_native.c's copies out
+ * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
+ * only a weak definition, and a weak archive member is never pulled in to
+ * satisfy a reference on PE/COFF (the hazard already documented at the
+ * rt_set_args carve-out in runtime_native.c), so the frontend-smoke lane then
+ * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
+ * unresolved external symbol rt_cli_get_args`.
+ *
+ * CROSS-PLATFORM: off Windows this macro expands to exactly the
+ * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
+ * are byte-identical. The mingw lane is COFF too and benefits identically. */
+#if defined(_WIN32)
+#  define SPL_CLI_ARGS_WEAK
+#else
+#  define SPL_CLI_ARGS_WEAK __attribute__((weak))
+#endif
+
+SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
         spl_array_push(arr, spl_str(g_argv && g_argv[i] ? g_argv[i] : ""));
@@ -2255,11 +2320,11 @@ __attribute__((weak)) SplArray* rt_cli_get_args(void) {
     return arr;
 }
 
-__attribute__((weak)) int64_t rt_cli_arg_count(void) {
+SPL_CLI_ARGS_WEAK int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-__attribute__((weak)) SplValue rt_cli_arg_at(int64_t index) {
+SPL_CLI_ARGS_WEAK SplValue rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return spl_str("");
     }

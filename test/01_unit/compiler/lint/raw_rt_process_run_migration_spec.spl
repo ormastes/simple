@@ -1,0 +1,78 @@
+# Raw Runtime Intrinsic Migration Specification (rt_process_run -> process_run)
+#
+# REPRODUCING half: pins the exact shape that `src/app/jj/commit.spl` and
+# `src/app/watch/runner.spl` carried before migration — a product-side
+# `extern fn rt_process_run` declaration plus direct `rt_process_run(...)`
+# call sites — and asserts the post-migration shape (a
+# `std.nogc_sync_mut.io_runtime` import plus `process_run(...)` calls) is
+# clean. Those two files declared the raw intrinsic while the canonical
+# facade `process_run` already existed at io_runtime.spl:341 with the
+# identical `(text, text, i64)` transport and nothing in either file called
+# it — the "wrapper exists and is not used" class.
+#
+# GENERALIZING half lives in raw_rt_facade_discrimination_spec.spl.
+#
+# Cross-platform note: these assertions are pure text analysis over string
+# literals — no process is spawned and no filesystem is touched — so the
+# spec is platform-independent by construction. The migrated call sites
+# themselves were verified on Windows only (`bin/simple lint`, 0 findings,
+# 0 errors); no POSIX host was available in the session that wrote this.
+
+use std.spec.*
+use compiler.semantics.lint.raw_rt_access.{
+    RawRtAccessFinding,
+    check_raw_rt_access,
+    raw_rt_wrapper_replacement
+}
+
+
+describe "rt_process_run migration to the process_run facade":
+    # @manual scenario evidence
+    """
+    ## Product code must not bind rt_process_run directly
+
+    `src/app/**` is ordinary product code, not a facade owner, so both the
+    raw declaration and the raw call are findings there.
+    """
+
+    context "given the pre-migration shape of src/app/jj/commit.spl":
+        """
+        ### Scenario: a product module declares and calls rt_process_run
+
+        The declaration is RAW-RT-001 and each call is RAW-RT-002.
+        """
+
+        it "flags the product-side extern declaration as RAW-RT-001":
+            val source = "extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)\n"
+            val findings = check_raw_rt_access(source, "src/app/jj/commit.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("RAW-RT-001")
+            expect(findings[0].name).to_equal("rt_process_run")
+
+        it "flags a direct rt_process_run call site as RAW-RT-002":
+            val source = "fn go():\n    val r = rt_process_run(\"jj\", [\"commit\"])\n"
+            val findings = check_raw_rt_access(source, "src/app/jj/commit.spl")
+            expect(findings.len()).to_equal(1)
+            expect(findings[0].code).to_equal("RAW-RT-002")
+            expect(findings[0].name).to_equal("rt_process_run")
+
+        it "names process_run as the canonical mechanical replacement":
+            expect(raw_rt_wrapper_replacement("rt_process_run")).to_equal("process_run")
+
+    context "given the post-migration shape actually committed":
+        """
+        ### Scenario: the module imports the facade and calls process_run
+
+        This is the exact content shape now in src/app/jj/commit.spl and
+        src/app/watch/runner.spl. It must produce no findings at all.
+        """
+
+        it "reports no findings for the migrated jj/commit.spl shape":
+            val source = "use std.nogc_sync_mut.io_runtime.{process_run}\n\nfn go():\n    val r = process_run(\"jj\", [\"commit\"])\n"
+            val findings = check_raw_rt_access(source, "src/app/jj/commit.spl")
+            expect(findings.len()).to_equal(0)
+
+        it "reports no findings for the migrated watch/runner.spl shape":
+            val source = "use std.nogc_sync_mut.io_runtime.{process_run}\n\nfn go():\n    val r = process_run(\"clear\", [])\n"
+            val findings = check_raw_rt_access(source, "src/app/watch/runner.spl")
+            expect(findings.len()).to_equal(0)

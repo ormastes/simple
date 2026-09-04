@@ -9,6 +9,22 @@ use std::sync::Arc;
 /// Global Vulkan instance (singleton)
 static VULKAN_INSTANCE: Mutex<Option<Arc<VulkanInstance>>> = Mutex::new(None);
 
+/// Candidate Vulkan loader names/paths beyond the platform-default soname.
+/// Mirrors the interpreter probe in `vulkan_graphics_runtime_core.rs`.
+#[cfg(target_os = "macos")]
+const VULKAN_LIB_CANDIDATES: &[&str] = &[
+    "libvulkan.1.dylib",
+    "libvulkan.dylib",
+    "/opt/homebrew/lib/libvulkan.1.dylib",
+    "/opt/homebrew/lib/libvulkan.dylib",
+    "/usr/local/lib/libvulkan.1.dylib",
+    "/usr/local/lib/libvulkan.dylib",
+];
+#[cfg(all(unix, not(target_os = "macos")))]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
+#[cfg(windows)]
+const VULKAN_LIB_CANDIDATES: &[&str] = &["vulkan-1.dll"];
+
 /// Vulkan instance wrapper with validation layers
 pub struct VulkanInstance {
     entry: ash::Entry,
@@ -37,12 +53,53 @@ impl VulkanInstance {
 
     /// Check if Vulkan is available on this system
     pub fn is_available() -> bool {
-        unsafe { ash::Entry::load().is_ok() }
+        if unsafe { ash::Entry::load() }.is_ok() {
+            return true;
+        }
+        // ash only dlopens the platform-default soname; on macOS with MoltenVK
+        // the loader typically lives in /opt/homebrew/lib and is not on the
+        // default dyld search path. Mirror the interpreter probe candidates.
+        VULKAN_LIB_CANDIDATES
+            .iter()
+            .any(|name| unsafe { libloading::Library::new(name).is_ok() })
+    }
+
+    /// Load the Vulkan loader, falling back to well-known install paths when
+    /// the platform-default soname is not on the dyld search path (MoltenVK via
+    /// Homebrew installs to /opt/homebrew/lib, which `ash::Entry::load` misses).
+    fn load_entry() -> VulkanResult<ash::Entry> {
+        if let Ok(entry) = unsafe { ash::Entry::load() } {
+            return Ok(entry);
+        }
+        for name in VULKAN_LIB_CANDIDATES {
+            let lib = match unsafe { libloading::Library::new(name) } {
+                Ok(lib) => lib,
+                Err(_) => continue,
+            };
+            let get_proc_addr = unsafe {
+                lib.get::<vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0")
+            };
+            if let Ok(get_proc_addr) = get_proc_addr {
+                let entry = unsafe {
+                    ash::Entry::from_static_fn(ash::StaticFn {
+                        get_instance_proc_addr: *get_proc_addr,
+                    })
+                };
+                // The entry holds a raw fn pointer into the library; keep the
+                // library mapped for the process lifetime (the instance is a
+                // global singleton, so this leaks at most one handle).
+                std::mem::forget(lib);
+                return Ok(entry);
+            }
+        }
+        Err(VulkanError::InitializationFailed(
+            "Failed to load Vulkan library: tried platform default and candidate paths".to_owned(),
+        ))
     }
 
     fn create() -> VulkanResult<Self> {
         // Load Vulkan library
-        let entry = unsafe { ash::Entry::load()? };
+        let entry = Self::load_entry()?;
 
         // Application info
         let app_name = CString::new("Simple Language").unwrap();

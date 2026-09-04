@@ -2353,6 +2353,12 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
             c.arg("--gc-sections");
+            // Report EVERY undefined symbol, not lld's default first 20. This
+            // only ever emits MORE diagnostics -- it never relaxes what is an
+            // error -- and without it a freestanding link with a long tail of
+            // missing runtime symbols reports "too many errors emitted,
+            // stopping now" and hides the rest, forcing a link-patch-link loop.
+            c.arg("--error-limit=0");
             if let Some(ref ls) = effective_linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }

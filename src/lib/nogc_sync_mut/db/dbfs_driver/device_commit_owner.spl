@@ -26,8 +26,71 @@ fn dbfs_device_mutex_provider_blocker(platform: text) -> text:
         return "ready"
     DBFS_DEVICE_SERIALIZATION_MISSING
 
+val DBFS_DEVICE_SERIALIZATION_PROBE_FAILED: text =
+    "critical-section-provider-probe-failed"
+
+# Behavioural admission test for a critical-section provider on a platform the
+# static allowlist above does not know (SimpleOS/freestanding).  Keying
+# readiness off a platform STRING cannot distinguish a genuine provider from a
+# link-time stub, and on this target the stubs are actively deceptive: measured
+# 2026-09-01 on the dbfsrt kernel, the freestanding `spl_mutex_create` stub
+# returns 8 (a nonzero fake handle) and `spl_mutex_lock` returns 3 (truthy), so
+# a "handle > 0 and lock succeeded" test PASSES against a lock that locks
+# nothing.  The load-bearing leg is therefore the DOUBLE UNLOCK: a real
+# provider fail-stops the second release of an already-released word, while a
+# constant-return stub reports success again.  A provider that fails any leg is
+# not admitted, so an unrecognised platform stays exactly as fail-closed as it
+# is today.
+fn dbfs_device_mutex_probe_verdict(
+        handle: i64,
+        locked: bool,
+        unlocked: bool,
+        double_unlock_succeeded: bool,
+        relocked: bool,
+        released: bool) -> text:
+    if handle <= 0:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    if not locked:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    if not unlocked:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    # Weak-stub detector: releasing an already-released word must FAIL.
+    if double_unlock_succeeded:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    if not relocked:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    if not released:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    "ready"
+
+# Cached so the handshake burns exactly one never-recycled provider word, and
+# so it is never run at all on an allowlisted host.
+var _dbfs_provider_probe_cache: text = ""
+
+fn _dbfs_run_provider_probe() -> text:
+    val handle = mutex_raw_create()
+    if handle <= 0:
+        return DBFS_DEVICE_SERIALIZATION_PROBE_FAILED
+    val locked = mutex_raw_lock(handle)
+    val unlocked = if locked: mutex_raw_unlock(handle) else: false
+    # If the release did not happen the word's state is unknown; report the
+    # deceptive outcome so the verdict fails rather than probing further.
+    val double_unlock = if unlocked: mutex_raw_unlock(handle) else: true
+    val relocked = if unlocked and not double_unlock: mutex_raw_lock(handle) else: false
+    val released = if relocked: mutex_raw_unlock(handle) else: false
+    dbfs_device_mutex_probe_verdict(
+        handle, locked, unlocked, double_unlock, relocked, released)
+
 fn dbfs_device_serialization_blocker() -> text:
-    dbfs_device_mutex_provider_blocker(platform_name())
+    # Allowlisted hosts are admitted on the audited runtime_thread.c providers
+    # and are NEVER probed: a double unlock on a pthread normal mutex is
+    # undefined behaviour, so the handshake below must not run there.
+    val allowlisted = dbfs_device_mutex_provider_blocker(platform_name())
+    if allowlisted == "ready":
+        return "ready"
+    if _dbfs_provider_probe_cache == "":
+        _dbfs_provider_probe_cache = _dbfs_run_provider_probe()
+    _dbfs_provider_probe_cache
 
 struct DbfsNamespaceEntry:
     inode_id: u64
@@ -729,6 +792,7 @@ fn dbfs_device_flush_locked(inst_id: i64) -> Result<bool, FsError>:
 
 export DbfsNamespaceEntry, DbfsNamespaceSnapshot, DbfsBlobBinding
 export DBFS_DEVICE_SERIALIZATION_MISSING
+export DBFS_DEVICE_SERIALIZATION_PROBE_FAILED, dbfs_device_mutex_probe_verdict
 export dbfs_device_mutex_provider_blocker, dbfs_device_serialization_blocker
 export dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes
 export dbfs_device_serialization_ready, dbfs_device_register, dbfs_device_unregister
