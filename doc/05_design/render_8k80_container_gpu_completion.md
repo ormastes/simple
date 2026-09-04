@@ -106,7 +106,9 @@ link atomically.
 only after both implementations identify the same workload hash, physical
 device, dimensions, warmup/sample counts, timing scope, and final checksum.
 Both sides must prove known completion, zero mismatches, no fallback, and zero
-timed readback. The gate passes only when Simple p95 is at most twice C p95.
+timed readback. The C runner must identify a physical discrete or integrated
+adapter. The gate passes only when each p95 is at most 12.5 ms and Simple p95
+is at most twice C p95.
 
 The existing mixed C benchmark is not interchangeable with the semantic A5
 row: its font atlas is synthetic and it has no PATH/EDGE workload. Each feature
