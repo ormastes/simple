@@ -121,6 +121,16 @@ by the independent Simple device-readback versus CPU-oracle checksum gate. A
 Simple synthetic packed-font producer must use the identical atlas, placement,
 glyph count, and workload hash before the C receipt is comparable.
 
+Vector-outline rasterization is admitted separately from atlas composition.
+`check-vector-font-raster-c-parity.shs` requires the fresh Chrome differential
+receipt (ten real glyphs, zero bounding-box/ink/density findings), then measures
+94 visible ASCII glyphs from the pinned Noto Sans Mono asset at 24 px in both
+the pure-Simple sfnt rasterizer and the stb C reference. The samples cover
+outline-to-alpha rasterization only, use 31 measured passes, require complete
+nonempty output, and admit Simple only when
+its p95 is at most twice C p95. A bootstrap compiler artifact cannot serve as
+the Simple producer.
+
 The primitive pair fixes four 8K workloads: 1% retained rectangle fill,
 sixteen full-width horizontal lines, the same lines lowered to one-pixel
 rectangle dispatches, and a 1% image copy. Both implementations seed the full
