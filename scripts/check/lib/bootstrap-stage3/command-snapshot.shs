@@ -39,10 +39,25 @@ bootstrap_stage3_write_command_transcript() {
         # temp location leaks in. Unix still records exactly five entries.
         case "$(uname -s 2>/dev/null || echo unknown)" in
             MSYS*|MINGW*|CYGWIN*)
+                bootstrap_stage3_windows_system_root=\
+${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+                bootstrap_stage3_windows_system_drive=\
+${SystemDrive:-${SYSTEMDRIVE:-}}
+                bootstrap_stage3_windows_program_data=\
+${ProgramData:-${PROGRAMDATA:-}}
+                [ -n "$bootstrap_stage3_windows_system_root" ] &&
+                    [ -n "$bootstrap_stage3_windows_system_drive" ] &&
+                    [ -n "$bootstrap_stage3_windows_program_data" ] || exit 1
                 bootstrap_stage3_emit_host_env \
                     "TMP=$bootstrap_stage3_command_tmpdir"
                 bootstrap_stage3_emit_host_env \
                     "TEMP=$bootstrap_stage3_command_tmpdir"
+                bootstrap_stage3_emit_host_env \
+                    "SystemRoot=$bootstrap_stage3_windows_system_root"
+                bootstrap_stage3_emit_host_env \
+                    "SystemDrive=$bootstrap_stage3_windows_system_drive"
+                bootstrap_stage3_emit_host_env \
+                    "ProgramData=$bootstrap_stage3_windows_program_data"
                 ;;
         esac
         bootstrap_stage3_emit_host_env "LC_ALL=C"
@@ -104,14 +119,14 @@ bootstrap_stage3_verify_command_transcript() {
         return 1
     }
     # Windows pins TMP and TEMP alongside TMPDIR (see the writer above), so the
-    # host-env set is exactly 7 there and exactly 5 everywhere else. The count
+    # host-env set is exactly 10 there and exactly 5 everywhere else. The count
     # stays EXACT on both -- this widens the contract by platform, it does not
     # relax it into "5 or more".
     bootstrap_stage3_host_env_expected=5
     bootstrap_stage3_host_env_windows=0
     case "$(uname -s 2>/dev/null || echo unknown)" in
         MSYS*|MINGW*|CYGWIN*)
-            bootstrap_stage3_host_env_expected=7
+            bootstrap_stage3_host_env_expected=10
             bootstrap_stage3_host_env_windows=1
             ;;
     esac
@@ -125,7 +140,7 @@ bootstrap_stage3_verify_command_transcript() {
             payload = substr(record, index(record, $3))
             return declared == length(payload)
         }
-        /^host-env:[0-9]+:(HOME|PATH|TMPDIR|TMP|TEMP)=/ {
+        /^host-env:[0-9]+:(HOME|PATH|TMPDIR|TMP|TEMP|SystemRoot|SystemDrive|ProgramData)=/ {
             if (!valid($0, $2)) exit 1
             name = $3
             sub(/=.*/, "", name)
@@ -146,8 +161,12 @@ bootstrap_stage3_verify_command_transcript() {
                 seen["LANG"] != 1) exit 1
             # Fail closed BOTH ways: Windows must carry TMP and TEMP, and a
             # non-Windows transcript must not smuggle them in.
-            if (win == 1 && (seen["TMP"] != 1 || seen["TEMP"] != 1)) exit 1
-            if (win != 1 && (seen["TMP"] > 0 || seen["TEMP"] > 0)) exit 1
+            if (win == 1 && (seen["TMP"] != 1 || seen["TEMP"] != 1 ||
+                seen["SystemRoot"] != 1 || seen["SystemDrive"] != 1 ||
+                seen["ProgramData"] != 1)) exit 1
+            if (win != 1 && (seen["TMP"] > 0 || seen["TEMP"] > 0 ||
+                seen["SystemRoot"] > 0 || seen["SystemDrive"] > 0 ||
+                seen["ProgramData"] > 0)) exit 1
         }
     ' "$bootstrap_stage3_host" || {
         rm -f "$bootstrap_stage3_expected" "$bootstrap_stage3_host"
@@ -226,26 +245,38 @@ bootstrap_stage3_run_transcribed() {
     shift 6
     for bootstrap_stage3_run_directory in "$bootstrap_stage3_run_home" \
         "$bootstrap_stage3_run_tmpdir"; do
-        [ -d "$bootstrap_stage3_run_directory" ] &&
-            [ ! -L "$bootstrap_stage3_run_directory" ] &&
-            [ "$(bootstrap_stage3_canonical_path \
-                "$bootstrap_stage3_run_directory")" = \
-                "$bootstrap_stage3_run_directory" ] || return 1
+        if [ ! -d "$bootstrap_stage3_run_directory" ] ||
+           [ -L "$bootstrap_stage3_run_directory" ] ||
+           [ "$(bootstrap_stage3_canonical_path \
+                "$bootstrap_stage3_run_directory")" != \
+                "$bootstrap_stage3_run_directory" ]; then
+            echo "bootstrap-transcript-error: non-canonical stage directory: $bootstrap_stage3_run_directory" >&2
+            return 1
+        fi
     done
     case "$bootstrap_stage3_run_path" in
         /*) ;;
-        *) return 1 ;;
+        *) echo "bootstrap-transcript-error: PATH is not absolute" >&2; return 1 ;;
     esac
     printf '%s\n' "$bootstrap_stage3_run_path" |
-        grep -Eq '(^|:)([^/]|$)' && return 1
+        grep -Eq '(^|:)([^/]|$)' && {
+            echo "bootstrap-transcript-error: PATH contains a non-absolute entry" >&2
+            return 1
+        }
     bootstrap_stage3_write_command_transcript \
         "$bootstrap_stage3_run_transcript" "$bootstrap_stage3_run_cwd" \
         "$bootstrap_stage3_run_home" "$bootstrap_stage3_run_tmpdir" \
         "$bootstrap_stage3_run_path" \
-        "$@" || return 1
+        "$@" || {
+            echo "bootstrap-transcript-error: could not write command transcript" >&2
+            return 1
+        }
     bootstrap_stage3_run_transcript_sha_before=$(
         bootstrap_stage3_hash_file "$bootstrap_stage3_run_transcript"
-    ) || return 1
+    ) || {
+        echo "bootstrap-transcript-error: could not hash command transcript" >&2
+        return 1
+    }
     (
         cd "$bootstrap_stage3_run_cwd" || exit 1
         # Must mirror the host-env recorded by
@@ -254,11 +285,20 @@ bootstrap_stage3_run_transcribed() {
         # the transcript is verified against this set.
         case "$(uname -s 2>/dev/null || echo unknown)" in
             MSYS*|MINGW*|CYGWIN*)
+                bootstrap_stage3_run_system_root=\
+${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}
+                bootstrap_stage3_run_system_drive=\
+${SystemDrive:-${SYSTEMDRIVE:-}}
+                bootstrap_stage3_run_program_data=\
+${ProgramData:-${PROGRAMDATA:-}}
                 env -i "HOME=$bootstrap_stage3_run_home" \
                     "PATH=$bootstrap_stage3_run_path" \
                     "TMPDIR=$bootstrap_stage3_run_tmpdir" \
                     "TMP=$bootstrap_stage3_run_tmpdir" \
                     "TEMP=$bootstrap_stage3_run_tmpdir" \
+                    "SystemRoot=$bootstrap_stage3_run_system_root" \
+                    "SystemDrive=$bootstrap_stage3_run_system_drive" \
+                    "ProgramData=$bootstrap_stage3_run_program_data" \
                     "LC_ALL=C" "LANG=C" /bin/sh -c '
                         while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
                             export "$1" || exit 1
