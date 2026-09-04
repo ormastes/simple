@@ -84,7 +84,7 @@ int main(int argc,char**argv){
     printf("engine2d_vulkan_font_within_80fps_budget=%s\n",times[p95]<=12500000?"true":"false");
     printf("engine2d_vulkan_font_timed_readback_bytes=0\nengine2d_vulkan_font_evidence_readback_bytes=%llu\n",(unsigned long long)bytes);
     printf("engine2d_vulkan_font_changed_pixels=%llu\nengine2d_vulkan_font_mismatch_count=%llu\n",(unsigned long long)changed,(unsigned long long)mismatch);
-    printf("engine2d_vulkan_font_checksum=%llu\n",(unsigned long long)checksum);
+    printf("engine2d_vulkan_font_checksum=%lld\n",(long long)checksum);
     printf("engine2d_vulkan_font_swapchain_presented=false\nengine2d_vulkan_font_dynamic_frame_80fps_proven=false\n");
     if(packed){rt_vulkan_destroy_descriptor_set(packed_desc);rt_vulkan_free_buffer(packed_params);}else for(uint32_t i=0;i<glyphs;i++){rt_vulkan_destroy_descriptor_set(desc[i]);rt_vulkan_free_buffer(params[i]);}
     free(packed_host);free(times);free(host);free(desc);free(params);free(seed);free(spv);rt_vulkan_destroy_pipeline(pipe);rt_vulkan_destroy_shader(shader);rt_vulkan_free_buffer(atlas);rt_vulkan_free_buffer(fb);rt_vulkan_shutdown();return mismatch?7:0;
