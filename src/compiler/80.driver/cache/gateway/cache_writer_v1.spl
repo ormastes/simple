@@ -1,0 +1,57 @@
+use std.common.crypto.sha256 (sha256_text)
+use compiler.common.cache_contract.errors_v1.*
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1, ActionRootRecordV1}
+use compiler.driver.cache.catalog.cache_catalog_projection (CacheCatalogProjectionV1)
+use common.cache_daemon_host_authority_v1.{AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1,
+    DurableWriterEpochV1, cache_host_validate_readiness_v1}
+
+fn _cache_error_v1(code: CacheErrorCodeV1) -> CacheErrorV1:
+    CacheErrorV1(code: code, retry: RetryClassV1.Never, severity: ErrorSeverityV1.Error,
+        reject: RejectTelemetryV1(telemetry_class: cache_error_telemetry_class_v1(code),
+            safe_context: cache_error_safe_context_v1(code), reason_digest: sha256_text("simple.cache.reject.v1\u0000" + cache_error_safe_context_v1(code)),
+            bounded_detail: cache_error_safe_context_v1(code)))
+
+# Private and constructible only after runtime validation of opaque receipts.
+class CacheWriterAuthorityV1:
+    host_admitted: bool
+
+    static fn admit(peer: AuthenticatedPeerReceiptV1, readiness: CacheReadinessReceiptV1,
+                    readiness_nonce: [u8], epoch: DurableWriterEpochV1) -> Result<CacheWriterAuthorityV1, CacheErrorV1>:
+        if cache_host_validate_readiness_v1(peer, readiness, readiness_nonce, epoch) != 1:
+            return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
+        Ok(CacheWriterAuthorityV1(host_admitted: true))
+
+    me append(journal: ActionRootJournalV1, catalog: CacheCatalogProjectionV1,
+              action_digest: text, object_kind: text, object_digest: text,
+              manifest_digest: text) -> Result<ActionRootRecordV1, CacheErrorV1>:
+        if not self.host_admitted: return Err(_cache_error_v1(CacheErrorCodeV1.CacheWriterEpochStale))
+        val before = match catalog.lookup(action_digest):
+            case Ok(value): value
+            case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
+        val record = match journal.append(action_digest, object_kind, object_digest, manifest_digest):
+            case Ok(value): value
+            case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheBoundsExceeded))
+        match catalog.apply(record, journal.generation):
+            case Err(_): return Err(_cache_error_v1(CacheErrorCodeV1.CacheCorrupt))
+            case Ok(_): pass
+        if before.present and (before.object_digest != object_digest or before.object_kind != object_kind or
+                before.manifest_digest != manifest_digest):
+            return Err(_cache_error_v1(CacheErrorCodeV1.CacheNondeterminism))
+        Ok(record)
+
+# The opaque host readiness/epoch pair is revalidated at every mutation. The
+# current unsupported provider returns -1, so the journal remains unchanged.
+pub fn cache_writer_append_host_admitted_v1(
+    peer: AuthenticatedPeerReceiptV1,
+    readiness: CacheReadinessReceiptV1,
+    readiness_nonce: [u8],
+    epoch: DurableWriterEpochV1,
+    journal: ActionRootJournalV1,
+    catalog: CacheCatalogProjectionV1,
+    action_digest: text,
+    object_kind: text,
+    object_digest: text,
+    manifest_digest: text,
+) -> Result<ActionRootRecordV1, CacheErrorV1>:
+    val authority = CacheWriterAuthorityV1.admit(peer, readiness, readiness_nonce, epoch)?
+    authority.append(journal, catalog, action_digest, object_kind, object_digest, manifest_digest)

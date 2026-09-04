@@ -1,0 +1,340 @@
+# Binary object action identity and immutable shadow receipt mapping.
+#
+# This module is intentionally compare-only.  It can describe an action,
+# publish a verified action -> object mapping, and compare a freshly compiled
+# object with that mapping.  It never returns an object for compilation or
+# linking and therefore cannot make an authoritative cache-hit decision.
+
+use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field,
+    canon_seq, action_key_sort_texts}
+use compiler.driver.cache.binary_object_cas.{BINARY_OBJECT_CAS_MAX_BYTES,
+    binary_object_cas_read, binary_object_cas_verify}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    file_read_regular_no_follow_bounded, file_publish_noreplace_raw,
+    secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+
+val BINARY_OBJECT_ACTION_SCHEMA_VERSION: i64 = 1
+val BINARY_OBJECT_ACTION_DOMAIN: text = "simple/binary-object-action/v1"
+val BINARY_OBJECT_RECEIPT_HEADER: text = "simple-binary-object-receipt-v1"
+val BINARY_OBJECT_RECEIPT_MAX_BYTES: i64 = 1024
+
+struct BinaryObjectDependencyV1:
+    module_id: text
+    interface_digest: text
+
+# Every currently available byte-affecting identity is explicit.  Digest
+# fields are supplied by their semantic owners; this layer only gives them a
+# canonical, domain-separated aggregate identity.
+struct BinaryObjectActionV1:
+    source_digest: text
+    mir_digest: text
+    dependencies: [BinaryObjectDependencyV1]
+    name_resolution_digest: text
+    type_layout_digest: text
+    target_triple: text
+    cpu_features: [text]
+    storage_abi_mode: text
+    optimization_config_digest: text
+    debug_config_digest: text
+    object_format: text
+    compiler_executable_sha256: text
+    compiler_implementation_digest: text
+    lowering_owner_digests: [text]
+    codegen_owner_digests: [text]
+    backend_role: text
+    provider_abi_version: text
+    provider_capabilities: [text]
+    provider_content_sha256: text
+    provider_configuration_digest: text
+    runtime_abi_declaration_digest: text
+    link_runtime_artifact_digests: [text]
+    cache_schema_version: i64
+    action_key_version: i64
+    fixed_point_identity: text
+
+struct BinaryObjectActionReceiptV1:
+    action_digest: text
+    object_digest: text
+    schema_version: i64
+
+struct BinaryObjectShadowResult:
+    reason: text
+    action_digest: text
+    object_digest: text
+
+struct BinaryObjectShadowCounters:
+    miss: i64
+    equal: i64
+    mismatch: i64
+    corrupt: i64
+    race_equal: i64
+    race_conflict: i64
+    invalid: i64
+
+var _binary_shadow_miss: i64 = 0
+var _binary_shadow_equal: i64 = 0
+var _binary_shadow_mismatch: i64 = 0
+var _binary_shadow_corrupt: i64 = 0
+var _binary_shadow_race_equal: i64 = 0
+var _binary_shadow_race_conflict: i64 = 0
+var _binary_shadow_invalid: i64 = 0
+
+fn binary_object_dependency_encode(dep: BinaryObjectDependencyV1) -> text:
+    canon_seq([
+        canon_field("moduleId", canon_str(dep.module_id)),
+        canon_field("interfaceDigest", canon_str(dep.interface_digest))
+    ])
+
+fn binary_object_dependency_sort_key(dep: BinaryObjectDependencyV1) -> text:
+    binary_object_dependency_encode(dep)
+
+fn binary_object_dependencies_encode(deps: [BinaryObjectDependencyV1]) -> text:
+    var encoded: [text] = []
+    for dep in deps:
+        encoded.push(binary_object_dependency_sort_key(dep))
+    val sorted = action_key_sort_texts(encoded)
+    canon_seq(sorted)
+
+fn binary_object_text_set_encode(values: [text]) -> text:
+    var encoded: [text] = []
+    for value in action_key_sort_texts(values):
+        encoded.push(canon_str(value))
+    canon_seq(encoded)
+
+fn binary_object_action_encode_v1(action: BinaryObjectActionV1) -> text:
+    var fields: [text] = []
+    fields.push(canon_field("sourceDigest", canon_str(action.source_digest)))
+    fields.push(canon_field("mirDigest", canon_str(action.mir_digest)))
+    fields.push(canon_field("dependencies", binary_object_dependencies_encode(action.dependencies)))
+    fields.push(canon_field("nameResolutionDigest", canon_str(action.name_resolution_digest)))
+    fields.push(canon_field("typeLayoutDigest", canon_str(action.type_layout_digest)))
+    fields.push(canon_field("targetTriple", canon_str(action.target_triple)))
+    fields.push(canon_field("cpuFeatures", binary_object_text_set_encode(action.cpu_features)))
+    fields.push(canon_field("storageAbiMode", canon_str(action.storage_abi_mode)))
+    fields.push(canon_field("optimizationConfigDigest", canon_str(action.optimization_config_digest)))
+    fields.push(canon_field("debugConfigDigest", canon_str(action.debug_config_digest)))
+    fields.push(canon_field("objectFormat", canon_str(action.object_format)))
+    fields.push(canon_field("compilerExecutableSha256", canon_str(action.compiler_executable_sha256)))
+    fields.push(canon_field("compilerImplementationDigest", canon_str(action.compiler_implementation_digest)))
+    fields.push(canon_field("loweringOwnerDigests", binary_object_text_set_encode(action.lowering_owner_digests)))
+    fields.push(canon_field("codegenOwnerDigests", binary_object_text_set_encode(action.codegen_owner_digests)))
+    fields.push(canon_field("backendRole", canon_str(action.backend_role)))
+    fields.push(canon_field("providerAbiVersion", canon_str(action.provider_abi_version)))
+    fields.push(canon_field("providerCapabilities", binary_object_text_set_encode(action.provider_capabilities)))
+    fields.push(canon_field("providerContentSha256", canon_str(action.provider_content_sha256)))
+    fields.push(canon_field("providerConfigurationDigest", canon_str(action.provider_configuration_digest)))
+    fields.push(canon_field("runtimeAbiDeclarationDigest", canon_str(action.runtime_abi_declaration_digest)))
+    fields.push(canon_field("linkRuntimeArtifactDigests", binary_object_text_set_encode(action.link_runtime_artifact_digests)))
+    fields.push(canon_field("cacheSchemaVersion", canon_nat(action.cache_schema_version)))
+    fields.push(canon_field("actionKeyVersion", canon_nat(action.action_key_version)))
+    fields.push(canon_field("fixedPointIdentity", canon_str(action.fixed_point_identity)))
+    canon_field(BINARY_OBJECT_ACTION_DOMAIN, canon_seq(fields))
+
+fn binary_object_action_complete_v1(action: BinaryObjectActionV1) -> bool:
+    if (not sha256_lower_hex_valid(action.source_digest) or
+            not sha256_lower_hex_valid(action.mir_digest) or
+            not sha256_lower_hex_valid(action.name_resolution_digest) or
+            not sha256_lower_hex_valid(action.type_layout_digest) or
+            not sha256_lower_hex_valid(action.optimization_config_digest) or
+            not sha256_lower_hex_valid(action.debug_config_digest) or
+            not sha256_lower_hex_valid(action.compiler_executable_sha256) or
+            not sha256_lower_hex_valid(action.compiler_implementation_digest) or
+            not sha256_lower_hex_valid(action.provider_content_sha256) or
+            not sha256_lower_hex_valid(action.provider_configuration_digest) or
+            not sha256_lower_hex_valid(action.runtime_abi_declaration_digest) or
+            not sha256_lower_hex_valid(action.fixed_point_identity)):
+        return false
+    if (action.target_triple == "" or action.storage_abi_mode == "" or
+            action.object_format == "" or action.backend_role == "" or
+            action.provider_abi_version == "" or
+            action.cache_schema_version <= 0 or
+            action.action_key_version != BINARY_OBJECT_ACTION_SCHEMA_VERSION or
+            action.lowering_owner_digests.len() == 0 or
+            action.codegen_owner_digests.len() == 0 or
+            action.provider_capabilities.len() == 0):
+        return false
+    for dep in action.dependencies:
+        if dep.module_id == "" or not sha256_lower_hex_valid(dep.interface_digest):
+            return false
+    for digest in action.lowering_owner_digests:
+        if not sha256_lower_hex_valid(digest):
+            return false
+    for digest in action.codegen_owner_digests:
+        if not sha256_lower_hex_valid(digest):
+            return false
+    for digest in action.link_runtime_artifact_digests:
+        if not sha256_lower_hex_valid(digest):
+            return false
+    true
+
+fn binary_object_action_digest_v1(action: BinaryObjectActionV1) -> text:
+    sha256_text(binary_object_action_encode_v1(action))
+
+fn binary_object_action_receipt_path(root: text, action_digest: text) -> text:
+    if not sha256_lower_hex_valid(action_digest):
+        return ""
+    "{root}/action-receipts/sha256/{action_digest.substring(0, 2)}/{action_digest.substring(2, 64)}"
+
+fn binary_object_action_receipt_encode(receipt: BinaryObjectActionReceiptV1) -> text:
+    "{BINARY_OBJECT_RECEIPT_HEADER}\n{receipt.action_digest}\n{receipt.object_digest}\n{receipt.schema_version}"
+
+fn binary_object_action_receipt_parse(content: text) -> BinaryObjectActionReceiptV1?:
+    val lines = content.split("\n")
+    if lines.len() != 4 or lines[0] != BINARY_OBJECT_RECEIPT_HEADER:
+        return nil
+    if not sha256_lower_hex_valid(lines[1]) or not sha256_lower_hex_valid(lines[2]):
+        return nil
+    if lines[3] != "{BINARY_OBJECT_ACTION_SCHEMA_VERSION}":
+        return nil
+    BinaryObjectActionReceiptV1(action_digest: lines[1], object_digest: lines[2],
+        schema_version: BINARY_OBJECT_ACTION_SCHEMA_VERSION)
+
+fn binary_object_action_receipt_read(root: text, action_digest: text) -> BinaryObjectActionReceiptV1?:
+    val path = binary_object_action_receipt_path(root, action_digest)
+    if path == "":
+        return nil
+    match file_read_regular_no_follow_bounded(path, BINARY_OBJECT_RECEIPT_MAX_BYTES):
+        case Err(_): nil
+        case Ok(content):
+            match binary_object_action_receipt_parse(content):
+                case Some(receipt):
+                    if receipt.action_digest != action_digest:
+                        return nil
+                    receipt
+                case nil: nil
+
+# Result codes: published, race_equal, race_conflict, invalid, object_missing.
+# Kept private so a caller cannot publish a digest detached from the complete
+# descriptor that produced it.
+fn binary_object_action_receipt_publish_raw(root: text,
+        receipt: BinaryObjectActionReceiptV1) -> text:
+    if (receipt.schema_version != BINARY_OBJECT_ACTION_SCHEMA_VERSION or
+            not sha256_lower_hex_valid(receipt.action_digest) or
+            not sha256_lower_hex_valid(receipt.object_digest)):
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return "invalid"
+    if not binary_object_cas_verify(root, receipt.object_digest):
+        _binary_shadow_corrupt = _binary_shadow_corrupt + 1
+        return "object_missing"
+    match binary_object_action_receipt_read(root, receipt.action_digest):
+        case Some(existing):
+            if existing.object_digest == receipt.object_digest:
+                _binary_shadow_race_equal = _binary_shadow_race_equal + 1
+                return "race_equal"
+            _binary_shadow_race_conflict = _binary_shadow_race_conflict + 1
+            return "race_conflict"
+        case nil: pass_do_nothing
+    val destination = binary_object_action_receipt_path(root, receipt.action_digest)
+    val slash = destination.last_index_of("/")
+    if slash <= 0 or not dir_create_all(destination.substring(0, slash)):
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return "invalid"
+    val stage_dir = secure_temp_dir_raw(root, "simple-object-action")
+    if stage_dir == "":
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return "invalid"
+    val staged = stage_dir + "/receipt"
+    val bytes = binary_object_action_receipt_encode(receipt).bytes()
+    if not file_write_bytes(staged, bytes):
+        dir_remove(stage_dir, true)
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return "invalid"
+    val publish_status = file_publish_noreplace_raw(staged, destination)
+    dir_remove(stage_dir, true)
+    if publish_status == 1:
+        match binary_object_action_receipt_read(root, receipt.action_digest):
+            case Some(verified):
+                if verified.object_digest == receipt.object_digest:
+                    return "published"
+            case nil: pass_do_nothing
+        _binary_shadow_corrupt = _binary_shadow_corrupt + 1
+        return "corrupt_receipt"
+    match binary_object_action_receipt_read(root, receipt.action_digest):
+        case Some(winner):
+            if winner.object_digest == receipt.object_digest:
+                _binary_shadow_race_equal = _binary_shadow_race_equal + 1
+                return "race_equal"
+            _binary_shadow_race_conflict = _binary_shadow_race_conflict + 1
+            "race_conflict"
+        case nil:
+            _binary_shadow_corrupt = _binary_shadow_corrupt + 1
+            "corrupt_receipt"
+
+fn binary_object_action_receipt_publish(root: text, action: BinaryObjectActionV1,
+        object_digest: text) -> text:
+    if not binary_object_action_complete_v1(action):
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return "identity_incomplete"
+    binary_object_action_receipt_publish_raw(root, BinaryObjectActionReceiptV1(
+        action_digest: binary_object_action_digest_v1(action),
+        object_digest: object_digest,
+        schema_version: BINARY_OBJECT_ACTION_SCHEMA_VERSION))
+
+# Compare-only lookup.  Even an equal result supplies only reason/digests;
+# object bytes are deliberately not present in the result type.
+fn binary_object_shadow_compare(root: text, action: BinaryObjectActionV1,
+        freshly_compiled: [u8]) -> BinaryObjectShadowResult:
+    if not binary_object_action_complete_v1(action):
+        _binary_shadow_invalid = _binary_shadow_invalid + 1
+        return BinaryObjectShadowResult(reason: "identity_incomplete",
+            action_digest: "", object_digest: "")
+    val action_digest = binary_object_action_digest_v1(action)
+    match binary_object_action_receipt_read(root, action_digest):
+        case nil:
+            _binary_shadow_miss = _binary_shadow_miss + 1
+            return BinaryObjectShadowResult(reason: "action_miss",
+                action_digest: action_digest, object_digest: "")
+        case Some(receipt):
+            match binary_object_cas_read(root, receipt.object_digest,
+                    BINARY_OBJECT_CAS_MAX_BYTES):
+                case nil:
+                    _binary_shadow_corrupt = _binary_shadow_corrupt + 1
+                    return BinaryObjectShadowResult(reason: "object_corrupt",
+                        action_digest: action_digest,
+                        object_digest: receipt.object_digest)
+                case Some(cached):
+                    var same_bytes = cached.len() == freshly_compiled.len()
+                    var i = 0
+                    while same_bytes and i < cached.len():
+                        if cached[i] != freshly_compiled[i]:
+                            same_bytes = false
+                        i = i + 1
+                    if sha256_u8_hex(freshly_compiled) == receipt.object_digest and same_bytes:
+                        _binary_shadow_equal = _binary_shadow_equal + 1
+                        return BinaryObjectShadowResult(reason: "shadow_equal",
+                            action_digest: action_digest,
+                            object_digest: receipt.object_digest)
+                    _binary_shadow_mismatch = _binary_shadow_mismatch + 1
+                    BinaryObjectShadowResult(reason: "shadow_mismatch",
+                        action_digest: action_digest,
+                        object_digest: receipt.object_digest)
+
+fn binary_object_shadow_counts() -> BinaryObjectShadowCounters:
+    BinaryObjectShadowCounters(miss: _binary_shadow_miss,
+        equal: _binary_shadow_equal, mismatch: _binary_shadow_mismatch,
+        corrupt: _binary_shadow_corrupt, race_equal: _binary_shadow_race_equal,
+        race_conflict: _binary_shadow_race_conflict,
+        invalid: _binary_shadow_invalid)
+
+fn binary_object_shadow_reset_counters():
+    _binary_shadow_miss = 0
+    _binary_shadow_equal = 0
+    _binary_shadow_mismatch = 0
+    _binary_shadow_corrupt = 0
+    _binary_shadow_race_equal = 0
+    _binary_shadow_race_conflict = 0
+    _binary_shadow_invalid = 0
+
+export BINARY_OBJECT_ACTION_SCHEMA_VERSION, BINARY_OBJECT_ACTION_DOMAIN
+export BinaryObjectDependencyV1, BinaryObjectActionV1
+export BinaryObjectActionReceiptV1, BinaryObjectShadowResult
+export BinaryObjectShadowCounters
+export binary_object_action_encode_v1, binary_object_action_complete_v1
+export binary_object_action_digest_v1
+export binary_object_action_receipt_path, binary_object_action_receipt_encode
+export binary_object_action_receipt_parse, binary_object_action_receipt_read
+export binary_object_action_receipt_publish, binary_object_shadow_compare
+export binary_object_shadow_counts, binary_object_shadow_reset_counters

@@ -1,0 +1,84 @@
+"""Bounded daemon connection decision with one restart/reconnect only.
+
+This module is pure policy.  `first_ready` and `retry_ready` must be produced
+by transport code only after peer credentials and the nonce-bound readiness
+receipt have both been authenticated.
+"""
+
+use common.cache_host_authority_v1.{CacheRootAuthorityV1, AnchoredSpoolChildV1, cache_host_open_spool_child_v1}
+use common.cache_daemon_host_authority_v1.{AuthenticatedPeerReceiptV1, CacheReadinessReceiptV1, DurableWriterEpochV1, cache_host_validate_readiness_v1}
+
+val CACHE_ROUTE_DAEMON: i64 = 1i64
+val CACHE_ROUTE_DIRECT_SPOOL: i64 = 2i64
+val CACHE_CONNECT_BUDGET_MS: i64 = 250i64
+
+struct CacheTransportDecision:
+    route: i64
+    reconnect_count: i64
+    elapsed_ms: i64
+    reason: text
+
+class CacheConnectStateMachine:
+    start_ms: i64
+    last_ms: i64
+    launch_count: i64
+    connect_count: i64
+    finished: bool
+    invalid_clock: bool
+
+    static fn create(start_ms: i64) -> CacheConnectStateMachine:
+        CacheConnectStateMachine(
+            start_ms: start_ms, last_ms: start_ms, launch_count: 0i64,
+            connect_count: 0i64, finished: false, invalid_clock: start_ms < 0i64,
+        )
+
+    me _connect_after_validation(authenticated_ready: bool, now_ms: i64) -> CacheTransportDecision:
+        if self.finished:
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count - 1i64, elapsed_ms: self.last_ms - self.start_ms, reason: "already_finished")
+        if self.invalid_clock or now_ms < 0i64 or now_ms < self.last_ms:
+            self.finished = true
+            self.invalid_clock = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count, elapsed_ms: 0i64, reason: "invalid_monotonic_time")
+        self.last_ms = now_ms
+        self.connect_count = self.connect_count + 1i64
+        val elapsed = now_ms - self.start_ms
+        if elapsed > CACHE_CONNECT_BUDGET_MS:
+            self.finished = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: self.connect_count - 1i64, elapsed_ms: elapsed, reason: "budget_exhausted")
+        if authenticated_ready:
+            self.finished = true
+            return CacheTransportDecision(route: CACHE_ROUTE_DAEMON, reconnect_count: self.connect_count - 1i64, elapsed_ms: elapsed, reason: "authenticated_ready")
+        if self.connect_count == 1i64:
+            self.launch_count = 1i64
+            return CacheTransportDecision(route: 0i64, reconnect_count: 0i64, elapsed_ms: elapsed, reason: "launch_then_reconnect")
+        self.finished = true
+        CacheTransportDecision(route: CACHE_ROUTE_DIRECT_SPOOL, reconnect_count: 1i64, elapsed_ms: elapsed, reason: "bounded_fallback")
+
+    # The only ready-producing entrypoint. The boolean never crosses the API;
+    # it is derived from the host authority's exact status-1 contract.
+    me connect_with_authority(
+        peer: AuthenticatedPeerReceiptV1,
+        readiness: CacheReadinessReceiptV1,
+        nonce: [u8],
+        epoch: DurableWriterEpochV1,
+        now_ms: i64,
+    ) -> CacheTransportDecision:
+        self._connect_after_validation(
+            cache_host_validate_readiness_v1(peer, readiness, nonce, epoch) == 1i64,
+            now_ms,
+        )
+
+    # Endpoint absence and unsupported host authority both take this path.
+    me connect_unavailable(now_ms: i64) -> CacheTransportDecision:
+        self._connect_after_validation(false, now_ms)
+
+fn cache_connect_state_machine_new(start_ms: i64) -> CacheConnectStateMachine:
+    CacheConnectStateMachine.create(start_ms)
+
+# Direct fallback receives only an anchored `spool/` child capability. No
+# spelling or root path is returned to the daemon/client layer.
+fn cache_open_fallback_spool(root: CacheRootAuthorityV1) -> AnchoredSpoolChildV1:
+    cache_host_open_spool_child_v1(root)
+
+fn cache_transport_shared_writes_enabled(decision: CacheTransportDecision) -> bool:
+    decision.route == CACHE_ROUTE_DAEMON and decision.reason == "authenticated_ready"

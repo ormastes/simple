@@ -40,7 +40,11 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn lower_typed_literal(&self, expr: &Expr) -> LowerResult<HirExpr> {
+    pub(super) fn lower_typed_literal(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         match expr {
             Expr::TypedInteger(n, suffix) => {
                 let ty = match suffix {
@@ -87,7 +91,17 @@ impl Lowerer {
                     ty,
                 })
             }
-            Expr::TypedString(s, _suffix) => Ok(HirExpr {
+            Expr::TypedString(s, suffix) if suffix == "path" => {
+                // Source parsing normally desugars `_path` into this exact
+                // constructor call. Keep a HIR fallback for synthesized ASTs
+                // so the suffix can never silently collapse to `text`.
+                let args = [ast::Argument::new(
+                    Some("path".to_string()),
+                    Expr::String(s.clone()),
+                )];
+                self.lower_call(&Expr::Identifier("Path".to_string()), &args, ctx)
+            }
+            Expr::TypedString(s, _) => Ok(HirExpr {
                 kind: HirExprKind::String(s.clone()),
                 ty: TypeId::STRING,
             }),

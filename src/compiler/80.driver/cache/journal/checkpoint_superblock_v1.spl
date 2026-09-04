@@ -1,0 +1,52 @@
+use std.common.crypto.sha256 (sha256_text)
+
+pub struct CheckpointSlotV1:
+    generation: i64
+    journal_bytes: i64
+    journal_digest: text
+    catalog_digest: text
+    checksum: text
+
+pub struct CheckpointSelectionV1:
+    present: bool
+    slot: CheckpointSlotV1?
+
+fn _slot_checksum_v1(generation: i64, journal_bytes: i64, journal_digest: text,
+                     catalog_digest: text) -> text:
+    sha256_text("simple.cache.checkpoint.v1\u0000{generation}\u0000{journal_bytes}\u0000{journal_digest}\u0000{catalog_digest}")
+
+pub fn checkpoint_slot_v1(generation: i64, journal_bytes: i64, journal_digest: text,
+                          catalog_digest: text) -> CheckpointSlotV1:
+    CheckpointSlotV1(generation: generation, journal_bytes: journal_bytes,
+        journal_digest: journal_digest, catalog_digest: catalog_digest,
+        checksum: _slot_checksum_v1(generation, journal_bytes, journal_digest, catalog_digest))
+
+pub fn checkpoint_slot_valid_v1(slot: CheckpointSlotV1, actual_journal: text) -> bool:
+    slot.generation >= 0 and slot.journal_bytes >= 0 and slot.journal_bytes <= actual_journal.len() and
+        slot.checksum == _slot_checksum_v1(slot.generation, slot.journal_bytes, slot.journal_digest, slot.catalog_digest) and
+        slot.journal_digest == sha256_text(actual_journal.slice(0, slot.journal_bytes))
+
+pub class CheckpointSuperblockV1:
+    slot_a: CheckpointSlotV1?
+    slot_b: CheckpointSlotV1?
+
+    static fn empty() -> CheckpointSuperblockV1:
+        CheckpointSuperblockV1(slot_a: nil, slot_b: nil)
+
+    me publish(journal: text, catalog_digest: text) -> CheckpointSlotV1:
+        val current = self.select(journal)
+        val generation = if current.present: current.slot?.generation + 1 else: 0
+        val slot = checkpoint_slot_v1(generation, journal.len(), sha256_text(journal), catalog_digest)
+        if generation % 2 == 0: slot_a = Some(slot) else: slot_b = Some(slot)
+        slot
+
+    me select(journal: text) -> CheckpointSelectionV1:
+        val a_valid = if val a = self.slot_a: checkpoint_slot_valid_v1(a, journal) else: false
+        val b_valid = if val b = self.slot_b: checkpoint_slot_valid_v1(b, journal) else: false
+        if a_valid and b_valid:
+            if self.slot_a?.generation >= self.slot_b?.generation:
+                return CheckpointSelectionV1(present: true, slot: self.slot_a)
+            return CheckpointSelectionV1(present: true, slot: self.slot_b)
+        if a_valid: return CheckpointSelectionV1(present: true, slot: self.slot_a)
+        if b_valid: return CheckpointSelectionV1(present: true, slot: self.slot_b)
+        CheckpointSelectionV1(present: false, slot: nil)
