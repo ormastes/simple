@@ -73,6 +73,16 @@ capture_screen() {
         [ -s "$destination" ]
 }
 
+drive_metal_keyboard() {
+    osascript \
+        -e 'tell application "System Events"' \
+        -e "set targetProcess to first process whose unix id is ${metal_pid}" \
+        -e 'set frontmost of targetProcess to true' \
+        -e 'keystroke "test"' \
+        -e 'key code 36' \
+        -e 'end tell' >/dev/null 2>&1
+}
+
 run_browser() {
     label=browser-live
     log="$artifact_root/browser.log"
@@ -113,7 +123,7 @@ run_electron() {
     label=electron-live
     electron="$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
     log="$artifact_root/electron.log"
-    devtools="$artifact_root/electron-devtools.http"
+    devtools="$artifact_root/electron-devtools.json"
     shot="$artifact_root/electron.png"
     port=$((44000 + ($$ % 1000)))
     debug_port=$((45000 + ($$ % 1000)))
@@ -131,12 +141,13 @@ run_electron() {
     fi
     child=$(sed -n 's/.*Electron launched pid=\([0-9][0-9]*\).*/\1/p' "$log" | tail -1)
     sleep 2
-    printf 'GET /json HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' |
-        nc -w 5 127.0.0.1 "$debug_port" >"$devtools" 2>/dev/null || true
     if [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null; then
         fail "$label" electron-child-not-live "$log"
-    elif ! grep -F "http://127.0.0.1:$port/" "$devtools" >/dev/null 2>&1; then
-        fail "$label" electron-caret-page-not-loaded "$devtools"
+    elif ! node "$root/tools/electron-shell/verify_caret_live.js" \
+        "$debug_port" "http://127.0.0.1:$port/" "$devtools" >>"$log" 2>&1; then
+        fail "$label" electron-visible-turn-failed "$devtools"
+    elif ! grep -F '"assistant": "hello"' "$devtools" >/dev/null 2>&1; then
+        fail "$label" electron-visible-response-missing "$devtools"
     elif ! capture_screen "$shot"; then
         fail "$label" visible-capture-missing "$shot"
     else
@@ -162,10 +173,14 @@ run_metal() {
     fi
     : >"$log"
     : >"$events"
-    SIMPLE_GUI=1 SIMPLE_EVT_LOG="$events" "$metal" --prompt test >"$log" 2>&1 &
+    SIMPLE_GUI=1 SIMPLE_EVT_LOG="$events" "$metal" >"$log" 2>&1 &
     metal_pid=$!
     if ! wait_for_text "$events" "CARET_FRAME backend=metal source=device_readback"; then
         fail "$label" metal-present-marker-missing "$events"
+    elif ! drive_metal_keyboard; then
+        fail "$label" metal-keyboard-delivery-failed "$log"
+    elif ! wait_for_text "$events" 'CARET_SUBMIT prompt="test" response="hello"'; then
+        fail "$label" metal-visible-turn-missing "$events"
     elif ! kill -0 "$metal_pid" 2>/dev/null; then
         fail "$label" metal-window-not-live "$log"
     elif ! capture_screen "$shot"; then
@@ -188,7 +203,7 @@ mkdir -p "$artifact_root"
 case "$case_name" in
     prerequisites)
         require_core || failures=$((failures + 1))
-        for tool in nc /usr/sbin/screencapture; do
+        for tool in nc /usr/bin/osascript /usr/sbin/screencapture; do
             command -v "$tool" >/dev/null 2>&1 || fail prerequisites missing-tool "$tool"
         done
         electron="$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"

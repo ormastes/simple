@@ -706,8 +706,9 @@ evidence. Completion additionally requires three provenance-qualified launches:
    the Caret URL, retained process/console evidence, and a visible-window
    capture;
 3. a separately built `gui_metal.spl` GPU companion with `SIMPLE_GUI=1`, real
-   Winit window creation, Metal device readback/present markers, and a retained
-   visible-window capture.
+   Winit window creation, OS-delivered `test` plus Enter, the resulting
+   `test`/`hello` submit event, Metal device readback/present markers, and a
+   retained visible-window capture.
 
 Each live case must fail closed when its native artifact, provenance, runtime,
 window system, backend, interaction response, or capture is absent. Headless

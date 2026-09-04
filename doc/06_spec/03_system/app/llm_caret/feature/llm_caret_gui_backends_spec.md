@@ -57,13 +57,17 @@ expect(final_state.assistant).to_equal("hello")
   temporary working directory, proving the wrapper's repository-root contract.
 - Require the reported Electron child process to remain alive and its DevTools
   endpoint to identify the exact Caret loopback URL (a blank shell cannot pass).
+- Submit `test` through the live Electron DOM and require the visible user and
+  assistant nodes to contain `test` and `hello` in the retained DevTools proof.
 - Capture the visible Electron window as `electron.png`.
 - Require `case=electron-live status=PASS` and a zero exit status.
 
 #### Launch the Metal companion and present device pixels
 
 - Verify the separate `caret_metal` binary and source-bound provenance.
-- Launch it with `SIMPLE_GUI=1` and submit the dummy prompt `test`.
+- Launch it with `SIMPLE_GUI=1`, focus the real Winit process, type `test`, and
+  deliver Enter through macOS accessibility input.
+- Require the production event log to record the `test`/`hello` submission.
 - Require `backend=metal source=device_readback` while its Winit window lives.
 - Capture the visible Metal window as `metal.png` and require a zero exit
   status.
