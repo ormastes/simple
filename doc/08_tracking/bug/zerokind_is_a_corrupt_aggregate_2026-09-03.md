@@ -136,3 +136,51 @@ The count varies 2 / 4 / 6 across runs on byte-identical source. An
 order-dependent or state-dependent producer remains the best explanation, and it
 is consistent with a context-initialisation defect rather than a fixed set of
 source sites.
+
+## Also reproduces on aarch64-unknown-linux-gnu (2026-09-04)
+
+Same fatal, same shape, on a second aarch64 platform:
+
+```
+error: bootstrap MIR lowering: E-MIR-TYPE-ZeroKind: lower_type received a
+well-formed HirType whose `kind` field is raw 0 (never written) while lowering
+'scope-tail:compiler.driver.pipeline_fn.compile_specialized_template_release'
+-- fix the PRODUCER that left kind unset, not lower_type
+```
+
+Emitted 3 times, consistent with the "count varies across runs" note above. Per
+this file's own warning the `scope-tail:` name is a fixed tail of a
+whole-array-assigned `current_function_names` and does NOT name the offending
+function; it is recorded here only to show the label is identical on this host
+too, i.e. it carries no host-specific information either.
+
+**Why this datapoint matters.** The header scopes this P0 to
+aarch64-apple-darwin. It is not OS-specific: this run is Ubuntu 24.04 on
+aarch64, glibc, clang/LLD 23.1.0, mold as `ld`, LLVM 18 for `llvm-sys`. The
+common factor across both failing hosts is the **architecture**, not the OS or
+the toolchain, while x86_64 continues to self-host. That narrows the search to
+aarch64-specific lowering/codegen or an aarch64 ABI assumption, and argues
+against the source-level "which construct forgot to write `kind`" framing that
+this record already refuted on other grounds.
+
+**This run was not confounded by the stub defect fixed the same day.** Stage 2
+here was built strict: its native-build log reports `Generating 1 compatibility
+aliases for resolved symbols` (not fabricated stubs), and the admitted Stage-2
+binary carries `U bcmp` — resolved from libc, not a weak stub. See
+`fix(native-build): stop weak-stubbing 58 real libc symbols`. So the corrupt
+aggregate is upstream of that defect, not a consequence of it.
+
+Environment and evidence:
+
+- Stage 2 admitted and independently verified non-vacuous (152 MB, 515 dynamic
+  symbols, reports `simple-bootstrap 1.0.0-rc.1`, not the seed banner).
+- Full worker stderr (487,854 bytes, untruncated):
+  `build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage3-tmp/native-build-stderr-294420.log`
+- The copy in `logs/aarch64-unknown-linux-gnu/stage3-native-build.log` is NOT
+  usable for this: `SIMPLE_COMPILER_PHASE_PROFILE=1`, set unconditionally for
+  the Stage-3 run by `scripts/check/lib/bootstrap-stage3/runner.shs:83`, turns
+  on the `[mir-lower]` trace, which produced 9,955,950 bytes of stderr; the
+  native-build entry then dropped 9,943,950 bytes **from the middle** — taking
+  the three `error:` lines with it. The diagnostic that survives is the one in
+  the separately-saved full stderr. A trace whose volume evicts the error it
+  exists to surface is worth fixing independently of this bug.

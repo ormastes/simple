@@ -507,6 +507,15 @@ if [ -n "${resume_stage3_output}" ]; then
     exit 1
   }
   case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1 unless SIMPLE_NATIVE_BUILD_THREADS is set; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
+  # resume-stage3-from-admitted.sh reads the planner receipt from
+  # SIMPLE_BOOTSTRAP_REASON_RECEIPT, not from argv. Without this export a
+  # --bootstrap-receipt= given here was accepted, parsed, and then silently
+  # dropped: the resume refused with planner-admission-v2-required while the
+  # operator could see the receipt right there on the command line.
+  if [ -n "${bootstrap_receipt_path}" ]; then
+    SIMPLE_BOOTSTRAP_REASON_RECEIPT="${bootstrap_receipt_path}"
+    export SIMPLE_BOOTSTRAP_REASON_RECEIPT
+  fi
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
