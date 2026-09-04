@@ -29,3 +29,24 @@ Trace the native Phase 2 path through selected asset identity validation,
 plain `FontRasterizer` aggregate return. Preserve fail-closed manifest/hash
 validation. Admission requires the current producer to emit a complete
 94-glyph receipt and pass the Chrome accuracy plus C p95 gate.
+
+## Direct-raster isolation (2026-09-04)
+
+A focused follow-up temporarily removed `FontRasterizer` and called the same
+pure-Simple `sfnt_measure_glyph_into` / `sfnt_render_glyph_into` owners directly.
+This confirmed that the benchmark can separate raster cost from asset loading,
+but the Phase 2 compiler cannot admit the resulting narrow closure:
+
+- the compatibility SFFI import poisons HIR with unresolved
+  `file_read_bytes` and `thread_sleep`;
+- importing `std.nogc_sync_mut.io_runtime` directly expands into an oversized
+  closure, emits unresolved-method const-zero placeholders, and remained in
+  MIR lowering at 100% CPU with no new log progress for seven minutes;
+- importing `std.nogc_sync_mut.io.file_ops` directly still poisons HIR with
+  unresolved `file_read_bytes`, `getpid`, `read_file_text`, `process_run`, and
+  `rename_path`.
+
+All three attempts used `SIMPLE_NO_STUB_FALLBACK=1`; no output was admitted and
+the experimental producer edit was reverted. The next compiler fix must make a
+narrow owner import reachable without wildcard-facade loss or unrelated I/O
+closure expansion. Do not bypass this with a copied executable or weak stubs.
