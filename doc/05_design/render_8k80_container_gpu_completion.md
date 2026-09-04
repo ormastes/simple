@@ -113,3 +113,10 @@ row: its font atlas is synthetic and it has no PATH/EDGE workload. Each feature
 therefore needs matching C and Simple producers using
 `engine2d-vulkan-feature-perf-v1`; missing or drifted receipts fail closed and
 must never be reported as a parity result.
+
+The packed-font C producer deliberately uses a synthetic opaque 16x16 atlas.
+It measures only packed parameter upload plus Vulkan submit/fence throughput;
+it does not claim real-vector-font accuracy. Real-font accuracy remains owned
+by the independent Simple device-readback versus CPU-oracle checksum gate. A
+Simple synthetic packed-font producer must use the identical atlas, placement,
+glyph count, and workload hash before the C receipt is comparable.
