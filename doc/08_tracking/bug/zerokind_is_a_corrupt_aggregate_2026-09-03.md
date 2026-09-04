@@ -184,3 +184,56 @@ Environment and evidence:
   the three `error:` lines with it. The diagnostic that survives is the one in
   the separately-saved full stderr. A trace whose volume evicts the error it
   exists to surface is worth fixing independently of this bug.
+
+## PARTIAL FIX (2026-09-04): the ZeroKind fatal is gone; corruption is not
+
+Commit "fix(mir): set current_module_id on the lowering paths that skip
+lower_module" sets `current_module_id` on the three BOOTSTRAP-FLAT paths in
+`bootstrap_globals.spl` and on the lambda-lift sub-lowering in
+`switch_operators_calls.spl`. Before it, `lower_module` was the ONLY assignment
+of that field, and none of those four paths call it — so a bootstrap build,
+which is what Stage 3 is, ran the entire lowering with the `""` initialiser.
+That is the "empty module id" this record measured at every raise and listed as
+its open question.
+
+**Measured effect on aarch64-unknown-linux-gnu, same tree, same command:**
+
+| | before | after |
+|---|---|---|
+| `E-MIR-TYPE-ZeroKind` raises | 3 | **0** |
+| furthest phase reached | died in `[mir-lower]` of the entry module | `phase3:hir_typecheck:done` → `phase4:monomorphize:start/done` → `phase5:mode_dispatch:start` → `aot:lower_to_mir:start` |
+| Stage 3 result | fail | fail (later, different symptom) |
+
+So the fix is real and load-bearing — it clears the fatal this record is named
+for and carries the build through monomorphization — but it is **not** the whole
+defect.
+
+### What is still wrong, and why it matters for the next session
+
+Stage 3 now fails after `aot:lower_to_mir:start`, and 16 instances of
+
+    [post-mono-verify] unhandled HirTypeKind variant at walk_type
+
+appear first. That walker is deliberately written without a semantic wildcard
+and names all 27 `HirTypeKind` variants, and its `case _` carries the comment
+"The value reaching this arm is already malformed". So **a malformed HirType
+still reaches post-mono verification** — the corrupt aggregate is not
+eliminated, only displaced past MIR lowering.
+
+Two readings, and they have different fixes:
+
+1. `current_module_id` was one of several inputs to the wrong-layout path, and
+   another remains.
+2. The corruption has a different source entirely, and the empty module id was
+   an independent defect that happened to make it fatal earlier.
+
+Evidence that would separate them, cheaply, next time: the transport-receipt
+print in that `case _` did NOT fire (0 occurrences) even though the arm ran 16
+times, so `POST_MONO_TRANSPORT_RECEIPT_LIMIT` or the counter guard needs
+checking before relying on it. Fixing that instrumentation is the cheapest next
+step, because it is the one probe already sited where a malformed type is known
+to arrive and it costs no extra bootstrap.
+
+Do NOT re-derive the "which construct forgot to write kind" framing; this record
+already refuted it, and the `current_module_id` finding is further evidence that
+the defect is in how a type's LAYOUT is attributed, not in a producer.
