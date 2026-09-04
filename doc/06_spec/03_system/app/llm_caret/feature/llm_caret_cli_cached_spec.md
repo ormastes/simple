@@ -12,6 +12,8 @@
 # LLM Caret Cached CLI Qualification
 
 Exercise the shipped cached Caret CLI through the fail-closed qualification
+from a standalone case directory, with absolute fixture paths and retained
+launch-contract evidence.
 
 ## At a Glance
 
@@ -21,7 +23,7 @@ Exercise the shipped cached Caret CLI through the fail-closed qualification
 | Status | Active |
 | Requirements | REQ-LLM-CARET-FULL-003, NFR-LLM-CARET-TUI-006 |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_cli_cached_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-09-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope

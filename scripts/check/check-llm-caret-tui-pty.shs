@@ -501,6 +501,9 @@ baseline=$(stty -g) || exit 93
 geometry_before=$(stty size) || exit 94
 printf '%s\n' "pty_baseline=${baseline}"
 printf '%s\n' "pty_geometry_before=${geometry_before}"
+[ -d "${CARET_LAUNCH_DIR}" ] || exit 90
+cd "${CARET_LAUNCH_DIR}" || exit 90
+printf '%s\n' "caret_launch_cwd=$(pwd -P)"
 
 if [ "${CARET_UI_MODE}" = "forced" ]; then
     case "${CARET_PROVIDER_MODE}" in
@@ -517,7 +520,6 @@ if [ "${CARET_UI_MODE}" = "forced" ]; then
             esac
             [ -f "${CARET_FIXTURE_CONFIG}" ] || exit 90
             [ -x "${CARET_FIXTURE_CLI}" ] || exit 90
-            cd "${CARET_REPO_ROOT}" || exit 90
             "${CARET_WRAPPER}" --config "${CARET_FIXTURE_CONFIG}" --provider claude_cli --model sonnet --system "Be concise" --tui
             ;;
         *)
@@ -707,6 +709,7 @@ run_pty_case() {
     CARET_UI_MODE="${ui_mode}"
     CARET_GEOMETRY="${geometry}"
     CARET_PROVIDER_MODE="${provider_mode}"
+    CARET_LAUNCH_DIR="${case_dir}"
     CARET_REPO_ROOT="${REPO_ROOT}"
     CARET_FIXTURE_CONFIG="${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.sdn"
     CARET_FIXTURE_CLI="${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.shs"
@@ -725,7 +728,7 @@ run_pty_case() {
             unset LLM_CARET_ENABLE_HIDDEN_COMMANDS
             ;;
     esac
-    export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY CARET_PROVIDER_MODE
+    export CARET_WRAPPER CARET_UI_MODE CARET_GEOMETRY CARET_PROVIDER_MODE CARET_LAUNCH_DIR
     export CARET_REPO_ROOT CARET_FIXTURE_CONFIG CARET_FIXTURE_CLI HOME TERM
     invoke_script "${capture}" "${runner}" "${input}" \
         "${driver_stdout}" "${driver_stderr}" "${timeout_marker}"
@@ -736,6 +739,7 @@ run_pty_case() {
     caret_exit=$(capture_value "caret_exit" "${capture}")
     geometry_before=$(capture_value "pty_geometry_before" "${capture}")
     geometry_after=$(capture_value "pty_geometry_after" "${capture}")
+    launch_cwd=$(capture_value "caret_launch_cwd" "${capture}")
     requested_rows=""
     requested_cols=""
     if [ "${geometry}" != "" ]; then
@@ -750,6 +754,8 @@ run_pty_case() {
         record_failure "${label}" "caret_exit_${caret_exit}" "${case_dir}"
     elif [ "${status}" -ne 0 ]; then
         record_failure "${label}" "script_exit_${status}" "${case_dir}"
+    elif [ "${launch_cwd}" != "${case_dir}" ]; then
+        record_failure "${label}" "standalone_launch_cwd_mismatch" "${case_dir}"
     elif [ "${baseline}" = "" ] || [ "${after}" = "" ]; then
         record_failure "${label}" "terminal_mode_markers_missing" "${case_dir}"
     elif [ "${baseline}" != "${after}" ]; then
@@ -888,8 +894,8 @@ run_plain_promptless_case() {
     HOME="${home_dir}"
     TERM=dumb
     export HOME TERM
-    "${CARET_WRAPPER}" --provider dummy --plain \
-        <"${input}" >"${stdout}" 2>"${stderr}" &
+    (cd "${case_dir}" && "${CARET_WRAPPER}" --provider dummy --plain \
+        <"${input}" >"${stdout}" 2>"${stderr}") &
     caret_pid=$!
     wait_bounded "${caret_pid}" "${timeout_marker}"
     status=$?
@@ -924,10 +930,10 @@ run_piped_auto_case() {
     HOME="${case_dir}/home"
     TERM=dumb
     export HOME TERM
-    "${CARET_WRAPPER}" --provider dummy \
+    (cd "${case_dir}" && "${CARET_WRAPPER}" --provider dummy \
         <"${case_dir}/input.txt" \
         >"${case_dir}/stdout.txt" \
-        2>"${case_dir}/stderr.txt" &
+        2>"${case_dir}/stderr.txt") &
     caret_pid=$!
     wait_bounded "${caret_pid}" "${case_dir}/timeout.txt"
     status=$?
@@ -958,10 +964,10 @@ run_raw_failure_case() {
     HOME="${case_dir}/home"
     TERM=xterm-256color
     export HOME TERM
-    "${CARET_WRAPPER}" --provider dummy --tui \
+    (cd "${case_dir}" && "${CARET_WRAPPER}" --provider dummy --tui \
         <"${case_dir}/input.txt" \
         >"${case_dir}/stdout.txt" \
-        2>"${case_dir}/stderr.txt" &
+        2>"${case_dir}/stderr.txt") &
     caret_pid=$!
     wait_bounded "${caret_pid}" "${case_dir}/timeout.txt"
     status=$?
@@ -1122,6 +1128,7 @@ case "${CASE_NAME}" in
         ;;
 esac
 
+printf '%s\n' "launch_contract=standalone-case-directory"
 if [ "${FAILURES}" -ne 0 ]; then
     printf '%s\n' "evidence_status=FAIL"
     printf '%s\n' "failed_cases=${FAILURES}"

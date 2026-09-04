@@ -159,7 +159,7 @@ run_case() {
     mkdir -p "${case_dir}/home" || { record_failure "${label}" artifact_directory_unavailable "${case_dir}"; return; }
     printf '%s\n' "$@" >"${case_dir}/command.txt"
     write_provenance >"${case_dir}/provenance.txt"
-    HOME="${case_dir}/home" TERM=dumb "${CARET_WRAPPER}" "$@" >"${case_dir}/stdout.raw" 2>"${case_dir}/stderr.raw"
+    (cd "${case_dir}" && HOME="${case_dir}/home" TERM=dumb "${CARET_WRAPPER}" "$@") >"${case_dir}/stdout.raw" 2>"${case_dir}/stderr.raw"
     status=$?
     sed 's/sk-ant-[[:alnum:]_-]*/[REDACTED:provider-secret]/g' "${case_dir}/stdout.raw" >"${case_dir}/stdout.txt"
     sed 's/sk-ant-[[:alnum:]_-]*/[REDACTED:provider-secret]/g' "${case_dir}/stderr.raw" >"${case_dir}/stderr.txt"
@@ -190,7 +190,7 @@ run_wrapper_contract() {
         'SIMPLE_CARET_NATIVE=/bin/echo bin/caret caret-wrapper-marker --plain' \
         >"${case_dir}/command.txt"
     SIMPLE_CARET_NATIVE=/bin/echo SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0 \
-        "${CARET_WRAPPER}" caret-wrapper-marker --plain \
+        sh -c 'cd "$1" && "$2" caret-wrapper-marker --plain' sh "${case_dir}" "${CARET_WRAPPER}" \
         >"${case_dir}/stdout.txt" 2>"${case_dir}/stderr.txt"
     status=$?
     printf '%s\n' "${status}" >"${case_dir}/exit.txt"
@@ -205,7 +205,7 @@ run_wrapper_contract() {
 
     missing="${case_dir}/definitely-missing-caret"
     SIMPLE_CARET_NATIVE="${missing}" SIMPLE_CARET_ALLOW_SOURCE_FALLBACK=0 \
-        "${CARET_WRAPPER}" --help \
+        sh -c 'cd "$1" && "$2" --help' sh "${case_dir}" "${CARET_WRAPPER}" \
         >"${case_dir}/missing.stdout.txt" 2>"${case_dir}/missing.stderr.txt"
     missing_status=$?
     printf '%s\n' "${missing_status}" >"${case_dir}/missing.exit.txt"
@@ -241,11 +241,12 @@ prepare_prerequisites
 if [ "${CASE_NAME}" = prerequisites ] || [ "${CASE_NAME}" = all ]; then run_prerequisites; fi
 if [ "${CASE_NAME}" = help ] || [ "${CASE_NAME}" = all ]; then run_case help 0 --provider fixture-secret --help; fi
 if [ "${CASE_NAME}" = offline-claude ] || [ "${CASE_NAME}" = all ]; then
-    run_case offline-claude 0 fixture-ok --max-tokens --config test/fixtures/llm_caret/mock_claude_cli.sdn --provider claude_cli --model sonnet --system 'Be concise' --prompt fixture-success
+    run_case offline-claude 0 fixture-ok --max-tokens --config "${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.sdn" --provider claude_cli --model sonnet --system 'Be concise' --prompt fixture-success
 fi
 if [ "${CASE_NAME}" = provider-error ] || [ "${CASE_NAME}" = failure-usage ] || [ "${CASE_NAME}" = all ]; then
-    run_case provider-error 1 '[REDACTED:' sk-ant-fixture-secret --config test/fixtures/llm_caret/mock_claude_cli.sdn --provider claude_cli --model sonnet --prompt fixture-error
+    run_case provider-error 1 '[REDACTED:' sk-ant-fixture-secret --config "${REPO_ROOT}/test/fixtures/llm_caret/mock_claude_cli.sdn" --provider claude_cli --model sonnet --prompt fixture-error
 fi
 if [ "${CASE_NAME}" = unknown-option ] || [ "${CASE_NAME}" = failure-usage ] || [ "${CASE_NAME}" = all ]; then run_case unknown-option 2 'unknown option' fixture-secret --definitely-unknown; fi
+printf '%s\n' 'launch_contract=standalone-case-directory'
 if [ "${FAILURES}" -ne 0 ]; then printf '%s\n' "evidence_status=FAIL failed_cases=${FAILURES}"; exit 1; fi
 printf '%s\n' 'evidence_status=PASS'

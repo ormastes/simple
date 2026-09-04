@@ -12,6 +12,7 @@
 # LLM Caret Cached Plain-CLI Hidden Command Qualification
 
 Qualify canonical and alias hidden commands through the actual cached `bin/caret`
+from a standalone case directory rather than the repository root.
 
 ## At a Glance
 
@@ -21,7 +22,7 @@ Qualify canonical and alias hidden commands through the actual cached `bin/caret
 | Status | Active |
 | Requirements | REQ-LLM-CARET-HIDDEN-008, REQ-LLM-CARET-FULL-003 |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-09-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope

@@ -8,6 +8,9 @@
 
 This manual records zero executed scenarios and does not claim PASS because
 cached process execution is blocked until a qualified Caret artifact exists.
+Every PTY case now changes into its own artifact directory before invoking the
+absolute `bin/caret` wrapper and validates the captured cwd marker, so a
+repository-root-only launcher cannot pass.
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -25,7 +28,7 @@ Launch the shipped cached `bin/caret` wrapper with the offline dummy provider.
 | Requirements | REQ-LLM-CARET-TUI-HARDEN-007, REQ-LLM-CARET-TUI-HARDEN-009, REQ-LLM-CARET-HIDDEN-008, NFR-LLM-CARET-TUI-006 |
 | Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_tui_pty_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-09-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope
