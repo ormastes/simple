@@ -1,0 +1,157 @@
+"""
+host_equiv_transport_check — proof that a command reaches the device through
+MEMORY + DOORBELL + PHASE-TAGGED CQ POLL, not through a direct function call.
+
+Run: bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/host_equiv_transport_check.spl
+
+Verdict token on the last line: HOST EQUIV TRANSPORT OK | HOST EQUIV TRANSPORT FAIL (n)
+(Do NOT assert on the process exit code: bug
+ doc/08_tracking/bug/simple_run_exit_code_garbage_for_unit_main_2026-09-01.md.)
+"""
+
+use nvme_types.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_host_driver.*
+
+# ── The SHARED submission body. Byte-identical across every profile; the only
+#    thing that varies is which profile name built `h`. ─────────────────────────
+fn drive_one_write_read(h: HostNvme, label: text) -> i64:
+    var f: i64 = 0
+    var d: HostNvme = h
+    # The controller must be ENABLED through its registers before it will accept
+    # anything (fw/nvme_ready_gate_check.spl). On `board` this fails closed for
+    # the same reason attach() does, which is what the four expected `board:`
+    # FAILs below report.
+    d.bringup()
+    val w = cmd_make(11, OP_WRITE, 40, 1, 0x5A)
+    val wc = d.exec_io(w)
+    f = f + expect_eq(wc.cid, 11, label + ": write CQE cid")
+    f = f + expect_eq(wc.status, SC_SUCCESS, label + ": write CQE status")
+    val r = cmd_make(12, OP_READ, 40, 1, 0)
+    val rc = d.exec_io(r)
+    f = f + expect_eq(rc.cid, 12, label + ": read CQE cid")
+    f = f + expect_eq(rc.data, 0x5A, label + ": read returns written payload")
+    f
+
+fn main():
+    var fail: i64 = 0
+
+    print "-- module selftests --"
+    fail = fail + nvme_transport_config_selftest()
+    fail = fail + nvme_mmio_selftest()
+    fail = fail + nvme_host_driver_selftest()
+
+    print "-- A. attach via SDN config --"
+    var h = host_nvme_open(BACKEND_EMU)
+    val att: bool = h.attach()
+    fail = fail + expect_eq(bool_to_int(att), 1, "emu transport attaches")
+    print "  INFO: emu attach_reason = {h.attach_reason()}"
+    # Submission is GATED on CSTS.RDY: attach() binds the substrate, bringup()
+    # enables the controller. Without this the sections below are refused.
+    # See fw/nvme_ready_gate_check.spl for the witness that the gate is real.
+    fail = fail + expect_eq(bool_to_int(h.controller_ready()), 0, "attach() alone does not enable the controller")
+    fail = fail + expect_eq(bool_to_int(h.bringup()), 1, "bringup() enables it through the registers")
+
+    print "-- B. submission is a MEMORY WRITE, not a call --"
+    val cmd = cmd_make(7, OP_WRITE, 33, 1, 0xC3)
+    val sq0: i64 = h.sq_entry_addr(0)
+    fail = fail + expect_eq(h.peek32(sq0), 0, "SQ slot 0 is zero before submit")
+    fail = fail + expect_eq(bool_to_int(h.submit_sqe(cmd)), 1, "submit_sqe writes the SQE")
+    fail = fail + expect_eq(h.peek32(sq0) & 0xFF, OP_WRITE, "SQ memory CDW0[7:0] holds the opcode")
+    fail = fail + expect_eq((h.peek32(sq0) >> 16) & 0xFFFF, 7, "SQ memory CDW0[31:16] holds the CID")
+    fail = fail + expect_eq(mmio_rd32(h.mem, sq0 + SQE_OFF_SLBA), 33, "SQ memory +40 holds SLBA")
+    fail = fail + expect_eq(h.serviced, 0, "device has NOT seen the command before the doorbell")
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 0, "no completion before the doorbell")
+
+    print "-- C. the doorbell is the notification --"
+    fail = fail + expect_eq(h.peek32(h.sq_db_addr()), 0, "SQ0TDBL reads 0 before the ring")
+    val svc: i64 = h.ring_sq_doorbell()
+    fail = fail + expect_eq(h.peek32(h.sq_db_addr()), 1, "SQ0TDBL now holds the shadow tail")
+    fail = fail + expect_eq(svc, 1, "doorbell write made the device fetch exactly 1 SQE")
+    fail = fail + expect_eq(h.serviced, 1, "device serviced counter advanced")
+
+    print "-- D. completion is polled from memory by phase tag --"
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 1, "CQ[0] phase now matches the host")
+    val cq0: i64 = h.cq_entry_addr(0)
+    fail = fail + expect_eq(cqe_phase_of(h.mem, cq0), 1, "CQE phase bit 16 == 1 on the first lap")
+    val cpl = h.poll_cq()
+    fail = fail + expect_eq(cpl.cid, 7, "polled CQE cid decoded from DW3[15:0]")
+    fail = fail + expect_eq(cpl.status, SC_SUCCESS, "polled CQE status decoded from DW3[31:17]")
+    fail = fail + expect_eq(h.peek32(h.cq_db_addr()), 1, "CQ0HDBL updated by the poll")
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 0, "CQ empty again after consuming")
+
+    print "-- E. round-trip data integrity through the transport --"
+    fail = fail + drive_one_write_read(h, "emu")
+
+    print "-- F. PHASE TAG: a stale CQE must NOT be consumed --"
+    # Forge a completion in the NEXT CQ slot carrying the PREVIOUS lap's phase
+    # (0 while the host expects 1). A driver that ignores the phase bit would
+    # happily consume this garbage. This one must refuse.
+    val slot: i64 = h.cq_head_index()
+    val addr: i64 = h.cq_entry_addr(slot)
+    val stale = cqe_encode(cpl_make(999, SC_INTERNAL, 0xDEAD), 0, 0)
+    var k: i64 = 0
+    while k < CQE_BYTES:
+        h.poke(MemWrite(addr: addr + k, width: 1, value: stale[k]))
+        k = k + 1
+    fail = fail + expect_eq(cqe_phase_of(h.mem, addr) , 0, "forged CQE carries the stale phase 0")
+    fail = fail + expect_eq(bool_to_int(h.cq_ready()), 0, "stale-phase CQE is NOT ready")
+    val none = h.poll_cq()
+    fail = fail + expect_eq(bool_to_int(cqe_is_none(none)), 1, "poll refuses the stale CQE")
+    fail = fail + expect_eq(h.cq_head_index(), slot, "CQ head did not advance over the stale CQE")
+    # ... and a genuine completion at the same slot IS consumed.
+    fail = fail + expect_eq(bool_to_int(h.submit_sqe(cmd_make(21, OP_READ, 40, 1, 0))), 1, "resubmit after stale entry")
+    h.ring_sq_doorbell()
+    val good = h.poll_cq()
+    fail = fail + expect_eq(good.cid, 21, "genuine CQE overwrote the stale slot and was consumed")
+    fail = fail + expect_eq(good.data, 0x5A, "genuine CQE carries the real read payload")
+
+    print "-- G. PHASE TAG: the phase must toggle across a CQ wrap --"
+    # Drive past the ring depth so head wraps and the expected phase flips.
+    var g = host_nvme_open(BACKEND_EMU)
+    g.attach()
+    g.bringup()
+    val depth: i64 = g.cfg.queue_depth
+    var n: i64 = 0
+    var wrap_fail: i64 = 0
+    while n < depth + 3:
+        val c = cmd_make(100 + (n % 400), OP_FLUSH, 0, 0, 0)
+        val p = g.exec_io(c)
+        if cqe_is_none(p):
+            wrap_fail = wrap_fail + 1
+        n = n + 1
+    fail = fail + expect_eq(wrap_fail, 0, "every one of depth+3 commands completed across the wrap")
+    fail = fail + expect_eq(g.cq_phase, 0, "host expected phase toggled to 0 after one full lap")
+    fail = fail + expect_eq(g.cq_head_index(), 3, "CQ head wrapped to slot 3")
+    fail = fail + expect_eq(cqe_phase_of(g.mem, g.cq_entry_addr(0)), 0, "slot 0 rewritten on lap 2 carries phase 0")
+    fail = fail + expect_eq(cqe_phase_of(g.mem, g.cq_entry_addr(3)), 1, "slot 3 still holds lap-1 phase 1 -- stale now that the host expects 0")
+    fail = fail + expect_eq(bool_to_int(g.cq_ready()), 0, "post-wrap: the lap-1 entry at head is stale, not ready")
+
+    print "-- H. CONFIG SEAM: same code path, two profiles --"
+    print "  NOTE: the four 'board:' FAIL lines below are EXPECTED EVIDENCE, not a defect."
+    print "  NOTE: they are the unmodified section-E body refusing to fake an unbound substrate."
+    # The `board` profile is DECLARED in the SDN and UNBOUND. Nothing here fakes
+    # a second substrate: attach fails closed and says why.
+    var b = host_nvme_open(BACKEND_BOARD)
+    val b_att: bool = b.attach()
+    fail = fail + expect_eq(bool_to_int(b_att), 0, "board profile attach fails closed (unbound)")
+    print "  INFO: board attach_reason = {b.attach_reason()}"
+    fail = fail + expect_eq(b.cfg.valid, 1, "board profile itself is valid config, just unbound")
+    fail = fail + expect_eq(b.cfg.queue_depth, h.cfg.queue_depth, "board and emu agree on queue depth")
+    fail = fail + expect_eq(bool_to_int(b.submit_sqe(cmd)), 0, "unattached board transport refuses submission")
+    # Same shared function, board profile: reports failures rather than pretending.
+    val board_fail: i64 = drive_one_write_read(b, "board")
+    if board_fail > 0:
+        print "  INFO: the shared submission body ran unchanged against 'board' and could not"
+        print "  INFO: complete ({board_fail} expectation(s)) because that profile has no substrate bound."
+        print "  INFO: This is the honest state today: ONE test source, TWO declared profiles,"
+        print "  INFO: ONE bound substrate. Binding the board makes those same lines pass."
+    else:
+        print "  FAIL: board profile claimed success with no substrate bound"
+        fail = fail + 1
+
+    if fail == 0:
+        print "HOST EQUIV TRANSPORT OK"
+    else:
+        print "HOST EQUIV TRANSPORT FAIL ({fail})"

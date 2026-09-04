@@ -1,0 +1,223 @@
+#!/bin/sh
+# check-typed-address-algebra.shs — fail-closed ratchet on bare-`i64` address
+# parameters in the SimpleOS NVMe firmware (examples/09_embedded/simpleos_nvme_fw/fw).
+#
+# WHY THIS GATE EXISTS. Simple does NOT check function argument types: a
+# parameter declared `blk: FtlBlk` accepts a page index, a text, or anything
+# else, and `bin/simple lint` reports it clean (measured —
+# doc/08_tracking/bug/function_argument_types_unchecked_2026-09-01.md). The typed
+# address algebra in fw/addr_algebra.spl therefore has NO compile-time
+# enforcement whatsoever. This script is the enforcement: it counts address-role
+# parameters still declared as bare `i64` and fails any change that increases
+# that count. Contract:
+#   doc/03_plan/hardware/nvme_typed_address_algebra_plan.md §6
+#   doc/09_report/nvme_address_site_census_2026-09-01.md
+#
+# Verdict is ALWAYS the last stdout line:
+#   PASS — <n> file(s) scanned, <k> bare-i64 address param(s) (baseline <b>)   exit 0
+#   FAIL — ...                                                                 exit 1
+#   ERROR — nothing was checked (<reason>)                                     exit 2
+# 0 files scanned, a 0-file tree, or an unreadable baseline is ERROR, NEVER PASS.
+#
+# House style follows scripts/check/check-no-direct-rt.shs: ratchet with a
+# tracked baseline file, --selftest fatal and unconditional, and a verification
+# run NEVER writes the baseline (only --generate-baseline may).
+#
+# Usage: sh scripts/check/check-typed-address-algebra.shs [--selftest-only]
+#                                                        [--root DIR] [--generate-baseline]
+
+set -u
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+FW_DIR="$REPO_ROOT/examples/09_embedded/simpleos_nvme_fw/fw"
+BASELINE_FILE="$REPO_ROOT/scripts/check/typed_address_baseline.txt"
+SELFTEST_ONLY=0
+GENERATE_BASELINE=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --selftest|--selftest-only) SELFTEST_ONLY=1 ;;
+    --generate-baseline) GENERATE_BASELINE=1 ;;
+    --root) shift; FW_DIR="$1" ;;
+    --baseline) shift; BASELINE_FILE="$1" ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+  shift
+done
+
+# The census regex, VERBATIM from the plan §1.1 / the census report. The 202
+# baseline was measured with exactly this pattern; §6.1 sketches a broader role
+# list, which counts a DIFFERENT population and must not be substituted here
+# without re-measuring the baseline against it.
+ADDR_RE='(fn|me) [a-z_]+\(.*\b(lba|ppn|blk|block|page|ch|channel|way|plane|band|slot|addr|qid|cid|nsid|index)[a-z_]*: i64'
+
+# scan_fw <dir> <per-file-output-path>
+# Prints "<files_scanned> <offenders>" on stdout, or "ERR <reason>".
+# A line whose first non-space character is '#' is a comment and is stripped
+# before matching, so a signature that has been commented out is never counted
+# (that is the fixture-8 false-positive guard: the gate must not be satisfiable
+# by moving code into a comment, and must not be reddened by prose either).
+scan_fw() {
+  sf_dir="$1"; sf_out="$2"
+  : > "$sf_out"
+  if [ ! -d "$sf_dir" ]; then
+    echo "ERR no such directory: $sf_dir"
+    return
+  fi
+  sf_tmp=$(mktemp) || { echo "ERR mktemp failed"; return; }
+  sf_files=0
+  sf_total=0
+  for sf_f in "$sf_dir"/*.spl; do
+    [ -f "$sf_f" ] || continue
+    sf_files=$((sf_files + 1))
+    sed -e 's/^[[:space:]]*#.*$//' "$sf_f" > "$sf_tmp"
+    sf_n=$(grep -c -E "$ADDR_RE" "$sf_tmp")
+    rc=$?
+    if [ $rc -gt 1 ]; then
+      rm -f "$sf_tmp"
+      echo "ERR grep failed on $sf_f"
+      return
+    fi
+    if [ "$sf_n" -gt 0 ]; then
+      echo "$(basename "$sf_f") $sf_n" >> "$sf_out"
+      sf_total=$((sf_total + sf_n))
+    fi
+  done
+  rm -f "$sf_tmp"
+  echo "$sf_files $sf_total"
+}
+
+# ── selftest: fatal, unconditional, runs BEFORE any real scan ────────────────
+selftest() {
+  st_root=$(mktemp -d) || { echo "selftest: mktemp -d failed"; return 1; }
+  st_fail=0
+  st_out="$st_root/out"
+
+  # fixture 1 — clean: every address parameter is a typed struct.
+  mkdir -p "$st_root/clean"
+  cat > "$st_root/clean/a.spl" <<'CLEAN'
+fn program(blk: FtlBlk, p: NdPage) -> i64:
+    0
+fn erase(b: NdBlock) -> i64:
+    0
+CLEAN
+  st_r=$(scan_fw "$st_root/clean" "$st_out")
+  set -- $st_r
+  if [ "$1" = "ERR" ] || [ "$1" -ne 1 ] || [ "$2" -ne 0 ]; then
+    echo "selftest FIXTURE 1 (clean tree must scan 1 file, 0 offenders) got: $st_r"
+    st_fail=1
+  fi
+
+  # fixture 2 — sabotage: a bare-i64 address parameter is added. MUST be seen.
+  mkdir -p "$st_root/dirty"
+  cp "$st_root/clean/a.spl" "$st_root/dirty/a.spl"
+  cat > "$st_root/dirty/b.spl" <<'DIRTY'
+fn read_lba(lba: i64) -> i64:
+    lba
+DIRTY
+  st_r=$(scan_fw "$st_root/dirty" "$st_out")
+  set -- $st_r
+  if [ "$1" = "ERR" ] || [ "$2" -ne 1 ]; then
+    echo "selftest FIXTURE 2 (one added bare-i64 address param must be counted) got: $st_r"
+    st_fail=1
+  fi
+  if ! grep -q '^b.spl 1$' "$st_out"; then
+    echo "selftest FIXTURE 2 (the offending file must be named) got: $(cat "$st_out")"
+    st_fail=1
+  fi
+
+  # fixture 3 — false-positive guard: the SAME signature, commented out. MUST NOT count.
+  mkdir -p "$st_root/commented"
+  cat > "$st_root/commented/c.spl" <<'COMMENTED'
+# fn read_lba(lba: i64) -> i64:
+    # fn erase_block(blk: i64) -> i64:
+fn read_typed(l: HstLba) -> i64:
+    0
+COMMENTED
+  st_r=$(scan_fw "$st_root/commented" "$st_out")
+  set -- $st_r
+  if [ "$1" = "ERR" ] || [ "$2" -ne 0 ]; then
+    echo "selftest FIXTURE 3 (a commented-out signature must NOT be counted) got: $st_r"
+    st_fail=1
+  fi
+
+  # fixture 4 — empty tree: must scan 0 files so the caller is forced to ERROR.
+  mkdir -p "$st_root/empty"
+  st_r=$(scan_fw "$st_root/empty" "$st_out")
+  set -- $st_r
+  if [ "$1" = "ERR" ] || [ "$1" -ne 0 ] || [ "$2" -ne 0 ]; then
+    echo "selftest FIXTURE 4 (empty tree must scan 0 files) got: $st_r"
+    st_fail=1
+  fi
+
+  # fixture 5 — a missing directory must be an ERR, never a quiet zero.
+  st_r=$(scan_fw "$st_root/does_not_exist" "$st_out")
+  set -- $st_r
+  if [ "$1" != "ERR" ]; then
+    echo "selftest FIXTURE 5 (missing directory must be ERR) got: $st_r"
+    st_fail=1
+  fi
+
+  rm -rf "$st_root"
+  return $st_fail
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed)"
+  exit 2
+fi
+echo "selftest: 5 fixture(s) passed"
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+  echo "PASS — 5 fixture(s) scanned, selftest only (no tree scanned)"
+  exit 0
+fi
+
+# ── real scan ─────────────────────────────────────────────────────────────────
+OFFENDERS=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+RESULT=$(scan_fw "$FW_DIR" "$OFFENDERS")
+set -- $RESULT
+if [ "$1" = "ERR" ]; then
+  shift
+  echo "ERROR — nothing was checked ($*)"
+  rm -f "$OFFENDERS"
+  exit 2
+fi
+FILES="$1"
+COUNT="$2"
+
+if [ "$FILES" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 .spl files found under $FW_DIR)"
+  rm -f "$OFFENDERS"
+  exit 2
+fi
+
+if [ "$GENERATE_BASELINE" -eq 1 ]; then
+  echo "$COUNT" > "$BASELINE_FILE"
+  echo "PASS — $FILES file(s) scanned, baseline regenerated to $COUNT (reviewed update)"
+  rm -f "$OFFENDERS"
+  exit 0
+fi
+
+if [ ! -r "$BASELINE_FILE" ]; then
+  echo "ERROR — nothing was checked (baseline unreadable: $BASELINE_FILE)"
+  rm -f "$OFFENDERS"
+  exit 2
+fi
+BASELINE=$(sed -n 's/^\([0-9][0-9]*\)$/\1/p' "$BASELINE_FILE" | head -1)
+if [ -z "$BASELINE" ]; then
+  echo "ERROR — nothing was checked (baseline file holds no count: $BASELINE_FILE)"
+  rm -f "$OFFENDERS"
+  exit 2
+fi
+
+echo "per-file bare-i64 address parameters:"
+cat "$OFFENDERS"
+rm -f "$OFFENDERS"
+
+if [ "$COUNT" -gt "$BASELINE" ]; then
+  echo "FAIL — $FILES file(s) scanned, $COUNT bare-i64 address param(s), $((COUNT - BASELINE)) above baseline $BASELINE"
+  exit 1
+fi
+echo "PASS — $FILES file(s) scanned, $COUNT bare-i64 address param(s) (baseline $BASELINE)"
+exit 0

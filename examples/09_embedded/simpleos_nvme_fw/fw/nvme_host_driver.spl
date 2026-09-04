@@ -1,0 +1,648 @@
+"""
+nvme_host_driver — a HOST-side NVMe driver that talks to the device the way a
+real host does: build an SQE, WRITE IT INTO QUEUE MEMORY, ring a doorbell
+register, poll the completion queue for a PHASE-TAGGED CQE, decode status.
+
+There is no direct call into the firmware anywhere in the host API. The only
+thing that reaches the device is a memory write followed by a doorbell write —
+which is exactly the notification a real controller sees.
+
+  host                        memory                       device
+  ----                        ------                       ------
+  submit_sqe(cmd)   --->  SQ[tail] = 64 bytes
+  ring_sq_doorbell() --->  MMIO[SQ0TDBL] = tail   ------>  fetch SQE, execute
+  poll_cq()          <---  CQ[head] phase bit     <------  write CQE, toggle phase
+  (poll advances)    --->  MMIO[CQ0HDBL] = head
+
+SUBSTRATE SEAM: `HostNvme.cfg.backend` selects what a doorbell write means.
+  `emu`   — the in-process firmware (`Hil`) is serviced on the doorbell write.
+            This module WRAPS `hil_queue`/`hil`; neither is modified.
+  `board` — declared in the SDN profile, NOT bound. `attach()` fails closed.
+Test source is byte-identical across both; only the profile name differs.
+
+MDSOC tier: HOST (service-class), same dimension as `hil*`/`nvme_*`.
+Design: doc/05_design/hardware/nvme_host_equivalent_transport.md
+"""
+
+use nvme_types.*
+use nvme_mmio.*
+use nvme_transport_config.*
+use nvme_reg_defs.*
+use nvme_reg_file.*
+use nvme_controller.*
+use nvme_admin.*
+use nvme_admin_types.*
+use nvme_payload.*
+
+# A single memory-mapped store. A STRUCT param (not two scalars) per
+# fw/CONVENTIONS.md "first-param x8" mitigation #3.
+val IO_QID: i64 = 1   # the single I/O queue pair this host driver opens
+
+# ── Host DMA region (plan D11) ───────────────────────────────────────────────
+# Real page buffers the host fills and the DEVICE reads back out of `me.mem`.
+# It sits ABOVE the profile's queue/register window (`cfg.mem_size`), because
+# a host's data buffers are ordinary host DRAM, not part of the controller's
+# BAR — so no SDN profile field is needed and no profile changes meaning.
+# Sized for exactly one MDTS-sized transfer plus one PRP-list page:
+#   dma_base + i*PAGE_BYTES        page buffer for block i, i in 0..MDTS_BLOCKS-1
+#   dma_base + MDTS_BLOCKS*PAGE_B  the PRP list page (up to 512 entries; only
+#                                  MDTS_BLOCKS-1 are ever used)
+# Allocated LAZILY, on the first PRP command, so profiles and tests that never
+# issue one pay nothing.
+val DMA_PAGE_SLOTS: i64 = 8       # == MDTS_BLOCKS; asserted in the selftest
+val DMA_SPAN_BYTES: i64 = 36864   # (DMA_PAGE_SLOTS + 1) * PAGE_BYTES
+
+struct MemWrite:
+    addr:  i64
+    width: i64   # 1, 2, 4 or 8 bytes
+    value: i64
+
+struct HostNvme:
+    cfg:         TransportProfile
+    mem:         [i64]      # the single owner of queue+register memory
+    attached:    bool
+    sq_tail:     i64        # host shadow of SQ0TDBL
+    cq_head:     i64        # host shadow of CQ0HDBL
+    cq_phase:    i64        # phase tag the host currently expects
+    dev:         NvmeController  # emu backend only; inert under `board`.
+                             # PAGE-CAPABLE: `process_one_io` moves whole
+                             # PageData per block, which is what makes a real
+                             # PRP transfer meaningful over this wire path.
+    dev_sq_head: i64
+    dev_cq_tail: i64
+    dev_phase:   i64
+    serviced:    i64        # SQEs the device has fetched (evidence counter)
+
+"""Open the transport described by SDN profile `profile_name`. Does not attach."""
+fn host_nvme_open(profile_name: text) -> HostNvme:
+    val cfg = transport_profile_load(profile_name)
+    var mem: [i64] = []
+    var n: i64 = cfg.mem_size
+    if n < 0:
+        n = 0
+    var i: i64 = 0
+    while i < n:
+        mem.push(0)
+        i = i + 1
+    HostNvme(cfg: cfg, mem: mem, attached: false, sq_tail: 0, cq_head: 0, cq_phase: 1, dev: nvme_controller_new(), dev_sq_head: 0, dev_cq_tail: 0, dev_phase: 1, serviced: 0)
+
+impl HostNvme:
+    me sq_db_addr() -> i64:
+        me.cfg.doorbell_base
+
+    me cq_db_addr() -> i64:
+        me.cfg.doorbell_base + me.cfg.doorbell_stride
+
+    me sq_entry_addr(idx: i64) -> i64:
+        me.cfg.sq_base + idx * SQE_BYTES
+
+    me cq_entry_addr(idx: i64) -> i64:
+        me.cfg.cq_base + idx * CQE_BYTES
+
+    me cq_head_index() -> i64:
+        me.cq_head
+
+    """A single little-endian store into memory-mapped space. Fails closed."""
+    me poke(w: MemWrite):
+        var k: i64 = 0
+        while k < w.width:
+            val a: i64 = w.addr + k
+            if a >= 0 and a < me.mem.len():
+                me.mem[a] = (w.value >> (k * 8)) & 0xFF
+            k = k + 1
+
+    me peek32(addr: i64) -> i64:
+        mmio_rd32(me.mem, addr)
+
+    """Bind to the substrate named by the profile. Fails closed when unbound."""
+    me attach() -> bool:
+        if me.cfg.valid != 1:
+            return false
+        if me.cfg.bound != 1:
+            return false
+        if me.cfg.backend != BACKEND_EMU:
+            return false
+        if me.cfg.mem_size < me.cfg.cq_base + me.cfg.queue_depth * CQE_BYTES:
+            return false
+        me.attached = true
+        # A real controller has no I/O queue until the host CREATEs one over the
+        # admin queue. Do exactly that, through the controller's own admin path.
+        me.dev.admin_submit(admin_create_cq_cmd(2, IO_QID, MAX_QUEUE_SIZE))
+        me.dev.admin_submit(admin_create_sq_cmd(3, IO_QID, MAX_QUEUE_SIZE, IO_QID))
+        me.dev.admin_process()
+        me.dev.admin_reap()
+        me.dev.admin_reap()
+        # Power-on the BAR0 property window so the host can read CAP/VS before
+        # it writes anything, exactly as it would on real silicon.
+        if me.regs_present():
+            me.reg_power_on()
+        true
+
+    """Why attach() refused — for an operator-visible verdict, not control flow."""
+    me attach_reason() -> text:
+        if me.cfg.valid != 1:
+            return "profile not found in SDN"
+        if me.cfg.bound != 1:
+            return "backend '" + me.cfg.backend + "' is declared but UNBOUND (no substrate wired)"
+        if me.cfg.backend != BACKEND_EMU:
+            return "backend '" + me.cfg.backend + "' has no driver binding"
+        "attached"
+
+    # ── BAR0 controller property (register) file ──────────────────────────────
+    # The registers live in the SAME `me.mem` byte array as the queues, at
+    # `cfg.reg_base`, and are read with the same `mmio_rd32`. There is one truth
+    # for a register value: those bytes. Layout and access rules are in
+    # `nvme_reg_defs.spl`; controller behaviour is in `nvme_reg_file.spl`.
+
+    """True when this profile declares a property window that fits in memory."""
+    me regs_present() -> bool:
+        if me.cfg.reg_base <= 0:
+            return false
+        me.cfg.reg_base + REG_SPAN <= me.mem.len()
+
+    me reg_addr(off: i64) -> i64:
+        me.cfg.reg_base + off
+
+    """Read one property dword out of BAR0."""
+    me reg_read32(off: i64) -> i64:
+        mmio_rd32(me.mem, me.cfg.reg_base + off)
+
+    """DEVICE-side store: bypasses access rules. Only the controller may use it."""
+    me reg_raw_store(w: RegWrite):
+        me.poke(MemWrite(addr: me.cfg.reg_base + w.off, width: 4, value: w.value))
+
+    """
+    HOST-side store, with access rules ENFORCED: RO and reserved bits ignore
+    the write, RW1C bits clear on a written '1', and a CC write that arrives
+    while CSTS.RDY is mid-transition is ignored in full.
+    """
+    me reg_write32(w: RegWrite):
+        val old: i64 = me.reg_read32(w.off)
+        if w.off == REG_CC:
+            val csts: i64 = me.reg_read32(REG_CSTS)
+            val eff: i64 = cc_write_effective(old, w.value, csts)
+            me.reg_raw_store(RegWrite(off: REG_CC, value: eff))
+            return ()
+        val acc = reg_access_for(w.off)
+        val nv: i64 = reg_apply_write32(old, w.value, acc)
+        me.reg_raw_store(RegWrite(off: w.off, value: nv))
+
+    """Power-on reset values: CAP and VS populated, every writable register 0."""
+    me reg_power_on():
+        val lo: i64 = cap_lo_for(me.cfg)
+        val hi: i64 = cap_hi_for(me.cfg)
+        val vs: i64 = vs_value()
+        me.reg_raw_store(RegWrite(off: REG_CAP, value: lo))
+        me.reg_raw_store(RegWrite(off: REG_CAP + 4, value: hi))
+        me.reg_raw_store(RegWrite(off: REG_VS, value: vs))
+        me.reg_raw_store(RegWrite(off: REG_CC, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_CSTS, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_AQA, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_ASQ, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_ASQ + 4, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_ACQ, value: 0))
+        me.reg_raw_store(RegWrite(off: REG_ACQ + 4, value: 0))
+
+    """
+    Advance the controller one step and publish the resulting CSTS.
+
+    On a Controller Reset (CC.EN 1 -> 0) the QUEUE state is discarded here —
+    shadow tail/head, phase tags and both doorbell dwords go back to their
+    initial values — while AQA/ASQ/ACQ are deliberately left alone.
+    """
+    me controller_step() -> bool:
+        if not me.regs_present():
+            return false
+        val cap_lo: i64 = me.reg_read32(REG_CAP)
+        val cc: i64 = me.reg_read32(REG_CC)
+        val csts: i64 = me.reg_read32(REG_CSTS)
+        val aqa: i64 = me.reg_read32(REG_AQA)
+        val mqes: i64 = cap_mqes_of(cap_lo)
+        val snap = RegSnapshot(cc: cc, csts: csts, aqa: aqa, mqes: mqes)
+        val st = reg_step(snap)
+        if not st.changed:
+            return false
+        me.reg_raw_store(RegWrite(off: REG_CSTS, value: st.csts))
+        if st.reset:
+            me.sq_tail = 0
+            me.cq_head = 0
+            me.cq_phase = 1
+            me.dev_sq_head = 0
+            me.dev_cq_tail = 0
+            me.dev_phase = 1
+            me.poke(MemWrite(addr: me.cfg.doorbell_base, width: 4, value: 0))
+            me.poke(MemWrite(addr: me.cfg.doorbell_base + me.cfg.doorbell_stride, width: 4, value: 0))
+        true
+
+    """CSTS.RDY."""
+    me controller_ready() -> bool:
+        if not me.regs_present():
+            return false
+        val csts: i64 = me.reg_read32(REG_CSTS)
+        bf_get(csts, bf_csts_rdy()) == 1
+
+    """CSTS.CFS — set when the controller refused to come ready."""
+    me controller_fatal() -> bool:
+        if not me.regs_present():
+            return false
+        val csts: i64 = me.reg_read32(REG_CSTS)
+        bf_get(csts, bf_csts_cfs()) == 1
+
+    """
+    The real initialization sequence: read CAP, write AQA/ASQ/ACQ, write CC
+    with CC.EN='1', then wait for CSTS.RDY (spec text lines 12174-12180).
+
+    Returns CSTS.RDY. A profile with no property window, or an AQA the
+    controller rejects, returns false — it never fakes readiness.
+    """
+    me bringup() -> bool:
+        if not me.attached:
+            return false
+        if not me.regs_present():
+            return false
+        val depth: i64 = me.cfg.queue_depth
+        val aqa: i64 = aqa_for_depth(depth)
+        me.reg_write32(RegWrite(off: REG_AQA, value: aqa))
+        me.reg_write32(RegWrite(off: REG_ASQ, value: me.cfg.sq_base))
+        me.reg_write32(RegWrite(off: REG_ASQ + 4, value: 0))
+        me.reg_write32(RegWrite(off: REG_ACQ, value: me.cfg.cq_base))
+        me.reg_write32(RegWrite(off: REG_ACQ + 4, value: 0))
+        val cce: i64 = cc_enable_value()
+        me.reg_write32(RegWrite(off: REG_CC, value: cce))
+        me.controller_step()
+        me.controller_ready()
+
+    """Clear CC.EN and let the Controller Reset run. Returns true once RDY is 0."""
+    me controller_disable() -> bool:
+        if not me.regs_present():
+            return false
+        val cc: i64 = me.reg_read32(REG_CC)
+        val ncc: i64 = bf_put(cc, bf_cc_en(), 0)
+        me.reg_write32(RegWrite(off: REG_CC, value: ncc))
+        me.controller_step()
+        not me.controller_ready()
+
+    """
+    THE READY GATE. True when this controller may accept and process commands.
+
+    CSTS.RDY is the controller's own statement that it can process commands
+    (NVMe Base 2.3 §3.5.1: the host waits for RDY=1 before submitting), so a
+    controller with RDY=0 must not fetch SQEs. Submissions made while it is 0
+    are DROPPED — no CQE is posted — rather than completed with an error
+    status: an error completion would require the controller to have processed
+    a command it is by definition not processing, and would let a host that
+    never enabled the device make forward progress through the CQ anyway.
+
+    A profile that declares NO property window (`reg_base` 0, e.g. `admin_emu`)
+    has no CSTS to read and is therefore ungated — that is a property of the
+    profile, not an escape hatch: the `emu` and `board` profiles both declare
+    one, so every transport that can actually run I/O is gated. Witness:
+    fw/nvme_ready_gate_check.spl.
+    """
+    me submission_allowed() -> bool:
+        if not me.regs_present():
+            return true
+        me.controller_ready()
+
+    # ── Host DMA region: where the host puts page data before it submits ─────
+    """Base of the host data-buffer region: immediately above the BAR window."""
+    me dma_base() -> i64:
+        me.cfg.mem_size
+
+    """Address of the page buffer for block `i`."""
+    me dma_page_addr(i: i64) -> i64:
+        me.dma_base() + i * PAGE_BYTES
+
+    """Address of the PRP list page (used only when nblocks > 2)."""
+    me prp_list_addr() -> i64:
+        me.dma_base() + DMA_PAGE_SLOTS * PAGE_BYTES
+
+    """Grow `me.mem` to cover the DMA region. Idempotent; no-op once done."""
+    me ensure_dma():
+        val need: i64 = me.dma_base() + DMA_SPAN_BYTES
+        while me.mem.len() < need:
+            me.mem.push(0)
+
+    """Store one page into memory at `addr` as PAGE_WORDS little-endian words."""
+    me dma_write_page(addr: i64, p: PageData):
+        var i: i64 = 0
+        while i < PAGE_WORDS:
+            me.poke(MemWrite(addr: addr + i * WORD_BYTES, width: WORD_BYTES, value: page_word(p, i)))
+            i = i + 1
+
+    """Read one page back out of memory at `addr`."""
+    me dma_read_page(addr: i64) -> PageData:
+        mem_read_page(me.mem, addr)
+
+    """Read/overwrite one word of a placed page buffer — the witness's lever.
+
+    This is how a test mutates host memory AFTER the SQE is built and BEFORE
+    the doorbell is rung. It touches nothing but `me.mem`.
+    """
+    me dma_poke_word(block: i64, word: i64, v: i64):
+        me.poke(MemWrite(addr: me.dma_page_addr(block) + word * WORD_BYTES, width: WORD_BYTES, value: v))
+
+    me dma_peek_word(block: i64, word: i64) -> i64:
+        mmio_rd64(me.mem, me.dma_page_addr(block) + word * WORD_BYTES)
+
+    """Lay `pages` out in the DMA region and build the PRP list when needed.
+
+    Returns the PRP2 value for a transfer of `pages.len()` blocks; PRP1 is
+    always `dma_page_addr(0)`.
+    """
+    me place_pages(pages: [PageData]) -> i64:
+        me.ensure_dma()
+        val n: i64 = pages.len()
+        var i: i64 = 0
+        while i < n:
+            me.dma_write_page(me.dma_page_addr(i), pages[i])
+            i = i + 1
+        if n <= 1:
+            return 0
+        if n == 2:
+            return me.dma_page_addr(1)
+        # > 2 blocks: PRP2 points at a list of the addresses of blocks 1..n-1.
+        val lst: i64 = me.prp_list_addr()
+        i = 1
+        while i < n:
+            me.poke(MemWrite(addr: lst + (i - 1) * WORD_BYTES, width: WORD_BYTES, value: me.dma_page_addr(i)))
+            i = i + 1
+        lst
+
+    # ── Host submission path: MEMORY WRITE, then DOORBELL ─────────────────────
+    """Write a 64-byte SQE into SQ memory at the shadow tail and advance it.
+
+    This does NOT notify the device — a real host must ring the doorbell.
+    """
+    me submit_sqe(c: NvmeCmd) -> bool:
+        if not me.attached:
+            return false
+        if not me.submission_allowed():
+            return false
+        if not cid_valid(c.cid):
+            return false
+        val depth: i64 = me.cfg.queue_depth
+        if depth <= 0:
+            return false
+        val base: i64 = me.cfg.sq_base + me.sq_tail * SQE_BYTES
+        if base < 0 or base + SQE_BYTES > me.mem.len():
+            return false
+        val bytes = sqe_encode(c)
+        var k: i64 = 0
+        while k < SQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.sq_tail + 1
+        me.sq_tail = nt % depth
+        true
+
+    """Write the shadow tail to SQ0TDBL. On the emu backend this IS the notify."""
+    me ring_sq_doorbell() -> i64:
+        if not me.attached:
+            return 0
+        me.poke(MemWrite(addr: me.cfg.doorbell_base, width: 4, value: me.sq_tail))
+        me.device_service()
+
+    # ── Device side of the emu substrate (what real silicon does) ─────────────
+    """Fetch every SQE up to the doorbell value, execute it, post phase-tagged CQEs."""
+    me device_service() -> i64:
+        if not me.submission_allowed():
+            return 0
+        val depth: i64 = me.cfg.queue_depth
+        if depth <= 0:
+            return 0
+        val want: i64 = mmio_rd32(me.mem, me.cfg.doorbell_base) % depth
+        var done: i64 = 0
+        var guard: i64 = 0
+        while me.dev_sq_head != want and guard < depth:
+            val base: i64 = me.cfg.sq_base + me.dev_sq_head * SQE_BYTES
+            val cmd = sqe_decode(me.mem, base)
+            val is_prp: bool = sqe_is_prp(me.mem, base)
+            me.dev.io_submit(IO_QID, cmd)
+            me.dev.io_process()
+            while me.dev.io_completions(IO_QID) > 0:
+                val cpl = me.dev.io_reap(IO_QID)
+                # READ, PRP-addressed: the device DMAs the result INTO the host
+                # buffer at the PRP addresses. The completion queue carries only
+                # status — never the data — which is what a real controller does.
+                if is_prp and cmd.opcode == OP_READ:
+                    me.dma_writeback(cmd, cpl)
+                me.post_cqe(cpl)
+            val nh: i64 = me.dev_sq_head + 1
+            me.dev_sq_head = nh % depth
+            me.serviced = me.serviced + 1
+            done = done + 1
+            guard = guard + 1
+        done
+
+    """DEVICE-side DMA of a read result into the host buffer named by the PRPs."""
+    me dma_writeback(cmd: NvmeCmd, cpl: NvmeCpl):
+        var i: i64 = 0
+        val n: i64 = cpl_blocks_transferred(cpl)
+        while i < n:
+            val addr: i64 = prp_page_addr(me.mem, cmd.prp1, cmd.prp2, cmd.nblocks, i)
+            val pg: PageData = cpl_page_at(cpl, i)
+            me.dma_write_page(addr, pg)
+            i = i + 1
+
+    """Write one CQE into CQ memory with the DEVICE's current phase; wrap toggles it."""
+    me post_cqe(p: NvmeCpl):
+        val depth: i64 = me.cfg.queue_depth
+        if depth <= 0:
+            return ()
+        val base: i64 = me.cfg.cq_base + me.dev_cq_tail * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return ()
+        val bytes = cqe_encode(p, me.dev_phase, me.dev_sq_head)
+        var k: i64 = 0
+        while k < CQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.dev_cq_tail + 1
+        me.dev_cq_tail = nt % depth
+        if me.dev_cq_tail == 0:
+            me.dev_phase = 1 - me.dev_phase
+
+    # ── Host completion path: PHASE-TAG POLL ──────────────────────────────────
+    """True when CQ[head]'s phase bit matches what the host expects."""
+    me cq_ready() -> bool:
+        if not me.attached:
+            return false
+        val base: i64 = me.cfg.cq_base + me.cq_head * CQE_BYTES
+        if base < 0 or base + CQE_BYTES > me.mem.len():
+            return false
+        cqe_phase_of(me.mem, base) == me.cq_phase
+
+    """Consume CQ[head] if and only if its phase tag matches.
+
+    A stale entry (phase bit still from the previous lap) is NOT consumed —
+    `cqe_none()` is returned and head/phase are untouched. This is the classic
+    real-driver bug this transport exists to make testable.
+    """
+    me poll_cq() -> NvmeCpl:
+        if not me.cq_ready():
+            return cqe_none()
+        val depth: i64 = me.cfg.queue_depth
+        val base: i64 = me.cfg.cq_base + me.cq_head * CQE_BYTES
+        val p = cqe_decode(me.mem, base)
+        val nh: i64 = me.cq_head + 1
+        me.cq_head = nh % depth
+        if me.cq_head == 0:
+            me.cq_phase = 1 - me.cq_phase
+        me.poke(MemWrite(addr: me.cfg.doorbell_base + me.cfg.doorbell_stride, width: 4, value: me.cq_head))
+        p
+
+    """One full host round-trip: memory write -> doorbell -> phase-tagged poll.
+
+    THIS is the shared submission path. It is `me` (not a free function taking
+    HostNvme) because Simple values are copied by value: a free function would
+    mutate a copy and silently lose the queue state. The config demonstration
+    calls exactly this method under every profile.
+    """
+    me exec_io(c: NvmeCmd) -> NvmeCpl:
+        if not me.submit_sqe(c):
+            return cqe_none()
+        me.ring_sq_doorbell()
+        me.poll_cq()
+
+    # ── PRP-ADDRESSED submission (plan D11) ──────────────────────────────────
+    """
+    Place `pages` in host memory, then write a PRP-ADDRESSED SQE that points at
+    them. The payload is NOT in the SQE — only its addresses are.
+
+    Does NOT ring the doorbell, deliberately: between this call and
+    `ring_sq_doorbell()` the host memory at the PRP address is still live and a
+    test may change it. The device must then see the CHANGED bytes. That gap is
+    the non-vacuity witness (fw/prp_wire_witness_check.spl) and is the reason
+    this is a separate method rather than folded into `exec_io_prp`.
+
+    MDTS is enforced HERE, before a single payload byte is placed: an
+    over-MDTS transfer is refused pre-transfer, never truncated.
+    """
+    me submit_prp(c: NvmeCmd, pages: [PageData]) -> bool:
+        if not me.attached:
+            return false
+        if not me.submission_allowed():
+            return false
+        if not cid_valid(c.cid):
+            return false
+        if c.nblocks > MDTS_BLOCKS:
+            return false
+        if c.nblocks > DMA_PAGE_SLOTS:
+            return false
+        if pages.len() > 0 and pages.len() < c.nblocks:
+            return false
+        val depth: i64 = me.cfg.queue_depth
+        if depth <= 0:
+            return false
+        val base: i64 = me.cfg.sq_base + me.sq_tail * SQE_BYTES
+        if base < 0 or base + SQE_BYTES > me.mem.len():
+            return false
+        me.ensure_dma()
+        var prp2: i64 = 0
+        if pages.len() > 0:
+            prp2 = me.place_pages(pages)
+        else:
+            # READ: no host data to place, but the device still needs somewhere
+            # to put the result. Reserve the same slots and describe them.
+            prp2 = me.reserve_prp(c.nblocks)
+        val bytes = sqe_encode_prp(c, me.dma_page_addr(0), prp2)
+        var k: i64 = 0
+        while k < SQE_BYTES:
+            me.mem[base + k] = bytes[k]
+            k = k + 1
+        val nt: i64 = me.sq_tail + 1
+        me.sq_tail = nt % depth
+        true
+
+    """Describe `n` empty page slots for a read, building the PRP list if needed.
+
+    The slots are ZEROED first. Without that, a read that transfers nothing
+    would leave the previous command's page sitting in the buffer and
+    `collect_prp` would hand it back as if the device had just produced it —
+    a stale-buffer false pass. Fail to empty, not to whatever was there.
+    """
+    me reserve_prp(n: i64) -> i64:
+        me.ensure_dma()
+        val zp: PageData = page_zero()
+        var z: i64 = 0
+        while z < n:
+            me.dma_write_page(me.dma_page_addr(z), zp)
+            z = z + 1
+        if n <= 1:
+            return 0
+        if n == 2:
+            return me.dma_page_addr(1)
+        val lst: i64 = me.prp_list_addr()
+        var i: i64 = 1
+        while i < n:
+            me.poke(MemWrite(addr: lst + (i - 1) * WORD_BYTES, width: WORD_BYTES, value: me.dma_page_addr(i)))
+            i = i + 1
+        lst
+
+    """Collect a completion's data back out of the DMA region the device wrote."""
+    me collect_prp(p: NvmeCpl, n: i64) -> NvmeCpl:
+        var ps: [PageData] = []
+        var i: i64 = 0
+        while i < n:
+            val pg: PageData = me.dma_read_page(me.dma_page_addr(i))
+            ps.push(pg)
+            i = i + 1
+        cpl_make_pages(p.cid, p.status, ps)
+
+    """One full PRP round-trip. Data rides MEMORY; the SQE rides addresses."""
+    me exec_io_prp(c: NvmeCmd, pages: [PageData]) -> NvmeCpl:
+        if not me.submit_prp(c, pages):
+            return cqe_none()
+        me.ring_sq_doorbell()
+        val p = me.poll_cq()
+        if cqe_is_none(p):
+            return p
+        if c.opcode != OP_READ:
+            return p
+        if p.status != SC_SUCCESS:
+            # A failed read transferred an undefined amount (NVMe Base 2.3);
+            # the status is the answer, and no buffer content is claimed.
+            return p
+        # HOW MANY PAGES TO COLLECT comes from the command the HOST issued, not
+        # from the CQE: a real 16-byte completion carries status, not data, so
+        # `cpl_blocks_transferred` on a wire-decoded CQE is always 1. On success
+        # the whole requested range moved, so `c.nblocks` is the honest count.
+        me.collect_prp(p, c.nblocks)
+
+"""Sentinel returned when no completion with the expected phase is available."""
+fn cqe_none() -> NvmeCpl:
+    cpl_make(0, SC_INVALID_FIELD, NULL_IDX)
+
+fn cqe_is_none(p: NvmeCpl) -> bool:
+    p.data == NULL_IDX and p.status == SC_INVALID_FIELD
+
+fn nvme_host_driver_selftest() -> i64:
+    var f: i64 = 0
+    var h = host_nvme_open(BACKEND_EMU)
+    f = f + expect_eq(bool_to_int(h.attach()), 1, "emu profile attaches")
+    # MemWrite struct param must round-trip BOTH scalars (CONVENTIONS mitigation #1).
+    h.poke(MemWrite(addr: 100, width: 4, value: 0x11223344))
+    f = f + expect_eq(h.peek32(100), 0x11223344, "poke/peek32 round-trips value at addr")
+    h.poke(MemWrite(addr: 200, width: 2, value: 0xBEEF))
+    f = f + expect_eq(h.peek32(200), 0xBEEF, "poke width=2 writes exactly 2 bytes")
+    f = f + expect_eq(h.peek32(100), 0x11223344, "second poke did not disturb the first address")
+    # The DMA region is sized for exactly one MDTS-sized transfer plus a list page.
+    f = f + expect_eq(DMA_PAGE_SLOTS, MDTS_BLOCKS, "the DMA region holds exactly MDTS_BLOCKS page slots")
+    f = f + expect_eq(DMA_SPAN_BYTES, (DMA_PAGE_SLOTS + 1) * PAGE_BYTES, "DMA_SPAN_BYTES == (slots + 1 list page) * PAGE_BYTES")
+    f = f + expect_eq(h.dma_base(), h.cfg.mem_size, "the DMA region starts ABOVE the profile's BAR window")
+    f = f + expect_eq(h.dma_page_addr(1) - h.dma_page_addr(0), PAGE_BYTES, "page slots are one full page apart")
+    f = f + expect_eq(h.prp_list_addr(), h.dma_page_addr(DMA_PAGE_SLOTS), "the PRP list page follows the last page slot")
+    # Lazy: a driver that never issues a PRP command never pays for the region.
+    f = f + expect_eq(bool_to_int(h.mem.len() < h.dma_base() + DMA_SPAN_BYTES), 1, "the DMA region is NOT allocated until a PRP command needs it")
+    h.ensure_dma()
+    f = f + expect_eq(h.mem.len(), h.dma_base() + DMA_SPAN_BYTES, "ensure_dma() allocates exactly the DMA span")
+    val before: i64 = h.mem.len()
+    h.ensure_dma()
+    f = f + expect_eq(h.mem.len(), before, "ensure_dma() is idempotent")
+    # A page round-trips through memory whole, not word-0-only.
+    h.dma_write_page(h.dma_page_addr(0), page_fill(0x1234))
+    f = f + expect_eq(h.dma_peek_word(0, 0), 0x1234, "dma_write_page wrote word 0")
+    f = f + expect_eq(h.dma_peek_word(0, 511), 0x1234, "dma_write_page wrote the LAST word too")
+    f = f + expect_eq(page_word(h.dma_read_page(h.dma_page_addr(0)), 511), 0x1234, "dma_read_page reads the whole page back")
+    f

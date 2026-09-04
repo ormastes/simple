@@ -1,0 +1,176 @@
+"""
+nand_test_slots — the single source of truth for `.nandram` word indices.
+
+The `.nandram` region is 64 words / 256 bytes. Each word carries a distinct
+semantic. Until this module existed those indices were BARE INTEGERS in three
+independent places with no shared definition and no drift detection:
+
+  1. fw_rv32/entry.spl              — ~250 `_nand_ram_load(<int>)` / `_nand_ram_store(<int>, ..)` sites
+  2. examples/09_embedded/fpga_riscv/rtl/tb_rv32_nvme_fw_in_loop.vhd
+                                    — `ram(G_NANDRAM_WORD + <int>)` fault writes and counter reads
+  3. scripts/qemu/qemu_rv32_nvme_fw_in_loop.shs
+                                    — GDB `set {unsigned int}<addr>` / `x/wx` at computed offsets
+
+Renumber a slot in (1) and (2)/(3) silently inject a fault into the wrong field
+or read a counter that has moved — a test that passes while measuring nothing.
+Nothing detected that. This module plus nand_slot_drift_check.spl closes it.
+
+Host-only, like const_drift_check.spl / ipc_drift_check.spl: entry.spl and the
+logic*.spl boot graph do NOT `use` this module, so the freestanding rv32 boot
+path stays decoupled and no-alloc. Run:
+
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/nand_slot_drift_check.spl
+
+PROVENANCE OF THE NAMES: derived by reading every use site in entry.spl at
+2026-09-01. The region was and is otherwise undocumented — there is no prior
+layout comment anywhere in the tree. Names marked (?) below are inferred from a
+single use site and should be confirmed by whoever next touches that path.
+Role tags: [inject] driven by a test harness; [observe] read as evidence;
+[state] firmware-internal working state.
+
+See doc/03_plan/hardware/nvme_emu_first_increment_plan.md §3.
+"""
+
+# ── identity / lifecycle ────────────────────────────────────────────────────
+val NAND_SLOT_SIGNATURE          = 0    # [state]   0x4E414E44 "NAND", startup sentinel
+val NAND_SLOT_LIFECYCLE          = 1    # [state]   rv32_nand_lifecycle_next() state
+val NAND_SLOT_PAGE_PROGRAMMED    = 2    # [state]   0 = erased, 1 = programmed
+val NAND_SLOT_PAGE_DATA          = 3    # [state]   the stored page word
+val NAND_SLOT_CELL_LEVEL         = 4    # [inject]  Vt level; testbench forces read level here
+val NAND_SLOT_READ_REFERENCE     = 5    # [state]   current read reference / Vref
+val NAND_SLOT_READS_SINCE_PROG   = 6    # [state]   reset on erase/program, bumped per read
+val NAND_SLOT_REFRESHES          = 7    # [observe] refresh count
+val NAND_SLOT_RECOVERIES         = 8    # [observe] recovery count
+val NAND_SLOT_STATUS             = 9    # [observe] last op status / error code
+
+# ── queues ─────────────────────────────────────────────────────────────────
+val NAND_SLOT_ADMINQ_ID          = 10   # [state]
+val NAND_SLOT_ADMINQ_DEPTH       = 11   # [state]
+val NAND_SLOT_IOQ_ID             = 12   # [state]
+val NAND_SLOT_IOQ_DEPTH          = 13   # [state]
+val NAND_SLOT_ADMINQ_STATE       = 14   # [state]   rv32_nand_queue_next() state
+val NAND_SLOT_IOQ_STATE          = 15   # [state]
+val NAND_SLOT_SQ_TAIL            = 16   # [state]
+val NAND_SLOT_SQ_HEAD            = 17   # [state]
+val NAND_SLOT_CQ_TAIL            = 18   # [state]
+val NAND_SLOT_CQ_HEAD            = 19   # [state]
+val NAND_SLOT_COMPLETIONS        = 20   # [observe] completions posted
+
+# ── read disturb / neighbor ────────────────────────────────────────────────
+val NAND_SLOT_READ_COUNT         = 21   # [observe] reads since last remap (disturb driver)
+val NAND_SLOT_NEIGHBOR_LEVEL     = 22   # [inject]  neighbor cell Vt level
+
+# ── recovery / remap ───────────────────────────────────────────────────────
+val NAND_SLOT_FCR_COUNT          = 23   # [observe] (?) bumped only with REMAPS below — see FINDING 1
+val NAND_SLOT_REMAPS             = 24   # [observe] remap count
+val NAND_SLOT_FORCE_VERIFY_FAIL  = 25   # [inject]  testbench forces post-remap verify failure
+val NAND_SLOT_RECOVER_DIRECTION  = 26   # [state]   -1 / +1 read-retry ladder direction
+val NAND_SLOT_RECOVER_INDEX      = 27   # [observe] ladder step that succeeded
+val NAND_SLOT_ERROR_BITS         = 28   # [observe] sensed bit-error count
+val NAND_SLOT_ECC_STRENGTH       = 29   # [state]   correctable-bit budget
+val NAND_SLOT_MEDIA_PHASE        = 30   # [observe] media-op phase marker (1..4)
+val NAND_SLOT_EVIDENCE_ONE       = 31   # [observe] (?) init 1, never written again — see FINDING 2
+
+# ── programmed-level / neighbor working set ────────────────────────────────
+val NAND_SLOT_PROGRAMMED_LEVEL   = 32   # [state]
+val NAND_SLOT_NEIGHBOR_DATA      = 33   # [inject]
+val NAND_SLOT_NEIGHBOR_PROG      = 34   # [inject]
+val NAND_SLOT_RETRY_INDEX_DOWN   = 35   # [observe] ladder index that worked, direction -1
+val NAND_SLOT_RETRY_INDEX_UP     = 36   # [observe] ladder index that worked, direction +1
+val NAND_SLOT_ECC_SYNDROME_PAGE  = 37   # [state]
+val NAND_SLOT_ECC_SYNDROME_NBR   = 38   # [state]
+
+# ── staged remap ───────────────────────────────────────────────────────────
+val NAND_SLOT_REMAP_STAGED       = 39   # [state]   1 once a remap is staged
+val NAND_SLOT_REMAP_DATA         = 40   # [observe]
+val NAND_SLOT_REMAP_LEVEL        = 41   # [state]
+val NAND_SLOT_REMAP_ECC          = 42   # [state]
+val NAND_SLOT_REMAP_PROGRAMMED   = 43   # [state]
+val NAND_SLOT_REMAPPED_FLAG      = 44   # [observe] 1 if the live page came from a remap
+val NAND_SLOT_LAST_CORRECTED     = 45   # [state]   last ECC-corrected data word
+
+# ── service ────────────────────────────────────────────────────────────────
+val NAND_SLOT_QUEUE_FULL_EVENTS  = 46   # [observe] SQ/CQ full backpressure events
+val NAND_SLOT_SERVICE_COOKIE     = 47   # [state]   NVME_SERVICE_COOKIE re-init sentinel
+val NAND_SLOT_ADMINQ_READY       = 48   # [state]   1 once the admin queue is up
+
+# Highest live slot + 1. The region holds 64 words; slots 49..63 are spare.
+val NAND_SLOT_COUNT              = 49
+val NAND_RAM_WORDS               = 64
+
+# NOT a slot: entry.spl:564-566 stores to index 64 and requires the readback to
+# be 0, proving the bounds check rejects an out-of-region write. Deliberately
+# == NAND_RAM_WORDS.
+val NAND_SLOT_OOB_PROBE          = 64
+
+fn nand_slot_name(i: i64) -> text:
+    if i == 0: return "SIGNATURE"
+    if i == 1: return "LIFECYCLE"
+    if i == 2: return "PAGE_PROGRAMMED"
+    if i == 3: return "PAGE_DATA"
+    if i == 4: return "CELL_LEVEL"
+    if i == 5: return "READ_REFERENCE"
+    if i == 6: return "READS_SINCE_PROG"
+    if i == 7: return "REFRESHES"
+    if i == 8: return "RECOVERIES"
+    if i == 9: return "STATUS"
+    if i == 10: return "ADMINQ_ID"
+    if i == 11: return "ADMINQ_DEPTH"
+    if i == 12: return "IOQ_ID"
+    if i == 13: return "IOQ_DEPTH"
+    if i == 14: return "ADMINQ_STATE"
+    if i == 15: return "IOQ_STATE"
+    if i == 16: return "SQ_TAIL"
+    if i == 17: return "SQ_HEAD"
+    if i == 18: return "CQ_TAIL"
+    if i == 19: return "CQ_HEAD"
+    if i == 20: return "COMPLETIONS"
+    if i == 21: return "READ_COUNT"
+    if i == 22: return "NEIGHBOR_LEVEL"
+    if i == 23: return "FCR_COUNT"
+    if i == 24: return "REMAPS"
+    if i == 25: return "FORCE_VERIFY_FAIL"
+    if i == 26: return "RECOVER_DIRECTION"
+    if i == 27: return "RECOVER_INDEX"
+    if i == 28: return "ERROR_BITS"
+    if i == 29: return "ECC_STRENGTH"
+    if i == 30: return "MEDIA_PHASE"
+    if i == 31: return "EVIDENCE_ONE"
+    if i == 32: return "PROGRAMMED_LEVEL"
+    if i == 33: return "NEIGHBOR_DATA"
+    if i == 34: return "NEIGHBOR_PROG"
+    if i == 35: return "RETRY_INDEX_DOWN"
+    if i == 36: return "RETRY_INDEX_UP"
+    if i == 37: return "ECC_SYNDROME_PAGE"
+    if i == 38: return "ECC_SYNDROME_NBR"
+    if i == 39: return "REMAP_STAGED"
+    if i == 40: return "REMAP_DATA"
+    if i == 41: return "REMAP_LEVEL"
+    if i == 42: return "REMAP_ECC"
+    if i == 43: return "REMAP_PROGRAMMED"
+    if i == 44: return "REMAPPED_FLAG"
+    if i == 45: return "LAST_CORRECTED"
+    if i == 46: return "QUEUE_FULL_EVENTS"
+    if i == 47: return "SERVICE_COOKIE"
+    if i == 48: return "ADMINQ_READY"
+    if i == 64: return "OOB_PROBE"
+    "UNKNOWN"
+
+export NAND_SLOT_SIGNATURE, NAND_SLOT_LIFECYCLE, NAND_SLOT_PAGE_PROGRAMMED
+export NAND_SLOT_PAGE_DATA, NAND_SLOT_CELL_LEVEL, NAND_SLOT_READ_REFERENCE
+export NAND_SLOT_READS_SINCE_PROG, NAND_SLOT_REFRESHES, NAND_SLOT_RECOVERIES
+export NAND_SLOT_STATUS, NAND_SLOT_ADMINQ_ID, NAND_SLOT_ADMINQ_DEPTH
+export NAND_SLOT_IOQ_ID, NAND_SLOT_IOQ_DEPTH, NAND_SLOT_ADMINQ_STATE
+export NAND_SLOT_IOQ_STATE, NAND_SLOT_SQ_TAIL, NAND_SLOT_SQ_HEAD
+export NAND_SLOT_CQ_TAIL, NAND_SLOT_CQ_HEAD, NAND_SLOT_COMPLETIONS
+export NAND_SLOT_READ_COUNT, NAND_SLOT_NEIGHBOR_LEVEL, NAND_SLOT_FCR_COUNT
+export NAND_SLOT_REMAPS, NAND_SLOT_FORCE_VERIFY_FAIL, NAND_SLOT_RECOVER_DIRECTION
+export NAND_SLOT_RECOVER_INDEX, NAND_SLOT_ERROR_BITS, NAND_SLOT_ECC_STRENGTH
+export NAND_SLOT_MEDIA_PHASE, NAND_SLOT_EVIDENCE_ONE, NAND_SLOT_PROGRAMMED_LEVEL
+export NAND_SLOT_NEIGHBOR_DATA, NAND_SLOT_NEIGHBOR_PROG, NAND_SLOT_RETRY_INDEX_DOWN
+export NAND_SLOT_RETRY_INDEX_UP, NAND_SLOT_ECC_SYNDROME_PAGE, NAND_SLOT_ECC_SYNDROME_NBR
+export NAND_SLOT_REMAP_STAGED, NAND_SLOT_REMAP_DATA, NAND_SLOT_REMAP_LEVEL
+export NAND_SLOT_REMAP_ECC, NAND_SLOT_REMAP_PROGRAMMED, NAND_SLOT_REMAPPED_FLAG
+export NAND_SLOT_LAST_CORRECTED, NAND_SLOT_QUEUE_FULL_EVENTS, NAND_SLOT_SERVICE_COOKIE
+export NAND_SLOT_ADMINQ_READY, NAND_SLOT_COUNT, NAND_RAM_WORDS, NAND_SLOT_OOB_PROBE
+export nand_slot_name

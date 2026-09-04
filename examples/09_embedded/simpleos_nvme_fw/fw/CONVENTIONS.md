@@ -5,11 +5,30 @@ Written in pure Simple. These conventions exist to work *with* two confirmed sel
 compiler bugs while keeping the code production-shaped.
 
 ## Module layout
-- **MDSOC-only (driver tier).** Domains layer strictly downward (HIL → FTL → FIL; every
-  cross-domain import points down), composition over inheritance, no shared mutable global, and
-  **no ECS** — `use std.ecs` is forbidden for drivers per the architecture Layer Rules
-  (`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md`). See the README's
-  "MDSOC vs MDSOC+" note for why a driver is MDSOC-only even though req 4 is labelled "MDSOC+".
+- **MDSOC everywhere; the ECS business layer is scoped *per dimension*, not per artifact.**
+  Domains layer strictly downward (HIL → FTL → FIL; every cross-domain import points down),
+  composition over inheritance, no shared mutable global. CLAUDE.md's rule — "MDSOC outer + ECS
+  business layer for userland services/apps; kernel/drivers stay MDSOC-only" — is applied to each
+  dimension separately, because an SSD spans both classes:
+  - **HOST** (`hil*`, `nvme_*`, `fw_pool`, `dram`, `power_thermal`, `openssd_config`) and
+    **FTL** (`ftl*`, `rain`, `rel_*`, `hooks`, `sandbox`) are **service-class**. Target:
+    **MDSOC+ = MDSOC outer + ECS inner**. `use std.ecs` is *permitted* here.
+  - **NAND/FIL** (`fil*`, `nd_types`) is **driver-class**: **MDSOC-only**, and `use std.ecs`
+    stays **forbidden** — "drivers are IO-bound state machines, not entity graphs"
+    (`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md` Layer Rules).
+  - `nvme_types` is the shared frozen interface; `firmware.spl` is the composition root and is
+    the only module allowed to name more than one dimension. The 4 harness modules
+    (`sim_main`, `test_fw`, `fw_layer_smoke`, `nand_migration_capture_main`) are harness-tier,
+    outside all dimensions. Each `*_check.spl` takes its subject module's dimension.
+- **Current state: pre-migration.** No ECS exists in this tree yet — `grep -r "use std.ecs" fw/`
+  still returns nothing, and every module is plain MDSOC today. The bullet above states the
+  **target** rule that the migration is executed against, not what is built. Controlling plan:
+  `doc/03_plan/hardware/nvme_mdsoc_plus_layer_architecture.md` (phases 0-8); spine
+  `doc/03_plan/hardware/nvme_complete_fw_mdsoc_offload_master_plan.md` §3. Ownership of the
+  `rel_*` reliability group (FTL policy vs NAND-owned retry ladder) is an **open question**,
+  decided before Phase 3 — see that plan's S5.
+- Downward-only layering is gated by `scripts/check/check-nvme-layer-dependencies.shs`, which
+  parses the `use` graph of `fw/*.spl` and ratchets against the known pre-migration offenders.
 - All modules are flat in `fw/`; the frozen shared interface is `nvme_types.spl`.
 - Import siblings with the **bare** form: `use nvme_types.*`, `use fil_nand.*`, … (the
   package-qualified form `use simpleos_nvme_fw.fw.X.*` emits an E1034 resolution warning).

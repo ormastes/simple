@@ -1,0 +1,222 @@
+"""
+nvme_reg_defs — NVMe controller property (register) LAYOUT and ACCESS RULES.
+
+Pure data + free functions, no `impl`, nothing mutates — same tier and same
+idiom as `nvme_mmio.spl`, which this module deliberately extends rather than
+parallels: a register dword lives in the SAME flat `[i64]` byte array that
+carries the SQ/CQ, is read with the SAME `mmio_rd32` accessor, and is addressed
+at `TransportProfile.reg_base + <offset>`. There is exactly one truth for a
+register value: the bytes in that array.
+
+REGISTER MAP (offsets from BAR0 + 0, NVMe Base 2.3):
+  00h  CAP   8  RO   Controller Capabilities        (Figure 36, line 7612)
+  08h  VS    4  RO   Version                        (Figure 37)
+  14h  CC    4  RW   Controller Configuration       (Figure 41, line 8167)
+  1Ch  CSTS  4  RO/RW1C  Controller Status          (Figure 42, line 8549)
+  24h  AQA   4  RW   Admin Queue Attributes         (Figure 44, line 8807)
+  28h  ASQ   8  RW   Admin SQ Base Address          (Figure 45, line 8854)
+  30h  ACQ   8  RW   Admin CQ Base Address          (Figure 46, line 8891)
+
+Bit positions are taken from those figures. Field-description anchors in
+/mnt/data/nvme-specs/nvme_base_2.3.txt:
+  CAP.MPSMAX 7748, CAP.MPSMIN 7754, CAP.CSS 7802, CAP.DSTRD 7852, CAP.TO 7872,
+  CAP.CQR 7988, CAP.MQES 7998, CC.IOCQES 8225, CC.IOSQES 8238, CC.SHN 8284,
+  CC.MPS 8349, CC.CSS 8382, CC.EN 8492, CSTS.NSSRO 8604, CSTS.SHST 8613,
+  CSTS.CFS 8721, CSTS.RDY 8727, AQA.ACQS 8836, AQA.ASQS 8842.
+No spec prose is reproduced here; only field name / offset / width / access /
+reset, which are facts.
+
+ILLUSTRATIVE values (invented for THIS device, not read from the spec) are
+marked inline with the word ILLUSTRATIVE.
+
+WHY THE BIT FIELDS ARE NULLARY FUNCTIONS AND NOT `val` CONSTANTS: a module-level
+`val` holding a STRUCT reads back zero-initialized when it is passed as a
+function ARGUMENT (direct field reads on it are fine, and binding it to a local
+first does not help — the copy is broken too). `val CC_EN = BitField(shift: 0,
+width: 1)` therefore made `bf_mask(CC_EN)` return 0 rather than 1, silently, in
+every caller. Confirmed live on this seed; the natural, compact form of this
+code is the one that breaks, so it is filed rather than quietly worked around:
+doc/08_tracking/bug/interp_module_val_struct_zeroed_as_call_arg_2026-09-01.md
+"""
+
+use nvme_types.*
+
+# ── Register offsets within the BAR0 property window ──────────────────────────
+val REG_CAP:  i64 = 0x00
+val REG_VS:   i64 = 0x08
+val REG_CC:   i64 = 0x14
+val REG_CSTS: i64 = 0x1C
+val REG_AQA:  i64 = 0x24
+val REG_ASQ:  i64 = 0x28
+val REG_ACQ:  i64 = 0x30
+"""Bytes of BAR0 property space this device implements (00h..37h inclusive)."""
+val REG_SPAN: i64 = 0x38
+
+# ── A packed bit field: shift + width, per NVMe figure bit ranges ─────────────
+struct BitField:
+    shift: i64
+    width: i64
+
+fn bf_lowmask(f: BitField) -> i64:
+    (1 << f.width) - 1
+
+fn bf_mask(f: BitField) -> i64:
+    bf_lowmask(f) << f.shift
+
+fn bf_get(v: i64, f: BitField) -> i64:
+    (v >> f.shift) & bf_lowmask(f)
+
+fn bf_put(v: i64, f: BitField, x: i64) -> i64:
+    (v & not32(bf_mask(f))) | ((x & bf_lowmask(f)) << f.shift)
+
+"""Bitwise complement within a 32-bit dword (Simple has no `~` operator)."""
+fn not32(m: i64) -> i64:
+    0xFFFFFFFF ^ m
+
+fn mask32(v: i64) -> i64:
+    v & 0xFFFFFFFF
+
+# ── CAP (00h), low dword: bits 31:00 ─────────────────────────────────────────
+fn bf_cap_mqes() -> BitField:
+    BitField(shift: 0,  width: 16)   # 15:00
+fn bf_cap_cqr() -> BitField:
+    BitField(shift: 16, width: 1)    # 16
+fn bf_cap_ams() -> BitField:
+    BitField(shift: 17, width: 2)    # 18:17
+fn bf_cap_to() -> BitField:
+    BitField(shift: 24, width: 8)    # 31:24
+# CAP high dword: spec bit N lives at (N - 32) here.
+fn bf_cap_dstrd() -> BitField:
+    BitField(shift: 0,  width: 4)   # 35:32
+fn bf_cap_css() -> BitField:
+    BitField(shift: 5,  width: 8)   # 44:37
+fn bf_cap_mpsmin() -> BitField:
+    BitField(shift: 16, width: 4)   # 51:48
+fn bf_cap_mpsmax() -> BitField:
+    BitField(shift: 20, width: 4)   # 55:52
+
+# ── CC (14h) ─────────────────────────────────────────────────────────────────
+fn bf_cc_en() -> BitField:
+    BitField(shift: 0,  width: 1)    # 00
+fn bf_cc_css() -> BitField:
+    BitField(shift: 4,  width: 3)    # 06:04
+fn bf_cc_mps() -> BitField:
+    BitField(shift: 7,  width: 4)    # 10:07
+fn bf_cc_ams() -> BitField:
+    BitField(shift: 11, width: 3)    # 13:11
+fn bf_cc_shn() -> BitField:
+    BitField(shift: 14, width: 2)    # 15:14
+fn bf_cc_iosqes() -> BitField:
+    BitField(shift: 16, width: 4)    # 19:16
+fn bf_cc_iocqes() -> BitField:
+    BitField(shift: 20, width: 4)    # 23:20
+# CC bits 03:01 and 31:24 are Reserved (RO, reset 0h) in this device.
+
+# ── CSTS (1Ch) ───────────────────────────────────────────────────────────────
+fn bf_csts_rdy() -> BitField:
+    BitField(shift: 0, width: 1)    # 00  RO
+fn bf_csts_cfs() -> BitField:
+    BitField(shift: 1, width: 1)    # 01  RO
+fn bf_csts_shst() -> BitField:
+    BitField(shift: 2, width: 2)    # 03:02 RO
+fn bf_csts_nssro() -> BitField:
+    BitField(shift: 4, width: 1)    # 04  RW1C
+fn bf_csts_pp() -> BitField:
+    BitField(shift: 5, width: 1)    # 05  RO
+
+# ── AQA (24h) ────────────────────────────────────────────────────────────────
+fn bf_aqa_asqs() -> BitField:
+    BitField(shift: 0,  width: 12)    # 11:00 RW
+fn bf_aqa_acqs() -> BitField:
+    BitField(shift: 16, width: 12)    # 27:16 RW
+# AQA bits 15:12 and 31:28 are Reserved.
+
+# CC.SHN / CSTS.SHST encodings.
+val SHN_NONE:   i64 = 0
+val SHN_NORMAL: i64 = 1
+val SHN_ABRUPT: i64 = 2
+val SHST_NORMAL:   i64 = 0
+val SHST_OCCURRING: i64 = 1
+val SHST_COMPLETE: i64 = 2
+
+# ── Per-dword access rules ───────────────────────────────────────────────────
+"""Which bits of one 32-bit property dword a host write may change."""
+struct RegAccess:
+    rw:   i64   # bits the host may set/clear freely
+    rw1c: i64   # bits cleared when the host writes a '1' (never set by a write)
+
+"""Access rules for the dword at BAR0 offset `off`. Unknown offsets are RO."""
+fn reg_access_for(off: i64) -> RegAccess:
+    if off == REG_CC:
+        # EN(0) | CSS(6:4) | MPS(10:7) | AMS(13:11) | SHN(15:14) | IOSQES(19:16) | IOCQES(23:20)
+        return RegAccess(rw: 0x00FFFFF1, rw1c: 0)
+    if off == REG_CSTS:
+        # Every field is RO except NSSRO, which is RW1C (Figure 42 line 8604).
+        return RegAccess(rw: 0, rw1c: bf_mask(bf_csts_nssro()))
+    if off == REG_AQA:
+        return RegAccess(rw: bf_mask(bf_aqa_asqs()) | bf_mask(bf_aqa_acqs()), rw1c: 0)
+    if off == REG_ASQ or off == REG_ACQ:
+        # Low dword: bits 11:00 are reserved — the base is 4 KiB aligned.
+        return RegAccess(rw: 0xFFFFF000, rw1c: 0)
+    if off == REG_ASQ + 4 or off == REG_ACQ + 4:
+        return RegAccess(rw: 0xFFFFFFFF, rw1c: 0)
+    # CAP, VS and anything unmapped: read-only, writes ignored.
+    RegAccess(rw: 0, rw1c: 0)
+
+"""One host store to a property dword. Struct param per fw/CONVENTIONS.md."""
+struct RegWrite:
+    off:   i64
+    value: i64
+
+"""
+The new stored value of a dword after a host write, with access rules applied.
+
+  * RO and Reserved bits keep their old value (a write is ignored, and since
+    reserved bits reset to 0 they therefore read 0 forever).
+  * RW bits take the written value.
+  * RW1C bits are CLEARED where the written bit is '1', and are otherwise
+    unchanged — a write of '0' never sets them.
+"""
+fn reg_apply_write32(old: i64, wval: i64, acc: RegAccess) -> i64:
+    val keep: i64 = not32(acc.rw)
+    val merged: i64 = (old & keep) | (wval & acc.rw)
+    mask32(merged & not32(wval & acc.rw1c))
+
+fn nvme_reg_defs_selftest() -> i64:
+    var f: i64 = 0
+    # Offsets are the spec's, not a local convention.
+    f = f + expect_eq(REG_CAP, 0x00, "CAP at BAR0+00h")
+    f = f + expect_eq(REG_VS, 0x08, "VS at BAR0+08h")
+    f = f + expect_eq(REG_CC, 0x14, "CC at BAR0+14h")
+    f = f + expect_eq(REG_CSTS, 0x1C, "CSTS at BAR0+1Ch")
+    f = f + expect_eq(REG_AQA, 0x24, "AQA at BAR0+24h")
+    f = f + expect_eq(REG_ASQ, 0x28, "ASQ at BAR0+28h")
+    f = f + expect_eq(REG_ACQ, 0x30, "ACQ at BAR0+30h")
+    # Bit-field algebra.
+    f = f + expect_eq(bf_mask(bf_cc_shn()), 0xC000, "CC.SHN occupies bits 15:14")
+    f = f + expect_eq(bf_mask(bf_aqa_acqs()), 0x0FFF0000, "AQA.ACQS occupies bits 27:16")
+    f = f + expect_eq(bf_get(0x00460001, bf_cc_en()), 1, "bf_get reads CC.EN")
+    f = f + expect_eq(bf_get(0x00460001, bf_cc_iosqes()), 6, "bf_get reads CC.IOSQES from 19:16")
+    f = f + expect_eq(bf_get(0x00460001, bf_cc_iocqes()), 4, "bf_get reads CC.IOCQES from 23:20")
+    val put = bf_put(0, bf_cc_mps(), 5)
+    f = f + expect_eq(put, 5 << 7, "bf_put places CC.MPS at bit 7")
+    f = f + expect_eq(bf_put(0xFFFFFFFF, bf_cc_en(), 0) & 1, 0, "bf_put can clear a single bit")
+    f = f + expect_eq(not32(0), 0xFFFFFFFF, "not32 complements within 32 bits")
+    # Access rules.
+    val cc_acc = reg_access_for(REG_CC)
+    f = f + expect_eq(reg_apply_write32(0, 0xFFFFFFFF, cc_acc), 0x00FFFFF1, "CC reserved bits 3:1 and 31:24 ignore writes")
+    f = f + expect_eq(reg_apply_write32(0x00460001, 0, cc_acc), 0, "CC RW bits are freely clearable")
+    val cap_acc = reg_access_for(REG_CAP)
+    f = f + expect_eq(reg_apply_write32(0x1234, 0xFFFFFFFF, cap_acc), 0x1234, "CAP is RO: a write changes nothing")
+    val vs_acc = reg_access_for(REG_VS)
+    f = f + expect_eq(reg_apply_write32(0x00010400, 0, vs_acc), 0x00010400, "VS is RO: a write of 0 changes nothing")
+    val st_acc = reg_access_for(REG_CSTS)
+    f = f + expect_eq(reg_apply_write32(0x11, 0x10, st_acc), 0x01, "CSTS.NSSRO is RW1C: write-1 clears it")
+    f = f + expect_eq(reg_apply_write32(0x11, 0x00, st_acc), 0x11, "CSTS.NSSRO write-0 leaves it set")
+    f = f + expect_eq(reg_apply_write32(0x01, 0x10, st_acc), 0x01, "RW1C write-1 on a clear bit does not set it")
+    f = f + expect_eq(reg_apply_write32(0x01, 0xFFFFFFFF, st_acc), 0x01, "CSTS.RDY is RO: a write of all-ones cannot set it")
+    val aqa_acc = reg_access_for(REG_AQA)
+    f = f + expect_eq(reg_apply_write32(0, 0xFFFFFFFF, aqa_acc), 0x0FFF0FFF, "AQA reserved bits 15:12 and 31:28 read back zero")
+    val asq_acc = reg_access_for(REG_ASQ)
+    f = f + expect_eq(reg_apply_write32(0, 0xFFFFFFFF, asq_acc), 0xFFFFF000, "ASQ low dword ignores the 4 KiB alignment bits")
+    f

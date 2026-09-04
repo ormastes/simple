@@ -1,0 +1,134 @@
+"""
+nvme_spec_import — convert an NVM Express specification into SDN clause records
+and SSpec scenario scaffolding.
+
+  bin/simple run src/app/nvme_spec_import/main.spl extract  [--source PATH]
+  bin/simple run src/app/nvme_spec_import/main.spl generate [--source PATH]
+  bin/simple run src/app/nvme_spec_import/main.spl report   [--source PATH]
+
+`extract`  writes spec/nvme/clauses.sdn, register_fields.sdn, coverage.sdn and
+           extraction_report.sdn.
+`generate` does everything `extract` does, then writes the generated scenarios
+           under test/03_system/app/nvme_firmware/generated/.
+`report`   prints the extraction rates and writes nothing.
+
+The source text is a LOCAL copy of the specification and is deliberately not in
+this repository; the default path is where this session's copy lives. Nothing
+this tool writes contains specification prose - see clause_scan.spl.
+
+Verdict line (LAST line of stdout) so a caller never has to read the exit code:
+  NVME SPEC IMPORT OK | NVME SPEC IMPORT FAIL (<reason>)
+"""
+
+use std.fs.{read_file, write_file}
+use std.cli.{get_cli_args}
+use text_norm.*
+use clause_scan.*
+use field_scan.*
+use feature_map.*
+use obligations.*
+use sdn_emit.*
+use gen_scenarios.*
+
+val DEFAULT_SOURCE: text = "/mnt/data/nvme-specs/nvme_base_2.3.txt"
+val OUT_DIR: text = "spec/nvme/"
+
+fn pct(num: i64, den: i64) -> text:
+    if den <= 0:
+        return "n/a"
+    "{num * 100 / den}%"
+
+fn print_report(res: ScanResult, fs: FieldScanResult):
+    val st = res.stats
+    val ts = fs.stats
+    print "-- clause extraction --"
+    print "  lines scanned:                        {st.lines}"
+    print "  paragraphs assembled:                 {st.paragraphs}"
+    print "  section headings recognized:          {st.headings}"
+    print "  TOC rows carrying a section number:   {st.toc_entries}   (the extraction lost that column)"
+    print "  'shall' occurrences in the text:      {st.shall_occurrences}"
+    print "  ... inside a captured paragraph:      {st.shall_captured}  ({pct(st.shall_captured, st.shall_occurrences)})"
+    print "  'should' occurrences:                 {st.should_occurrences}"
+    print "  'may' occurrences:                    {st.may_occurrences}"
+    print "  requirement paragraphs:               {st.req_paragraphs}"
+    print "  mapped to a mandatory feature:        {st.mapped}  ({pct(st.mapped, st.req_paragraphs)} of requirement paragraphs)"
+    print "  unmapped:                             {st.unmapped}"
+    print "  needs_human_review:                   {st.review}  ({pct(st.review, st.req_paragraphs)})"
+    print "  clause records emitted:               {res.records.len()}"
+    print "-- register/field table extraction --"
+    print "  figure captions seen:                 {ts.figures_seen}"
+    print "  register tables attempted:            {ts.register_tables}"
+    print "  register tables parsed:               {ts.tables_parsed}  ({pct(ts.tables_parsed, ts.register_tables)})"
+    print "  register tables needing review:       {ts.tables_review}"
+    print "  field rows emitted:                   {ts.rows}"
+    print "  NOTE: a parsed table means its column runs agreed, not that every field of"
+    print "        that register was recovered - a figure split across a page break is cut"
+    print "        by the intervening caption, so per-register field sets are LOWER BOUNDS."
+
+fn print_coverage(gr: GenResult):
+    val total: i64 = gr.stats.covered + gr.stats.blocked
+    print "-- scenario generation --"
+    print "  mandatory features:                   {gr.stats.files}"
+    print "  obligation cells:                     {total}"
+    print "  covered by an in-tree evidence binding: {gr.stats.covered}  ({pct(gr.stats.covered, total)})"
+    print "  blocked, with a named blocker:        {gr.stats.blocked}"
+
+fn main():
+    val args = get_cli_args()
+    var cmd: text = "report"
+    var source: text = DEFAULT_SOURCE
+    var i: i64 = 0
+    while i < args.len():
+        val a: text = args[i]
+        if a == "extract" or a == "generate" or a == "report":
+            cmd = a
+        elif a == "--source" and i + 1 < args.len():
+            source = args[i + 1]
+            i = i + 1
+        i = i + 1
+
+    val raw: text = read_file(source)
+    if raw.len() < 1000:
+        print "NVME SPEC IMPORT FAIL (source text not readable or implausibly small at {source})"
+        return ()
+
+    print "source: {source}  ({raw.len()} chars)"
+    val res = scan_clauses(raw, false)
+    val fs = scan_fields(raw)
+    print_report(res, fs)
+
+    if cmd == "report":
+        print "NVME SPEC IMPORT OK"
+        return ()
+
+    var wrote: i64 = 0
+    if write_file(OUT_DIR + "clauses.sdn", clause_sdn(res, source)):
+        wrote = wrote + 1
+    if write_file(OUT_DIR + "register_fields.sdn", fields_sdn(fs)):
+        wrote = wrote + 1
+    if write_file(OUT_DIR + "coverage.sdn", coverage_sdn(res)):
+        wrote = wrote + 1
+    if write_file(OUT_DIR + "extraction_report.sdn", report_sdn(res, fs, source)):
+        wrote = wrote + 1
+    print "wrote {wrote} SDN file(s) under {OUT_DIR}"
+    if wrote != 4:
+        print "NVME SPEC IMPORT FAIL (expected to write 4 SDN files, wrote {wrote}; does {OUT_DIR} exist?)"
+        return ()
+
+    if cmd == "extract":
+        print "NVME SPEC IMPORT OK"
+        return ()
+
+    val gr = generate(res)
+    var gen_ok: i64 = 0
+    var g: i64 = 0
+    while g < gr.files.len():
+        if write_file(gr.files[g].path, gr.files[g].content):
+            gen_ok = gen_ok + 1
+        g = g + 1
+    print_coverage(gr)
+    print "wrote {gen_ok} generated spec file(s) under {GEN_DIR}"
+    if gen_ok != gr.files.len():
+        print "NVME SPEC IMPORT FAIL (wrote {gen_ok} of {gr.files.len()} generated specs; does {GEN_DIR} exist?)"
+        return ()
+    print "NVME SPEC IMPORT OK"

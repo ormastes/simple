@@ -77,15 +77,29 @@ fn main():
     fail = fail + expect_eq(roor.corrected, 2, "out-of-range read -> corrected 2")
 
     # ── Seam 1b: corrected from GENUINE Vt physics (no inject call) ───────────
-    # A page programmed 0xFE has exactly ONE programmed (0) cell in column 0 (bit 0)
-    # among seven erased (1) cells. Retention drift only droops programmed cells, so
-    # under heavy wear+age that single cell flips 0->1: the page senses 0xFF, one bit
-    # off the written 0xFE. The physics bit-error count is 1 => corrected 1, WITHOUT
-    # any fault injection. A page programmed 0x00 (eight programmed cells) instead
-    # droops to 0xFF, eight bits off => uncorrectable => corrected 2.
+    # PORTED (D11 / emu page-widening), property preserved, construction changed.
+    # The oracle is "exactly ONE programmed cell in the whole page drifts => the
+    # ECC corrects it => corrected 1". It used to be written as the SCALAR
+    # `program(..., 0xFE)`, which was faithful only while a page was one byte
+    # wide: back then 0xFE meant one programmed (0) cell among seven erased (1)
+    # ones. Now that the scalar entry point widens to a full page, `0xFE` means
+    # byte 0 = 0xFE and bytes 1..4095 = 0x00 — roughly 32,760 PROGRAMMED cells,
+    # every one of which droops under wear+age. That page is genuinely,
+    # correctly uncorrectable page-wide (corrected 2), so the OLD EXPECTATION
+    # WAS RIGHT ABOUT THE PHYSICS AND WRONG ABOUT THE PAGE. Relaxing it to 2
+    # would have deleted the single-bit oracle and left the multi-cell case
+    # below asserting the same thing twice.
+    # The faithful port keeps one programmed cell in the WHOLE page: erased
+    # (all-0xFF) everywhere, with column 0 driven to 0xFE — bit 0 of byte 0 the
+    # only 0 cell on the page — programmed through the page-wide seam. Under
+    # drift that one cell flips 0->1, the page senses 0xFF at column 0, and the
+    # per-codeword SEC-DED decode corrects the single bit => corrected 1.
+    # A page programmed 0x00 (below) droops in every cell => corrected 2.
     var pemu: Fil = fil_new_emu()
     val pfe: i64 = block_first_ppn(0)               # block 0, page 0 (in-window)
-    fail = fail + expect_eq(pemu.program(pfe, 100, 1, 0xFE), NAND_OK, "physics: program 0xFE")
+    var one_cell: PageData = page_fill(-1)          # every byte erased (0xFF)
+    one_cell.words[0] = -2                          # 0x...FFFE: byte 0 = 0xFE
+    fail = fail + expect_eq(pemu.program_page(pfe, 100, 1, one_cell), NAND_OK, "physics: program a single programmed cell")
     val pf0: FilRead = pemu.read(pfe)
     fail = fail + expect_eq(pf0.data, 0xFE, "physics: fresh 0xFE reads back exactly")
     fail = fail + expect_eq(pf0.corrected, 0, "physics: fresh page -> corrected 0")

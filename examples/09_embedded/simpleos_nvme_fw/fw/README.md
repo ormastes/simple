@@ -22,7 +22,7 @@ Built layer-by-layer with parallel agents (Sonnet builders + Opus review gates),
 
 ```bash
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/sim_main.spl   # single-queue end-to-end demo
-bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (526 checks)
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/test_fw.spl    # full self-test suite (1174 checks)
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/nvme_main.spl  # NVMe admin/multi-IO-queue controller e2e
 ```
 
@@ -32,6 +32,7 @@ Standalone production-hardening regressions and proofs:
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/gc_safety_check.spl   # GC data-loss guard + no write-cliff
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/durability_check.spl  # power-loss recovery + WAL overflow
 bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/wear_scrub_check.spl  # static wear-leveling + read-disturb scrub
+bin/simple run examples/09_embedded/simpleos_nvme_fw/fw/task_pool_fail_closed_check.spl # invalid task pool rejects writes
 lean examples/09_embedded/simpleos_nvme_fw/fw/proofs/Alloc.lean              # + Recover, Gc, Hooks, Fmc, Rain .lean (6 proofs, req 6)
 ```
 
@@ -78,22 +79,42 @@ trim → **power-fail + recovery** (committed state survives, trim stays trimmed
 > (`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md`). That contract's Layer Rules
 > reserve the ECS business layer for **userland services/apps** and keep **kernel and drivers
 > MDSOC-only** (ECS forbidden — "drivers are IO-bound state machines, not entity graphs"). Both
-> senses hold here without conflict: this firmware is a **driver**, so it is correctly
-> **MDSOC-only** — pure composition (no inheritance), strictly downward-only domain layering
-> (HIL → FTL → FIL; every cross-domain import points down), no shared mutable global, and **no
-> ECS** (`grep -r "use std.ecs" fw/` returns nothing). It realizes the research's multi-domain
-> decomposition *with* MDSOC structure — exactly what the contract asks of a driver.
+> senses hold here without conflict, but the contract's rule applies **per dimension, not to the
+> tree as a whole**. An SSD is not uniformly driver-class: its host and FTL dimensions are
+> userland-class services that happen to be compiled into firmware, while only the media
+> dimension is a driver. So:
+>
+> | Dimension | Modules | Class | Target | `use std.ecs` |
+> |---|---|---|---|---|
+> | **HOST** | `hil`, `hil_queue`, `hil_command`, `fw_pool`, `dram`, `power_thermal`, `openssd_config`, `nvme_main`, `nvme_qset`, `nvme_admin`, `nvme_admin_types`, `nvme_controller` | service | **MDSOC+ (MDSOC outer + ECS inner)** | permitted |
+> | **FTL** | `ftl`, `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `rain`, `rel_*`, `hooks`, `sandbox` | service | **MDSOC+** | permitted |
+> | **NAND/FIL** | `fil`, `fil_fmc`, `fil_nand`, `fil_nand_device`, `fil_nand_emu`, `fil_ecc`, `fil_scheduler`, `fil_badblock`, `nd_types` | driver | **MDSOC-only** | **forbidden** — "drivers are IO-bound state machines, not entity graphs" |
+> | shared / root / harness | `nvme_types` (frozen interface); `firmware` (composition root, the only module allowed to name more than one dimension); `sim_main`, `test_fw`, `fw_layer_smoke`, `nand_migration_capture_main` (harness-tier, outside all dimensions) | — | — | — |
+>
+> What holds unchanged across all of them: pure composition (no inheritance), strictly
+> downward-only domain layering (HIL → FTL → FIL; every cross-domain import points down), and no
+> shared mutable global.
+>
+> **Current state: pre-migration.** The table is the *target*. Today the whole tree is plain
+> MDSOC — `grep -r "use std.ecs" fw/` still returns nothing, no ECS entity model is built, and
+> several cross-dimension imports still violate the downward rule (`rain.spl:15` and
+> `openssd_config.spl:9` reach into `fil_scheduler` for channel geometry; `fil.spl:14-16` holds
+> FTL-class `rel_*` policy inside the driver layer). Those are tracked as S3/S4/S5 in
+> `doc/03_plan/hardware/nvme_mdsoc_plus_layer_architecture.md`, whose phases 0-8 carry out the
+> migration, and are ratcheted by `scripts/check/check-nvme-layer-dependencies.shs`. The `rel_*`
+> ownership split (FTL policy vs NAND-owned retry ladder) is an open question decided before
+> Phase 3, not settled here.
 
 ## Module map
 
 | Layer | Modules |
 |-------|---------|
 | Interface | `nvme_types` (constants, `Handle`, `NvmeCmd`/`NvmeCpl`, geometry, helpers) |
-| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **shelf**: verified model, not load-bearing; the single-threaded host sim cannot exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
-| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL seals parity and rebuilds a failed channel in place via `rain_seal`/`rain_recover_channel`) |
+| **FIL** | `fil_nand`, `fil_nand_device` (ONFI NAND *device*), `fil_fmc` (flash-memory-controller register driver, gap-closure P1 — **wired**: every program/read/erase routes through the FMC register handshake; the `Fmc` owns `fil_nand_device`), `fil_scheduler` (multi-channel request scheduler, gap-closure P2 — **wired timing floor**: every valid program/read/erase routes through it; the single-threaded host sim cannot physically exhibit channel-level parallelism), `fil_ecc`, `fil_badblock`, `fil` |
+| **FTL** | `ftl_map`, `ftl_band`, `ftl_journal`, `ftl_gc`, `ftl`, `rain` (XOR-parity die/channel resilience, gap-closure P8 — **wired**: the FTL maintains parity on writes/GC/format and rebuilds a failed channel in place via `rain_recover_channel`; `rain_seal` remains the scrub/repair pass) |
 | **HIL + core** | `hil_queue`, `hil_command`, `fw_pool`, `hil`, `firmware` |
 | **NVMe controller front end** | `nvme_admin_types`, `nvme_admin` (admin queue: Identify, Create/Delete IO SQ/CQ, Get/Set Features, Get Log Page), `nvme_qset` (multi IO queue, round-robin), `nvme_controller`, `power_thermal` (power states + thermal throttling, gap-closure P7 — **wired**: the controller IO path drives it and SMART reports its live composite temperature) |
-| Tests | `test_fw` (all self-tests, 526 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
+| Tests | `test_fw` (all self-tests, 1174 checks), `sim_main` (single-queue e2e), `nvme_main` (controller e2e) |
 
 > **Integration status (wired vs. shelf).** The authoritative wired-vs-shelf accounting is
 > `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration status — wired vs. shelf" —

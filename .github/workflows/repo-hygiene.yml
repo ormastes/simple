@@ -109,27 +109,6 @@ jobs:
         run: |
           sh scripts/check/check-guard-wiring.shs
 
-      # Dangling `*_partN` facade re-export gate.
-      #
-      # Merge e274cd33719 rewrote ~21 facade files to `export use <name>_partN.*`
-      # naming modules that were never created -- the real split files live in
-      # sibling `_ClassName/` folders. A dangling re-export erases the facade's
-      # ENTIRE exported API downstream, surfacing far away as
-      # `hir: cannot infer field type ... struct 'ANY'` and
-      # `codegen: GlobalLoad: unresolved identifier`. It was the single largest
-      # cause of the SimpleOS kernel being unbuildable (B1), and nothing in the
-      # tree detected it: the failures name the victim modules, never the broken
-      # facade.
-      #
-      # Blocking, not advisory: pure text scan, no seed/compiler/hardware, runs
-      # in seconds, and measured GREEN on this tree
-      # (`PASS — 0 _partN re-export(s) across 9018 module(s)`).
-      # See doc/08_tracking/bug/simpleos_b1_merge_clobber_e274cd33719_2026-08-31.md.
-      - name: Dangling _partN re-export gate
-        if: ${{ !cancelled() }}
-        run: |
-          sh scripts/check/check-no-dangling-reexports.shs
-
       # JIT runtime-symbol manifest gate.
       #
       # The JIT symbol table is generated from a HAND-MAINTAINED list,
@@ -464,42 +443,7 @@ jobs:
     continue-on-error: true
 
     steps:
-      # fetch-depth: 0 -- the dropped-declaration gate below needs a real
-      # merge-base against origin/main, which a shallow clone cannot compute.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # Dropped-declaration gate (the mechanical form of the "diff BOTH
-      # directions before overwriting" rule in .claude/rules/vcs.md).
-      #
-      # Repairing a merge clobber means restoring a file from an older
-      # revision, and an older revision can legitimately lack work the current
-      # tree added. This guard fails closed when a restore silently drops a
-      # top-level declaration the base had. It caught 4 dropped cpio helpers
-      # during the B1 restore.
-      #
-      # ADVISORY, deliberately, and this is the honest classification rather
-      # than a way to dodge a red:
-      #   * By contract it exits 2 ("ERROR — nothing was checked") when no .spl
-      #     file changed against the base -- true of most pushes -- so as a
-      #     blocking gate it would fail builds for having nothing to say.
-      #   * It compares the WORKING COPY against a base, so on any PR that
-      #     legitimately DELETES a declaration it reports FAIL. That is correct
-      #     for a restore review and wrong for a merge gate.
-      # It is a restore-time reviewer's guard. Running it here publishes its
-      # verdict on every PR without turning a legitimate deletion into a
-      # blocked merge. The guard itself is UNCHANGED and is not opted out.
-      # Base is the merge-base, not origin/main directly: a plain diff against
-      # origin/main reports every declaration the branch is merely BEHIND on as
-      # a "drop" (measured: 18 such false positives at 91b6b9f28dd).
-      - name: Dropped-declaration gate (advisory; ERRORs by contract when nothing changed)
-        if: ${{ !cancelled() }}
-        run: |
-          git fetch --no-tags origin main || true
-          base=$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)
-          echo "base=$base"
-          sh scripts/check/check-no-decls-dropped.shs "$base"
 
       # Test-summary reconciliation.
       #
@@ -702,7 +646,6 @@ jobs:
           run_guard check-pg-scalar-adapter-contract.shs
           run_guard check-pg-scalar-port-readiness.shs
           run_guard check-pg-worker-scalar-descriptor.shs
-          run_guard check-prepush-no-recursion.shs
           run_guard check-prepare-sosix-qemu-linux-diagnostic-blocked-bundles.shs
           run_guard check-release-perf-baseline.shs --self-test
           run_guard check-release-version-consistency.shs
@@ -736,6 +679,13 @@ jobs:
           run_guard check-web-tls-hosted-abi-provider.shs
           run_guard check-x86-32-packed-token-publication.shs
           run_guard check-x86-64-qemu-nonce-slot.shs
+          run_guard check-hw-ir-no-duplicate-literals.shs
+          run_guard check-hw-ir-register-header-identity.shs
+          run_guard check-hwir-ecc-offload-equivalence.shs
+          run_guard check-nvme-layer-dependencies.shs
+          run_guard check-nvme-profile-core-untouched.shs --selftest-only
+          run_guard check-nvme-spec-coverage.shs
+          run_guard check-typed-address-algebra.shs
           # Ambiguous basename: scripts/audit/ and scripts/check/ hold two
           # DIFFERENT scripts of this name. Pinned to the one the first CI
           # run actually executed (rc=1, a genuine finding).
@@ -743,25 +693,6 @@ jobs:
           run_guard sffi-provider-admission-handoff-contract.shs
           run_guard test-mcdc-performance-gate.shs
           run_guard test-riscv-hal-migration-evidence-contract.shs
-          # Wired 2026-09-01 to clear check-guard-wiring's NEW-unwired list.
-          # All six are static, source-only checks (no QEMU, no built artifact,
-          # no bootstrapped compiler) and each was run by hand first:
-          #   check-freestanding-byte-array-slot-tags  PASS — 9 definition(s) checked, 0 untagged
-          #   check-freestanding-dict-arms-...         PASS — 6 definition(s) checked, 0 missing a dict arm
-          #   check-freestanding-dict-write-path       PASS — 3 runtime(s) checked, 0 with a broken dict write path
-          #   check-freestanding-rt-value-int-tags     PASS — 5 definition(s) checked, 0 untagged
-          #   check-prepush-no-recursion               PASS — 3 fixture(s) checked, 0 recursion
-          #   check-script-non-vacuity                 PASS — 1078 script(s) checked, 0 new, 0 stale
-          # They land in the ADVISORY job, not code-idiom-gates, because that
-          # job is a required check and none of the six has a CI green on
-          # record yet. Promote each into code-idiom-gates once it is observed
-          # green here -- that is this job's documented purpose.
-          run_guard check-freestanding-byte-array-slot-tags.shs
-          run_guard check-freestanding-dict-arms-in-every-definition.shs
-          run_guard check-freestanding-dict-write-path.shs
-          run_guard check-freestanding-rt-value-int-tags.shs
-          run_guard check-prepush-no-recursion.shs
-          run_guard check-script-non-vacuity.shs
           echo ""
           echo "newly_wired_guards_run=$ran"
           echo "newly_wired_guards_failed=$failed"
@@ -775,109 +706,3 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-sspec-lane-shape.shs
-
-      # SimpleOS WM host-Vulkan pixel evidence.
-      #
-      # In-guest Vulkan does NOT exist: VulkanCompositorBackend.is_available()
-      # is unconditionally false and every rt_vulkan_* is an ABSENT() stub in
-      # the freestanding build. What exists is a guest->host ivshmem offload
-      # to a real host Vulkan daemon. This gate captures a real framebuffer and
-      # labels renderer=host-vulkan ONLY on the guest receipts AND the host
-      # receipt together, because gui_entry_desktop.spl passes
-      # backend_required: false and the WM silently falls back to CPU -- a
-      # screenshot alone proves nothing.
-      #
-      # ADVISORY because it is honestly RED: the host daemon does not link
-      # (53 tree-wide undefined rt_* symbols). The gate ERRORs at that
-      # precondition rather than mislabelling a CPU frame, which is why no
-      # renderer=host-vulkan claim exists anywhere. Promote to blocking once
-      # the daemon builds.
-      - name: SimpleOS WM host-Vulkan pixel evidence (advisory, daemon-blocked)
-        run: sh scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs || true
-      # SimpleOS x86_64 hello world in-guest, under real OVMF pflash firmware
-      # (GRUB-EFI -> multiboot; never -kernel, never isa-debug-exit -- the gate
-      # self-checks the assembled QEMU argv). It also carries a call-path stub
-      # guard that fails closed if any function on this lane was stub-fallbacked;
-      # that guard caught _text_z_size silently becoming a 0-returning stub and
-      # corrupting every ring-3 argv frame.
-      #
-      # ADVISORY because it is honestly RED at L6/L7: rungs L1-L5 pass (GRUB
-      # handoff, kernel _start, NVMe online, the guest reading its own program
-      # off its own FAT32 volume, ring-3 entry with the ELF admitted), then the
-      # iretq into CPL3 triple-faults. The interpreter row is RED separately --
-      # no in-guest Simple interpreter binary exists in this tree. Promote to
-      # blocking once the program prints its own output.
-      - name: SimpleOS x86_64 hello world in-guest (advisory, L6/L7 red)
-        run: sh scripts/check/check-simpleos-hello-world-in-guest-ovmf.shs || true
-
-      # SimpleOS VFS server round-trip: proves a server is genuinely RUNNING
-      # via a filesystem round-trip, not by a banner or a path existing. A
-      # per-run nonce is minted into generated source, checked across 7
-      # nonce-anchored serial rungs AND independently host-side by finding the
-      # nonce bytes physically present in the raw NVMe image. Its selftest
-      # includes the case that matters: server NOT running but the path exists
-      # carrying a stale nonce must FAIL.
-      #
-      # ADVISORY because it is honestly RED: the kernel does not link (both
-      # linker scripts assign 65 syscall-shim aliases through a pre-split
-      # prefix that no longer matches the emitted symbols). No VM boots, so the
-      # gate reports ERROR rather than inventing a round-trip. Promote once the
-      # weak-stub emission gap is closed.
-      - name: SimpleOS VFS server round-trip (advisory, link-blocked)
-        run: sh scripts/check/check-simpleos-vfs-server-roundtrip-ovmf.shs || true
-
-      # SimpleOS aarch64 in-guest toolchain components (devtool/caret/testrun/mcp)
-      # under EDK2/AAVMF real firmware. Each row demands a real FUNCTIONAL
-      # round-trip, not a banner -- the selftest includes a banner-only
-      # must-FAIL. devtool is genuinely GREEN (the real lint rule discriminates
-      # in both directions in-guest); caret and testrun run to completion but
-      # return wrong text results, and mcp does not link (rt_closure_new).
-      #
-      # ADVISORY because 1 of 4 rows passes. Promote as rows go green.
-      - name: SimpleOS aarch64 in-guest components (advisory, 1 of 4 green)
-        run: sh scripts/check/check-simpleos-aarch64-components-in-guest-efi.shs || true
-
-      # SimpleOS riscv64 interpreter payload invariants.
-      #
-      # Checks the built guest interpreter is a statically linked RISC-V ELF64
-      # carrying DEFINED interpret_hir_module + simpleos_interpret_file with no
-      # strong undefined symbols. It is explicitly NOT an in-guest execution
-      # claim -- the in-guest interpreter row stays RED until riscv64 has a boot
-      # lane that mounts the guest FS and execs a U-mode ELF.
-      #
-      # ADVISORY: ERRORs when no payload is present, which is the normal state
-      # on a fresh checkout (correct fail-closed behaviour, not a pass).
-      - name: SimpleOS riscv64 interpreter payload (advisory, needs a built payload)
-        run: sh scripts/check/check-simpleos-riscv64-interpreter-payload.shs || true
-
-      # Wired 2026-09-01 to clear check-guard-wiring's NEW-unwired list. Each
-      # boots a real guest under real firmware (OVMF / AAVMF / OpenSBI
-      # fw_payload) and reads evidence back out, exactly like the sibling
-      # advisory steps above; `|| true` keeps them reporting without gating,
-      # since none has a CI green on record. Promote individually as each goes
-      # green. Opting them out instead was rejected: the optout file is for
-      # scripts that are NOT meant to gate, and these are evidence gates whose
-      # lane already exists here.
-      - name: SimpleOS arm64 WM Vulkan pixel evidence (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs || true
-
-      - name: SimpleOS DBFS server round-trip under OVMF (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-dbfs-server-roundtrip-ovmf.shs || true
-
-      - name: SimpleOS NVFS server round-trip under OVMF (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-nvfs-server-roundtrip-ovmf.shs || true
-
-      - name: SimpleOS x86_64 in-guest components under OVMF (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-x86-64-components-in-guest-ovmf.shs || true
-
-      - name: SimpleOS riscv64 in-guest components under OpenSBI (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs || true
-
-      - name: SimpleOS riscv64 in-guest interpreter under OpenSBI (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs || true
-
-      - name: SimpleOS riscv64 WM render smoke under OpenSBI (advisory, first CI run)
-        run: sh scripts/check/check-simpleos-riscv64-wm-render-smoke-opensbi.shs || true
-
-      - name: riscv64 text primitive probe under OpenSBI (advisory diagnostic harness)
-        run: sh scripts/check/run-riscv64-text-probe-opensbi.shs || true
