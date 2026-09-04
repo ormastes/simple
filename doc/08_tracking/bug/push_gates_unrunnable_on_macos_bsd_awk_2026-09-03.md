@@ -1,6 +1,15 @@
 # Push gates were unrunnable on macOS: two BSD-awk incompatibilities
 
-**Date:** 2026-09-03  **Status:** both fixed in this change; a third, pre-existing blocker documented below
+**Date:** 2026-09-03  **Status:** both fixed, but NOT by this change — see below; a third, pre-existing blocker documented below
+
+> **Amended 2026-09-04.** This record originally shipped alongside its own two
+> code fixes. On rebase both were dropped as already upstream: `origin/main`
+> had landed equivalent fixes independently — `-v required="$(printf '%s' ...
+> | tr '\n' ' ')"` with `split(required, required_ids, /[ \n]+/)` in
+> `check-push-must-pass.shs`, and `tr -dc '\0' | wc -c` in
+> `check-no-direct-rt.shs`. Both were verified present before the drop. The
+> diagnosis below stands and is why this record is kept; only the claim that
+> the fixes ride in this change was wrong.
 
 `check-push-must-pass.shs` is, per `.claude/rules/vcs.md`, "the single
 authoritative enforcement surface" for the push tier. On macOS it could not pass
