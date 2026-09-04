@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BUILD_DIR=${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-font-c-parity}
+SIMPLE_FONT_FEATURE_BIN=${SIMPLE_FONT_FEATURE_BIN:-}
+mkdir -p "$BUILD_DIR"
+
+if [ -z "$SIMPLE_FONT_FEATURE_BIN" ] || [ ! -x "$SIMPLE_FONT_FEATURE_BIN" ]; then
+    echo 'engine2d_vulkan_font_c_parity_status=blocked reason=missing-simple-feature-binary'
+    exit 2
+fi
+
+case $SIMPLE_FONT_FEATURE_BIN in
+    *compiler_rust*|*bootstrap*/simple)
+        echo 'engine2d_vulkan_font_c_parity_status=blocked reason=bootstrap-artifact-inadmissible'
+        exit 2
+        ;;
+esac
+
+ENGINE2D_VULKAN_FONT_MODE=packed ENGINE2D_VULKAN_GLYPHS=64 \
+    ENGINE2D_VULKAN_SAMPLES=31 BUILD_DIR="$BUILD_DIR/c" \
+    sh "$ROOT/scripts/check/check-engine2d-vulkan-font-8k.shs"
+
+VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json} \
+    "$SIMPLE_FONT_FEATURE_BIN" >"$BUILD_DIR/simple-feature.receipt"
+
+sh "$ROOT/scripts/check/check-engine2d-vulkan-c-parity.shs" --compare \
+    --simple "$BUILD_DIR/simple-feature.receipt" \
+    --c "$BUILD_DIR/c/c-feature.receipt" | tee "$BUILD_DIR/parity.receipt"
+echo engine2d_vulkan_font_c_parity_status=pass
