@@ -33,13 +33,16 @@ no software fallback and emits requested/selected backend, device identity,
 readback source and handle, checksum, revision, completion, timings, and RSS.
 It emits `producer_receipt_warmup_count=1` and
 `producer_receipt_sample_count=60`; p50/p95 are calculated over those 60 timed
-changing revisions, never over the warmup.
+changing revisions, never over the warmup. Parse and lower the two immutable
+semantic revisions before timing and report that combined work separately as
+`producer_receipt_preparation_ns`. This keeps the end-to-end preparation cost
+visible while matching the C Vulkan submit-and-fence measurement boundary.
 
 The selected workload is `web-semantic-retained-damage-v1`: a stable full
 background plus one changing semantic element at (128,128), 256x128. Perform a
-full-frame strict Vulkan seed before timing. Each timed revision includes the
-canonical Web layout-to-DrawIR lowering and only the retained-damage submit and
-fence; readback stays outside timing. Accept only when the final retained
+full-frame strict Vulkan seed before timing. Each timed revision selects one
+of the two canonical pre-lowered Web/DrawIR revisions and includes only the
+retained-damage submit and fence; readback stays outside timing. Accept only when the final retained
 device readback equals an independently full-rendered strict Vulkan checksum
 oracle, with stable device/handle, exact submit/fence counts, and no fallback.
 
@@ -82,7 +85,8 @@ The A4/A5 build shares one source-matched native cache across its three native
 entries and retains the semantic-window artifact plus build log/hash in the
 immutable evidence manifest. This reduces repeated compilation only. A4
 separately caches immutable prepared DrawIR planning outside timing; A5
-deliberately keeps semantic layout inside every timed revision. Neither caches
+retains its separately reported semantic preparation cost while timing the
+same GPU boundary as the C comparison. Neither caches
 mutable Engine2D state. The physical wrapper
 executes the cached artifact and validates the separate capture receipt through
 `--validate-physical` before reporting physical readiness.
