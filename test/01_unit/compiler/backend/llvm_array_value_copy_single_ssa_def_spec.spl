@@ -128,6 +128,27 @@ describe "array value copy emits a single SSA definition per local", tag: ["only
         expect(source).to_contain(
             "bootstrap_mir_function_at(index), true)")
 
+        step("Confirm the flat MIR producer stores canonical unrewritten MIR")
+        val producer = file_read(
+            "src/compiler/50.mir/_MirLowering/bootstrap_globals.spl")
+        expect(producer).to_contain(
+            "_bootstrap_mir_functions = _bootstrap_mir_functions.push(fn_)")
+        expect(producer.contains("stored_fn.blocks = rewritten.blocks"))
+            .to_equal(false)
+
+        step("Keep a directly defined Return-kind local as the return value")
+        expect(source.contains(
+            "return_local_id == return_slot_id or"))
+            .to_equal(false)
+        expect(source).to_contain(
+            "val requires_fallback = not self.local_types.has(return_local_id)")
+
+        step("Preserve return operands that do not require slot loads")
+        val transform = file_read(
+            "src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl")
+        expect(transform).to_contain(
+            "if ret_slot_index < 0:\n                    return ([], term, next_temp)")
+
     it "counts every reassigned local without aggregate tuple transport":
         # @req REQ-SSPEC-UNIT
         step("Read the alloca transform's multi-definition census")
@@ -135,5 +156,23 @@ describe "array value copy emits a single SSA definition per local", tag: ["only
             "src/compiler/60.mir_opt/mir_opt/var_reassign_ssa.spl")
         expect(source.contains("val next_counts = local_count_increment("))
             .to_equal(false)
+        expect(source).to_contain("var write_count = 0")
         expect(source).to_contain(
-            "counts[count_index] = counts[count_index] + 1")
+            "if _ssa_written_local_id(count_inst) == written_id:")
+        expect(source).to_contain(
+            "reassigned = reassigned.push(written_id)")
+        expect(source.contains("var local_ids: [i64] = []"))
+            .to_equal(false)
+        expect(source.contains("var counts: [i64] = []"))
+            .to_equal(false)
+        expect(source).to_contain("case Copy(dest, _):\n            ssa_local_id_value(dest)")
+        expect(source).to_contain(
+            "val reassigned = ssa_reassigned_locals_for_blocks(blocks)")
+        expect(source).to_contain(
+            "val cross_block = ssa_cross_block_live_locals(blocks, mir_locals)")
+        expect(source.contains(
+            "if not ssa_inst_operand_payloads_valid(inst):"))
+            .to_equal(false)
+        expect(source.contains(
+            "return ssa_var_transform_reject(\"invalid terminator operands\""))
+            .to_equal(false)

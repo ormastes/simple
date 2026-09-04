@@ -954,8 +954,6 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
     reassigned local un-slotted -> duplicate `%lN` SSA defs at llc (#135)."""
     for block in blocks:
         for inst in block.instructions:
-            if not ssa_inst_operand_payloads_valid(inst):
-                return false
             if not ssa_var_transform_inst_supported(inst):
                 match inst.kind:
                     case CallIndirect(_, _, _, _):
@@ -1127,8 +1125,11 @@ fn ssa_var_transform_blocks(blocks: [MirBlock]) -> SsaVarTransformResult:
 fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
     """Locals written at more than one site across `blocks` (the set that
     the old phi mechanism could not resolve correctly for real CFGs)."""
-    var local_ids: [i64] = []
-    var counts: [i64] = []
+    # Deliberately scan in-owner instead of maintaining parallel id/count
+    # arrays. Stage-2 native has corrupted both tuple-returned and separately
+    # mutated aligned arrays on this bootstrap path. MIR functions are small
+    # enough that this deterministic O(writes^2) admission repair is cheap.
+    var reassigned: [i64] = []
     for block in blocks:
         for inst in block.instructions:
             # NOTE: explicit match, not `if written.?:` -- local id 0
@@ -1137,23 +1138,14 @@ fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
             # decision, i.e. exactly the class of silent miscompile the
             # landed var_reassign_written_local fix addressed.
             val written_id = _ssa_written_local_id(inst)
-            if written_id >= 0:
-                # Keep both aligned arrays in this owner. The helper formerly
-                # returned `([i64], [i64])`; Stage-2 native tuple transport
-                # retained only part of that aggregate and silently omitted
-                # later multi-def locals from the alloca transform.
-                val count_index = local_count_index(local_ids, written_id)
-                if count_index >= 0:
-                    counts[count_index] = counts[count_index] + 1
-                else:
-                    local_ids.push(written_id)
-                    counts.push(1)
-    var reassigned: [i64] = []
-    var i = 0
-    while i < local_ids.len():
-        if counts[i] > 1:
-            reassigned = reassigned.push(local_ids[i])
-        i = i + 1
+            if written_id >= 0 and not local_list_contains(reassigned, written_id):
+                var write_count = 0
+                for count_block in blocks:
+                    for count_inst in count_block.instructions:
+                        if _ssa_written_local_id(count_inst) == written_id:
+                            write_count = write_count + 1
+                if write_count > 1:
+                    reassigned = reassigned.push(written_id)
     reassigned
 
 fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
@@ -1183,31 +1175,31 @@ fn ssa_local_type_lookup(mir_locals: [MirLocal], local_id: i64) -> MirType:
 fn _ssa_written_local_id(inst: MirInst) -> i64:
     match inst.kind:
         case Const(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Copy(dest, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Move(dest, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case BinOp(dest, _, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case UnaryOp(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case CheckedBinOp(dest, _, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Alloc(dest, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Load(dest, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case GetElementPtr(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Aggregate(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case GetField(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Cast(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Bitcast(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case Call(dest, _, _):
             if dest.?:
             # UNWRAP, don't alias. `dest` is `LocalId?`; passing the optional
@@ -1225,31 +1217,31 @@ fn _ssa_written_local_id(inst: MirInst) -> i64:
             # lane and returns raw 0. The `dest.?` test above already
             # established presence, so the fallback is unreachable.
                 val call_dest = dest ?? LocalId(id: -1)
-                var_reassign_local_id_value(call_dest)
+                ssa_local_id_value(call_dest)
             else:
                 -1
         case CallIndirect(dest, _, _, _):
             if dest.?:
                 val indirect_dest = dest ?? LocalId(id: -1)
-                var_reassign_local_id_value(indirect_dest)
+                ssa_local_id_value(indirect_dest)
             else:
                 -1
         case Intrinsic(dest, _, _):
             if dest.?:
                 val intrinsic_dest = dest ?? LocalId(id: -1)
-                var_reassign_local_id_value(intrinsic_dest)
+                ssa_local_id_value(intrinsic_dest)
             else:
                 -1
         case Ref(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         # LoadGlobal writes its dest local (module-global read, mutglobal2
         # lane); without this it counted as no-write and a multi-def/cross-
         # block LoadGlobal dest was never slotted (native_module_var_alloca_
         # global_insts 2026-07-23). StoreGlobal writes no local -> catch-all.
         case LoadGlobal(dest, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case GlobalAddr(dest, _, _):
-            var_reassign_local_id_value(dest)
+            ssa_local_id_value(dest)
         case _:
             -1
 
@@ -1650,7 +1642,23 @@ fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [
     match term:
         case Ret(value):
             if value != nil:
-                val r = ssa_alloca_rewrite_operand(value.unwrap(), slot_keys, slot_values, next_temp)
+                # Preserve an un-slotted return verbatim. Reconstructing even
+                # an unchanged Ret(Some(local)) through the rewrite helper's
+                # tuple transport loses the optional LocalId in Stage-2 native,
+                # and the backend then emits `ret ptr null` despite the value
+                # having just been defined by a Call.
+                val ret_operand = value ?? MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Int(0), MirType.i64()))
+                var ret_slot_index = -1
+                match ret_operand.kind:
+                    case Copy(local) | Move(local):
+                        ret_slot_index = local_count_index(
+                            slot_keys, ssa_local_id_value(local))
+                    case Const(_, _):
+                        pass_do_nothing
+                if ret_slot_index < 0:
+                    return ([], term, next_temp)
+                val r = ssa_alloca_rewrite_operand(ret_operand, slot_keys, slot_values, next_temp)
                 (r[1], MirTerminator.Ret(Some(r[0])), r[2])
             else:
                 ([], term, next_temp)
@@ -1751,25 +1759,23 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
         return ssa_var_transform_reject("empty function", blocks, [])
     if not ssa_instructions_supported_for_alloca(blocks):
         return ssa_var_transform_reject("unsupported instruction", blocks, [])
-    for block in blocks:
-        # Ret(Some(v)) is admitted when its operand payload is structurally
-        # valid (same gate as If/Switch). Refusing EVERY value-returning
-        # function left its multi-def locals (loop counters of the array
-        # value-copy loop, merge temps) as duplicate `%lN` SSA defs at llc.
-        # Bug llvm_text_backend_array_copy_loop_ssa_redefinition_2026-08-22.
-        if not ssa_term_operand_payloads_valid(block.terminator):
-            return ssa_var_transform_reject("invalid terminator operands", blocks, [])
+    # Do not preflight operand payloads here. Staged-native aggregate probing
+    # itself can report a valid LocalId payload as absent, rejecting the whole
+    # function while the LLVM emitter subsequently reads that same operand
+    # successfully. The rewrite routines preserve any unrecognized operand;
+    # the backend remains the authoritative structural validator.
 
-    # Union of the multi-def set and the cross-block-live set. A multi-def
-    # local is already covered by reassigned; the cross-block pass adds
-    # single-def locals whose use escapes their defining block.
+    # Union of the multi-def set and the cross-block-live set. Payload
+    # preflight above was removed because it falsely rejected valid staged
+    # operands; once admitted, these owner-local scans identify the precise
+    # locals requiring slots without changing ordinary single-def semantics.
     val reassigned = ssa_reassigned_locals_for_blocks(blocks)
     val cross_block = ssa_cross_block_live_locals(blocks, mir_locals)
-    val param_reassigned = ssa_reassigned_param_locals(blocks, mir_locals)
+    val slotted_params = ssa_reassigned_param_locals(blocks, mir_locals)
     var slotted = reassigned
     for cross_id in cross_block:
         slotted = local_list_push_unique(slotted, cross_id)
-    for param_id in param_reassigned:
+    for param_id in slotted_params:
         slotted = local_list_push_unique(slotted, param_id)
     if slotted.len() == 0:
         return ssa_var_transform_reject("no slotted locals", blocks, [])
@@ -1789,7 +1795,7 @@ fn ssa_alloca_transform_blocks(blocks: [MirBlock], mir_locals: [MirLocal], entry
     # AFTER the allocs (append order) so the slot exists, and BEFORE the entry
     # block's rewritten reads (prepended raw, bypassing operand rewriting) so
     # the `Copy(param)` reads the arg `%lN`, not a load of the empty slot.
-    for param_id in param_reassigned:
+    for param_id in slotted_params:
         val pidx = local_count_index(slot_keys, param_id)
         if pidx >= 0:
             val pslot = slot_values[pidx]
