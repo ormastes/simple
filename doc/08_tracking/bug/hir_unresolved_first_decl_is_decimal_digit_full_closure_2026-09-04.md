@@ -1,4 +1,4 @@
-# HIR: `_is_decimal_digit` unresolved only in the full Stage-3 closure
+# HIR drops members of one explicit import list, nondeterministically
 
 **Status:** OPEN — worked around at the single call site, compiler defect NOT fixed
 **Filed:** 2026-09-04
@@ -74,3 +74,44 @@ This is recorded rather than normalised silently, per CLAUDE.md: a workaround
 forced by a compiler defect must be logged as a concrete bug. Reverting the call
 site is the regression test — once the resolver is fixed, `_is_decimal_digit`
 must resolve there again.
+
+
+## UPDATE 2026-09-05: it is not one name, and it is not deterministic
+
+The "first declaration" hypothesis above is REFUTED, and so is the idea that a
+single name is at fault.
+
+Run A (call site using `_is_decimal_digit`): exactly ONE error in 771 modules —
+`unresolved name: _is_decimal_digit`. `_simple_integer_width`, from the same
+import list and used 12 times in the same file, resolved fine.
+
+Run B (that one call site changed to the equivalent `_is_decimal_literal`, same
+tree otherwise): `_is_decimal_digit` no longer referenced, and now
+`_simple_integer_width` is unresolved — 12 errors, one per use site. A name that
+had resolved in run A did not resolve in run B.
+
+So the resolver loses SOME member of that 18-name explicit list, and which member
+it loses changes between runs on otherwise-identical source. Patching call sites
+one name at a time cannot converge; each fix just exposes the next victim. That
+also rules out anything about the declaration itself (`_simple_integer_width` is
+at util.spl mid-file, not the first declaration).
+
+### What was done instead
+
+`driver_compile_vhdl_expr.spl` now imports that module with the WILDCARD form,
+`use compiler.driver.driver_compile_vhdl_util.*`, and the per-name workaround at
+the `_is_decimal_digit` call site has been REVERTED — the call site is back to
+its original spelling. The wildcard is not a workaround dressed up: 863 imports
+under `src/compiler` already use it, including `bootstrap_globals.spl:2`, and it
+removes the construct that is being mishandled rather than dodging one symptom
+of it.
+
+### Still open (this is a real compiler defect)
+
+The explicit multi-name import list is still mishandled in the full-closure
+build. Not reproduced yet at smaller scale — a two-file probe with a multi-line
+brace import resolves correctly, as does the real module tree under
+`--source src/compiler --source src/app --source src/lib` with a targeted entry.
+The nondeterminism between runs A and B is the strongest lead: whatever registers
+explicit import members is order- or state-dependent at closure scale. Fixing it
+should restore the explicit list here, which is the regression test.
