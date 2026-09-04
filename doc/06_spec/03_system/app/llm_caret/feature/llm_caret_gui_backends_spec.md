@@ -45,14 +45,16 @@ expect(final_state.assistant).to_equal("hello")
 
 #### Launch the browser GUI and complete a visible dummy-provider turn
 
-- Launch the provenance-qualified cached Caret browser GUI.
+- Launch the provenance-qualified cached Caret browser GUI from an unrelated
+  temporary working directory.
 - Send `test` through its live loopback HTTP surface and require `hello`.
 - Capture the visible browser window as `browser.png`.
 - Require `case=browser-live status=PASS` and a zero exit status.
 
 #### Launch Electron with the live Caret page
 
-- Launch the cached Caret artifact with `--electron`.
+- Launch the cached Caret artifact with `--electron` from an unrelated
+  temporary working directory, proving the wrapper's repository-root contract.
 - Require the reported Electron child process to remain alive and its DevTools
   endpoint to identify the exact Caret loopback URL (a blank shell cannot pass).
 - Capture the visible Electron window as `electron.png`.

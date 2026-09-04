@@ -715,3 +715,8 @@ Draw-IR/readback remains useful supporting evidence but cannot substitute for
 an actual window. The modern SSpec must invoke the production launch checker
 with explicit `step(...)` calls and assert case markers, capture paths, zero
 failures, and exit status using built-in matchers.
+
+Browser and Electron cases launch `bin/caret` from an unrelated temporary
+working directory. The wrapper exports its absolute repository root and the
+native entry uses that root for Electron binary/application paths; a test run
+from the repository root alone cannot prove standalone CLI behavior.
