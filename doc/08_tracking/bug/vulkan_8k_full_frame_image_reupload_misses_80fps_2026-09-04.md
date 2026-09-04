@@ -12,6 +12,11 @@ and p95 21.506 ms, zero mismatches, known completion, and zero timed readback.
 The 12.5 ms 80 fps gate therefore failed. The matched 1% image row passed at
 1.511 ms p95.
 
+The existing C retained mixed workload proves the proposed ownership split is
+effective on the same device: source upload occurs before timing, then a
+rectangle, retained image, 1,024 packed glyphs, and 16 lines complete in one
+submission at 1.280 ms p95 with an exact framebuffer checksum.
+
 ## Required fix
 
 Engine2D needs an owner-scoped persistent Vulkan image resource whose upload is
