@@ -30,6 +30,11 @@ run_with_icd() {
     else "$@"
     fi
 }
+hash_stdin() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    else shasum -a 256 | awk '{print $1}'
+    fi
+}
 mkdir -p "$BUILD_DIR"
 if [ -n "$ICD" ] && [ ! -f "$ICD" ]; then echo "engine2d_vulkan_mixed_status=blocked reason=missing-icd"; exit 2; fi
 # Rebuild when the lib is missing OR was built without the vulkan feature
@@ -70,4 +75,29 @@ if [ "$REQUIRE_80FPS" = 1 ]; then
         exit 1
     }
 fi
+field() { awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$BUILD_DIR/receipt.env"; }
+workload="mixed-retained-v1;7680x4320;glyphs=$GLYPHS;lines=$LINES;image=7680x50;image-upload=setup;submissions=1"
+workload_hash=$(printf '%s' "$workload" | hash_stdin)
+device_hash=$(printf '%s' "$(field engine2d_vulkan_mixed_adapter_name)|$(field engine2d_vulkan_mixed_adapter_identity)" | hash_stdin)
+cat >"$BUILD_DIR/c-feature.receipt" <<EOF
+schema=engine2d-vulkan-feature-perf-v1
+implementation=c
+backend=vulkan
+feature=mixed-retained
+workload_hash=$workload_hash
+device_hash=$device_hash
+width=$(field engine2d_vulkan_mixed_width)
+height=$(field engine2d_vulkan_mixed_height)
+warmup_count=1
+sample_count=$(field engine2d_vulkan_mixed_samples)
+timing_scope=params-upload-command-record-submit-and-fence
+p50_ns=$(field engine2d_vulkan_mixed_frame_p50_ns)
+p95_ns=$(field engine2d_vulkan_mixed_frame_p95_ns)
+timed_readback_bytes=$(field engine2d_vulkan_mixed_timed_readback_bytes)
+mismatch_count=$(field engine2d_vulkan_mixed_mismatch_count)
+checksum=$(field engine2d_vulkan_mixed_checksum)
+completion=known
+fallback=none
+EOF
+echo "engine2d_vulkan_mixed_feature_receipt=$BUILD_DIR/c-feature.receipt"
 echo "engine2d_vulkan_mixed_status=pass"
