@@ -288,7 +288,7 @@ int main(int argc, char **argv) {
     printf("engine2d_vulkan_timed_readback_bytes=0\n");
     printf("engine2d_vulkan_evidence_readback_bytes=%llu\n", (unsigned long long)readback_bytes);
     printf("engine2d_vulkan_mismatch_count=%llu\n", (unsigned long long)mismatch);
-    printf("engine2d_vulkan_checksum=%llu\n", (unsigned long long)checksum);
+    printf("engine2d_vulkan_checksum=%lld\n", (long long)checksum);
     printf("engine2d_vulkan_swapchain_presented=false\n");
     printf("engine2d_vulkan_dynamic_frame_80fps_proven=false\n");
     free(readback); free(times); free(spirv);
