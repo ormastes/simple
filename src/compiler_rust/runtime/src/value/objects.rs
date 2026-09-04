@@ -361,10 +361,9 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// src/runtime/runtime_native.c and src/runtime/simple_core/core_enum.spl.
 #[no_mangle]
 pub extern "C" fn rt_heap_ref_wellformed(value: RuntimeValue) -> i8 {
-    if !value.is_heap() {
-        return 0;
-    }
-    let addr = value.as_heap_ptr() as usize;
+    // Masked address only: native-codegen class references are raw untagged
+    // pointers, and this formation probe must accept those live objects.
+    let addr = (value.0 & !super::tags::TAG_MASK) as usize;
     if addr < 4096 {
         0
     } else {
