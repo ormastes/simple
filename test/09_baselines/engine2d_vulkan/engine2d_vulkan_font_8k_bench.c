@@ -41,7 +41,7 @@ int main(int argc,char**argv){
     int64_t fb=rt_vulkan_alloc_buffer((int64_t)bytes,0x83),atlas=rt_vulkan_alloc_buffer(gw*gh*4,0x83);
     int64_t shader=rt_vulkan_compile_spirv_raw((int64_t)(uintptr_t)spv,(int64_t)spv_n);
     int64_t pipe=rt_vulkan_create_compute_pipeline(shader,(int64_t)(uintptr_t)"main",0);
-    uint32_t*seed=malloc((size_t)bytes);uint32_t mask[gw*gh];
+    uint32_t*seed=malloc((size_t)bytes);uint32_t mask[16*16];
     if(!fb||!atlas||!shader||!pipe||!seed)return 4;
     for(uint64_t i=0;i<pixels;i++)seed[i]=0xff101010u;
     for(uint32_t i=0;i<gw*gh;i++)mask[i]=0xffffffffu;
