@@ -65,3 +65,37 @@ caused `E-MIR-TYPE-ZeroKind` (3 raises -> 0), the 57 fabricated libc stubs
 including `bcmp`, and the HIR import-resolution failure in
 `driver_compile_vhdl_expr.spl`. Phase 3 now completes on some runs and the build
 has reached `phase4:monomorphize:done` and `aot:lower_to_mir:start`.
+
+## UPDATE: waitpid did NOT fail — 255 is the worker's own exit(-1)
+
+The errno probe added to `rt_process_wait`'s `waitpid(...) < 0` branch
+(`diag(runtime): say why waitpid failed instead of collapsing it to -1`) printed
+**nothing** across a full Stage-3 run that ended in the same "KILLED" message.
+So that branch was never taken: `waitpid` succeeded.
+
+That eliminates the ECHILD / double-reap theory from the section above, and with
+`WIFEXITED` false ruled out too (the caller would have seen the real code), the
+remaining reading is the one the older record already named:
+
+> 255 ... is the conventional shell rendering of an exit(-1)
+> — `doc/08_tracking/bug/bootstrap_exit_255_misreported_as_signal_127_2026-09-02.md`
+
+**The worker is not being killed at all. It is exiting -1 on one of its own
+error paths, silently, during `phase3:hir_typecheck`.** The bootstrap's
+"was KILLED (reaped without a normal exit)" wording is therefore actively
+misleading here and has now cost three separate investigations — an OOM hunt, a
+rogue-killer hunt, and a double-reap hunt — all excluded by measurement.
+
+### Corrected next steps
+
+1. Fix the classification in `bootstrap-from-scratch.sh` (~:2937): a 255 must not
+   be reported as "KILLED ... signal number discarded". Per the 2026-09-02
+   record it is an `exit(-1)`. The runtime now reports genuine signal deaths as
+   `-(128+signo)`, so that arm can say so plainly.
+2. Find the worker's `exit(-1)` / `return -1` path that runs during HIR
+   typecheck and give it a message. It currently produces no stderr whatsoever —
+   the saved worker log ends mid-trace with zero `error` lines.
+3. Only then resume bisecting the Stage-3 build itself.
+
+Everything ahead of this in the pipeline is fixed and verified; see the Context
+section above.
