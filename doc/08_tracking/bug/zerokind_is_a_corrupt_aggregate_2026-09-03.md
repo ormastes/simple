@@ -415,3 +415,77 @@ Fix `Optional<aggregate> = nil` in the Rust seed's aarch64 codegen
 (`src/compiler_rust/**`) so a nil Optional of a struct reads back nil, and
 re-run the 30-second reproducer on `/tmp/zkprobe/tup2.spl`: the count law
 predicts every report and every `E-MIR-TYPE-ZeroKind` disappears.
+
+## After the `Optional<aggregate>` codegen fix (2026-09-04, later)
+
+`fix(codegen): stop turning a nil Optional<aggregate> into a zeroed aggregate`
+was applied to `emit_aggregate_block_copy`
+(`src/compiler_rust/compiler/src/codegen/llvm/functions/objects.rs`), the seed
+was rebuilt, Stage 2 was rebuilt by it and re-admitted, a fresh planner receipt
+was produced, and Stage 3 was run again — the last time with the machine to
+itself.
+
+**The ZeroKind class is gone.** Across every run after the fix, in the
+untruncated worker stderr:
+
+    E-MIR-TYPE-ZeroKind      : 0   (was 3)
+    [post-mono-verify] ...   : 0   (was 16)
+
+Stage 3 nevertheless still does not complete, and the remaining failure is a
+DIFFERENT and much more ordinary one:
+
+    [ERROR] phase 3 FAILED
+    HIR lowering error in src/compiler/driver/driver_compile_vhdl_expr.spl:
+      unresolved name: _is_decimal_digit
+
+That name is not missing from the source. It is defined at
+`src/compiler/80.driver/driver_compile_vhdl_util.spl:17` and is explicitly
+imported by the failing file at `driver_compile_vhdl_expr.spl:14-15`
+(`use compiler.driver.driver_compile_vhdl_util.{ _is_decimal_digit, ... }`), the
+same way three sibling files import from that module. So this is a
+name-resolution failure in the compiler, not a source defect, and it is the next
+thing to chase.
+
+### The open question the next session must settle FIRST
+
+Is this resolution failure NEW (introduced by the aggregate-copy fix) or
+PRE-EXISTING and merely unmasked?
+
+Evidence for "new": the run immediately before the fix reached
+`phase3:hir_typecheck:done` and `phase4:monomorphize:done`; runs after it stop
+inside phase 3. That is a real ordering change.
+
+Evidence for "unmasked": phase 3 previously emitted a large number of
+`[hir-reexport-chase-unresolved]` warnings whose own text says "a later
+`unresolved type`/`unresolved name` will be reported against an importing module
+instead". Resolution was already degraded; the corrupt-aggregate behaviour may
+have been letting a failed lookup fall through to a zeroed object rather than an
+error.
+
+This was NOT determined here, and the older stage-3 stderr logs are rotated
+away, so it cannot be settled by re-reading them. Settle it by reverting the
+objects.rs hunk alone, rebuilding seed + Stage 2, and re-running Stage 3: if
+`_is_decimal_digit` still fails, it is pre-existing.
+
+Reviewing the hunk on its own terms: it returns the source unchanged when the
+source is not `(tag == TAG_HEAP && ptr != 0)`. For the nil sentinel and for
+inline specials that is strictly more correct than fabricating a zero block. The
+one case that changes shape is a heap-tagged NULL pointer, which was already
+malformed. No mechanism is known by which it would break import resolution — but
+"no known mechanism" is not a measurement, which is why the revert test above is
+specified rather than assumed away.
+
+### Operational notes for the next attempt
+
+- Two Stage-3 runs were REAPED WITHOUT A NORMAL EXIT ("KILLED ... NOT a compile
+  failure") at ~57 minutes of worker time while a second heavy build was running
+  concurrently and writing into `build/bootstrap/mcp-native-cache`. No kernel OOM
+  appears in `dmesg`, worker RSS at the time was only ~9.6 GB of 121 GB, and
+  `bootstrap-progress-watch.shs` states it never kills anything. Running Stage 3
+  with the machine to itself produced a clean `exit 1` compile failure instead.
+  Do not run a second native build inside `build/bootstrap/**` during a
+  bootstrap; the cause of the kill was not identified and is worth its own
+  record if it recurs.
+- Stage 3 takes ~57-65 min of single-core worker time here. It is invoked with
+  `--threads 20` and runs at `cpu_pct=100`; see
+  `doc/08_tracking/bug/native_build_step5_serial_threads_ignored_2026-09-04.md`.
