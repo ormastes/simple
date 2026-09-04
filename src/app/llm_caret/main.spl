@@ -71,6 +71,8 @@ use app.llm_caret.gui.{caret_gui_html, caret_gui_prompt,
     caret_gui_json_content, caret_gui_json_error}
 use app.llm_caret.messaging.cli.{run_messaging_cli}
 use app.llm_caret.workspace_cli.{run_workspace_cli}
+use app.ui.electron.app_launcher.{resolve_workspace_electron_app_launch,
+    electron_app_launch_args}
 
 # ============================================================================
 # Argument parsing (pure - unit-testable without a live process)
@@ -683,37 +685,22 @@ fn _gui_handle_connection(stream: TcpStream):
             val _written = _gui_write_response(stream, response.0, response.1, response.2)
     val _closed = stream.close()
 
-fn _caret_electron_binary() -> text:
-    val app_binary = "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
-    if file_exists(app_binary):
-        return app_binary
-    val shim = "tools/electron-shell/node_modules/.bin/electron"
-    if file_exists(shim):
-        return shim
-    ""
-
 fn _gui_ready(host: text, port: i32, shell: text) -> bool:
     val url = "http://{host}:{port}/"
     print "llm_caret GUI ready at {url} shell={shell}"
     if shell == "electron":
-        val electron = _caret_electron_binary()
-        if electron == "":
-            print "Error: Electron is not installed under tools/electron-shell/node_modules"
+        val launch = resolve_workspace_electron_app_launch()
+        if not launch.ready:
+            print "Error: Caret Electron launch unavailable: {launch.reason}"
             return false
         var electron_env: {text: text} = {}
         electron_env["SIMPLE_ELECTRON_TITLE"] = "LLM Caret — Electron"
         electron_env["SIMPLE_ELECTRON_WIDTH"] = "900"
         electron_env["SIMPLE_ELECTRON_HEIGHT"] = "680"
-        var electron_args = ["--no-sandbox"]
         val debug_port = env_get("LLM_CARET_ELECTRON_DEBUG_PORT") ?? ""
-        if debug_port != "":
-            electron_args.push("--remote-debugging-port=" + debug_port)
-        electron_args.push("tools/electron-shell")
-        electron_args.push("--url")
-        electron_args.push(url)
         val pid = process_spawn_async_env(
-            electron,
-            electron_args,
+            launch.binary,
+            electron_app_launch_args(launch.package_dir, url, debug_port),
             electron_env)
         if pid <= 0:
             print "Error: failed to launch Electron"
