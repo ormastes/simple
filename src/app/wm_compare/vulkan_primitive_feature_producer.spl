@@ -141,6 +141,15 @@ fn main() -> i64:
         engine.shutdown()
         print "simple_vulkan_primitive_status=failed reason=warmup-failed"
         return 1
+    val before_samples = engine.latest_vulkan_frame_receipt()
+    if before_samples == nil:
+        engine.shutdown()
+        print "simple_vulkan_primitive_status=failed reason=missing-pre-sample-receipt"
+        return 1
+    val submit_before = before_samples.?.device_submit_count
+    val fence_before = before_samples.?.device_fence_count
+    var submit_after = submit_before
+    var fence_after = fence_before
     var samples: [i64] = []
     var valid = true
     var sample: i64 = 0
@@ -154,6 +163,9 @@ fn main() -> i64:
             not receipt.?.completion_known or not receipt.?.no_readback or
             receipt.?.readback_bytes != 0 or receipt.?.cpu_fallback_used):
             valid = false
+        if receipt != nil:
+            submit_after = receipt.?.device_submit_count
+            fence_after = receipt.?.device_fence_count
         samples.push(elapsed)
         sample = sample + 1
     val device_name = engine.vulkan_device_name()
@@ -163,10 +175,13 @@ fn main() -> i64:
         feature, basis_points, count, readback.pixels)
     val ordered = sorted_i64(samples)
     val full_pixels = WIDTH.to_i64() * HEIGHT.to_i64()
+    val submission_count = submit_after - submit_before
+    val fence_count = fence_after - fence_before
     val accepted = (valid and readback.source == "device_readback" and
         readback.pixels.len() == full_pixels and readback.pixel_count == full_pixels and
         readback.backend_handle > 0 and readback.device_identity > 0 and
         readback.checksum > 0 and mismatches == 0 and
+        submission_count == SAMPLES and fence_count == SAMPLES and
         device_name != "" and driver_identity != "")
     engine.shutdown()
     if not accepted:
@@ -187,6 +202,10 @@ fn main() -> i64:
         "timing_scope=" + timing_scope + "\n" +
         "p50_ns=" + percentile(ordered, 50).to_string() + "\n" +
         "p95_ns=" + percentile(ordered, 95).to_string() + "\n" +
+        "submission_count=" + submission_count.to_string() + "\n" +
+        "fence_count=" + fence_count.to_string() + "\n" +
+        "evidence_readback_bytes=" + (full_pixels * 4).to_string() + "\n" +
+        "presented=false\n" +
         "timed_readback_bytes=0\nmismatch_count=0\nchecksum=" +
         checksum.to_string() + "\ncompletion=known\nfallback=none"
     0

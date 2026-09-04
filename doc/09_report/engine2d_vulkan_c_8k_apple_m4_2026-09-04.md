@@ -38,3 +38,10 @@ The clear row is now a first-class normalized `clear_full` parity workload,
 not merely raw baseline output. Its exact post-sample readback covered all
 132,710,400 framebuffer bytes and matched every pixel; readback remained
 outside the timed submit/fence interval.
+
+The shared feature comparator now also requires the literal 7680x4320 extent,
+one observed device submission and completed fence per timed sample, the full
+132,710,400-byte evidence readback, and `presented=false`. These fields make the
+operation-throughput boundary explicit and prevent a smaller frame, missing
+completion, partial oracle, or presentation-inclusive receipt from being
+accepted as the same workload.
