@@ -257,11 +257,29 @@ bootstrap_stage3_windows_runnable_compiler() {
                 cygpath -u "$bootstrap_stage3_windows_candidate" 2>/dev/null
             ) || continue
         fi
+        bootstrap_stage3_windows_probe_source=$(mktemp \
+            "${TMPDIR:-/tmp}/simple-cc-probe.XXXXXX.c") || return 1
+        bootstrap_stage3_windows_probe_object=\
+"${bootstrap_stage3_windows_probe_source%.c}.obj"
+        printf 'int simple_cc_probe(void) { return 0; }\n' \
+            >"$bootstrap_stage3_windows_probe_source" || return 1
+        bootstrap_stage3_windows_probe_source_arg=\
+$bootstrap_stage3_windows_probe_source
+        bootstrap_stage3_windows_probe_object_arg=\
+$bootstrap_stage3_windows_probe_object
+        if command -v cygpath >/dev/null 2>&1; then
+            bootstrap_stage3_windows_probe_source_arg=$(cygpath -w \
+                "$bootstrap_stage3_windows_probe_source") || return 1
+            bootstrap_stage3_windows_probe_object_arg=$(cygpath -w \
+                "$bootstrap_stage3_windows_probe_object") || return 1
+        fi
         # Admission must match the hermetic Rust-authority Cargo environment.
-        # A compiler that only starts because of an unrelated ambient variable
-        # is not runnable once run_rust_authority_cargo enters `env -i`.
+        # Compile a translation unit rather than trusting --version: some
+        # broken Windows installations start their driver but fail when the
+        # frontend or a runtime DLL is loaded by Cargo's cc-rs.
         if [ -x "$bootstrap_stage3_windows_candidate" ] &&
            env -i PATH="$PATH" LC_ALL=C LANG=C \
+                MSYS2_ARG_CONV_EXCL='*' \
                 INCLUDE="${INCLUDE:-}" LIB="${LIB:-}" \
                 LIBPATH="${LIBPATH:-}" \
                 SystemRoot="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}" \
@@ -269,11 +287,17 @@ bootstrap_stage3_windows_runnable_compiler() {
                 ProgramData="${ProgramData:-${PROGRAMDATA:-}}" \
                 TEMP="${TEMP:-${TMPDIR:-/tmp}}" \
                 "$bootstrap_stage3_windows_candidate" \
-                "$bootstrap_stage3_windows_probe_arg" >/dev/null 2>&1; then
+                /nologo /c "/Fo$bootstrap_stage3_windows_probe_object_arg" \
+                "$bootstrap_stage3_windows_probe_source_arg" \
+                >/dev/null 2>&1; then
+            rm -f "$bootstrap_stage3_windows_probe_source" \
+                "$bootstrap_stage3_windows_probe_object"
             printf '%s\n' "$bootstrap_stage3_windows_candidate"
             IFS=$bootstrap_stage3_windows_old_ifs
             return 0
         fi
+        rm -f "$bootstrap_stage3_windows_probe_source" \
+            "$bootstrap_stage3_windows_probe_object"
         IFS='
 '
     done
@@ -811,9 +835,18 @@ bootstrap_stage3_tool_authority_snapshot() (
             bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
             ;;
     esac
+    bootstrap_stage3_hash_tool=""
+    for bootstrap_stage3_hash_candidate in \
+        sha256sum shasum sha256 openssl; do
+        if command -v "$bootstrap_stage3_hash_candidate" >/dev/null 2>&1; then
+            bootstrap_stage3_hash_tool=$bootstrap_stage3_hash_candidate
+            break
+        fi
+    done
+    [ -n "$bootstrap_stage3_hash_tool" ] || return 1
     for bootstrap_stage3_tool_name in \
         cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
-        shasum openssl; do
+        "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
             "$bootstrap_stage3_tool_c_path") || return 1
