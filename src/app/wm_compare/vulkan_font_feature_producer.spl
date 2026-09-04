@@ -114,6 +114,15 @@ fn main() -> i64:
         engine.shutdown()
         print "simple_vulkan_font_status=failed reason=warmup-failed"
         return 1
+    val before_samples = engine.latest_vulkan_frame_receipt()
+    if before_samples == nil:
+        engine.shutdown()
+        print "simple_vulkan_font_status=failed reason=missing-pre-sample-receipt"
+        return 1
+    val submit_before = before_samples.?.device_submit_count
+    val fence_before = before_samples.?.device_fence_count
+    var submit_after = submit_before
+    var fence_after = fence_before
     var samples: [i64] = []
     var valid = true
     var sample: i64 = 0
@@ -127,6 +136,9 @@ fn main() -> i64:
             not receipt.?.completion_known or not receipt.?.no_readback or
             receipt.?.readback_bytes != 0 or receipt.?.cpu_fallback_used):
             valid = false
+        if receipt != nil:
+            submit_after = receipt.?.device_submit_count
+            fence_after = receipt.?.device_fence_count
         samples.push(elapsed)
         sample = sample + 1
     val font_evidence = engine.vulkan_font_performance_evidence()
@@ -135,12 +147,15 @@ fn main() -> i64:
     val ordered = sorted_i64(samples)
     val device_hash = if font_evidence == nil: "" else:
         sha256_text(font_evidence.?.device_name + "|" + font_evidence.?.driver_identity)
+    val submission_count = submit_after - submit_before
+    val fence_count = fence_after - fence_before
     val accepted = (valid and font_evidence != nil and
         font_evidence.?.quad_count == GLYPHS and font_evidence.?.dispatch_count == 1 and
         font_evidence.?.status == "executed" and font_evidence.?.device_executed and
         font_evidence.?.submitted and font_evidence.?.completion_waited and
         font_evidence.?.submission_count == 1 and font_evidence.?.fence_count == 1 and
         font_evidence.?.fence_evidence_available and font_evidence.?.fence_destroyed and
+        submission_count == SAMPLES and fence_count == SAMPLES and
         readback.source == "device_readback" and
         readback.pixels.len() == WIDTH.to_i64() * HEIGHT.to_i64() and
         readback.pixel_count == WIDTH.to_i64() * HEIGHT.to_i64() and
@@ -158,6 +173,10 @@ fn main() -> i64:
         "timing_scope=params-upload-and-vulkan-submit-and-fence\n" +
         "p50_ns=" + percentile(ordered, 50).to_string() + "\n" +
         "p95_ns=" + percentile(ordered, 95).to_string() + "\n" +
+        "submission_count=" + submission_count.to_string() + "\n" +
+        "fence_count=" + fence_count.to_string() + "\n" +
+        "evidence_readback_bytes=" + (WIDTH.to_i64() * HEIGHT.to_i64() * 4).to_string() + "\n" +
+        "presented=false\n" +
         "timed_readback_bytes=0\nmismatch_count=0\n" +
         "checksum=" + checksum.to_string() + "\ncompletion=known\nfallback=none"
     0
