@@ -32,14 +32,11 @@ Covers the behavior asserted here; platform-specific behavior is out of scope.
 # over the owner's declarations, its re-export routes and its whole import
 # table, repeated per occurrence and per importer.
 #
-# The fix is NOT a capitalized-name filter. `lower_named_kind` places the
-# container arms AFTER the symbol lookup precisely so a DECLARED type of the
-# same name wins, and 42 `Result` / 14 `Option` / 10 `Array` / 1 `Dict`
-# declarations really exist in this tree (commit 1aa81cac8c6 made
-# `hir_dependency_is_builtin_type` lowercase-primitives-only for exactly that
-# reason). The fix is a NEGATIVE memo keyed on (owner, name): only a MISS is
-# cached, so a declared type still resolves on step 1 of every search and its
-# precedence is untouched.
+# The fix is not a blanket capitalized-name filter. Containers resolved after
+# symbol lookup still permit a declared type to win and use the negative memo.
+# Option, Result, and Dict are different: their dedicated lowering arms now
+# precede symbol lookup, so treating them as module-owned can only fabricate a
+# re-export ambiguity. The focused assertions below preserve that distinction.
 #
 # The observable is a COUNT, not a wall clock, so this spec discriminates the
 # algorithm rather than the machine: it cannot pass on the pre-fix code (the
@@ -158,9 +155,14 @@ describe("HIR payload-origin miss memo", fn():
         # "simplified" into a capitalized-name test.
         expect(hir_dependency_is_builtin_type("text")).to_equal(true)
         expect(hir_dependency_is_builtin_type("i64")).to_equal(true)
-        expect(hir_dependency_is_builtin_type("Dict")).to_equal(false)
-        expect(hir_dependency_is_builtin_type("Option")).to_equal(false)
-        expect(hir_dependency_is_builtin_type("Result")).to_equal(false)
+        step("Verify: eager builtin containers never enter module-origin resolution")
+        expect(hir_dependency_is_builtin_type("Dict")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("Option")).to_equal(true)
+        expect(hir_dependency_is_builtin_type("Result")).to_equal(true)
+        # These containers still resolve after symbol lookup and may be
+        # user-defined, so origin materialization must retain them.
+        expect(hir_dependency_is_builtin_type("Map")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("Array")).to_equal(false)
     )
 
     it("does not chase a callable builtin through the declaring facade", fn():

@@ -691,3 +691,27 @@ source and full parity gaps also remain.
 
 No provenance-qualified self-hosted Caret artifact exists, and no real PTY
 scenario has executed; static TUI and checker hardening is not a TUI PASS.
+
+### Live GUI completion boundary
+
+`llm_caret_gui_backends_spec.spl` currently proves only the in-process native
+state, semantic HTML, and Draw-IR handoff. Its `@capture gui` declaration does
+not itself launch or capture a window and must never be reported as live GUI
+evidence. Completion additionally requires three provenance-qualified launches:
+
+1. the cached Caret artifact with `--gui`, an HTTP GET and dummy-provider POST
+   through the bound browser server, retained HTML/protocol evidence, and a
+   visible browser capture;
+2. the same artifact with `--electron`, proof that the Electron child loaded
+   the Caret URL, retained process/console evidence, and a visible-window
+   capture;
+3. a separately built `gui_metal.spl` GPU companion with `SIMPLE_GUI=1`, real
+   Winit window creation, Metal device readback/present markers, and a retained
+   visible-window capture.
+
+Each live case must fail closed when its native artifact, provenance, runtime,
+window system, backend, interaction response, or capture is absent. Headless
+Draw-IR/readback remains useful supporting evidence but cannot substitute for
+an actual window. The modern SSpec must invoke the production launch checker
+with explicit `step(...)` calls and assert case markers, capture paths, zero
+failures, and exit status using built-in matchers.

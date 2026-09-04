@@ -79,3 +79,24 @@ run Stage 3 once with `SIMPLE_NO_STUB_FALLBACK=1`. Do not run a fourth replay in
 the current session: the mandatory three-cycle convergence cap has been
 reached. The value-layout owner-result repair still needs a replay that reaches
 `phase3:validation:value-struct:done`.
+
+## Optional-container origin correction and resource-limited replay
+
+Inspection showed the ambiguity was fabricated before lowering: `Option`,
+`Result`, and `Dict` have dedicated `lower_named_kind` arms before symbol
+lookup, but `hir_dependency_is_builtin_type` still treated them as potentially
+module-owned. Callable dependency materialization therefore swept glob imports
+for names whose lowering cannot use those imports. The filter now classifies
+these three eager builtin containers as builtin and unwraps `has_` sugar before
+its first check. The focused modern SSpec distinguishes them from `Map` and
+`Array`, whose post-lookup behavior still permits user declarations.
+
+A fresh Stage 2 containing this correction passed sanity and receiver/runtime
+capability admission. Its first Stage 3 replay was not a semantic result: macOS
+killed the worker with signal 9 immediately after surface 771, before any HIR
+marker. At the same time an unrelated agent-owned LLVM Stage 3 worker under
+`/private/tmp/simple-stage3-retained-fix` held more than 6 GiB RSS at full CPU.
+The failed replay is retained as
+`build/caret-bootstrap-current.stage3-option-filter.log`; retry only after that
+independent worker exits, reusing the admitted cache and counting the retry as
+the next bounded verification cycle.

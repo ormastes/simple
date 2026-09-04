@@ -492,7 +492,7 @@ impl HirLowering:
         if dependency == "" or skipped.contains_key(dependency): return
         # Builtins are resolved by lower_named_kind's primitive arms, never by a
         # module surface; asking an owner to declare `text` can only ever fail.
-        if hir_dependency_is_builtin_type(dependency): return
+        if hir_dependency_is_builtin_type(hir_dependency_type_name(dependency)): return
         # PAYLOADMISS: a name this owner cannot resolve is re-searched by every
         # importer and every occurrence. Container spellings dominate that cost
         # (run14: Dict 14,847, Option 9,857, Result 7,015 advisories) and they
@@ -1279,17 +1279,12 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
     materializing them was never capable of changing a lowering outcome.
     See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md"""
     if dependency == "": return true
-    # DELIBERATELY lowercase-only, plus `Any`. The CAPITALIZED dialect aliases
-    # (Int/Bool/Char/String/Float) and the container spellings
-    # (Option/Result/Dict/Set/Map/List/Array/Vec) are NOT filtered, because
-    # `lower_named_kind` places their arms AFTER the symbol lookup precisely so
-    # a DECLARED type of the same name wins -- and such declarations really
-    # exist in this tree (`struct Bool` in */ndarray/mod.spl, and 42 `Result`,
-    # 14 `Option`, 10 `Array`, 7 `List`, 4 `Set`, 4 `Map`, 1 `Dict`
-    # declarations). Filtering those would silently stop materializing a real
-    # user type, which is a correctness regression, not noise reduction. `Any`
-    # is safe: zero declarations in the tree, and its lowering is `recovered`,
-    # never a hard error.
+    # Most capitalized dialect aliases and containers remain unfiltered because
+    # `lower_named_kind` resolves them after symbol lookup, allowing a declared
+    # type to win. Option, Result, and Dict are the exceptions: their dedicated
+    # arms precede symbol lookup, so chasing them through an owner's glob imports
+    # cannot affect lowering and can fabricate ambiguity between unrelated
+    # modules. Stage 3 exposed exactly that for backend.env/backend.interpreter.
     if dependency == "text" or dependency == "str" or dependency == "string":
         return true
     if dependency == "i8" or dependency == "i16" or dependency == "i32" or
@@ -1302,6 +1297,8 @@ fn hir_dependency_is_builtin_type(dependency: text) -> bool:
         return true
     if dependency == "bool" or dependency == "char" or dependency == "byte" or
        dependency == "void" or dependency == "nil" or dependency == "Any":
+        return true
+    if dependency == "Option" or dependency == "Result" or dependency == "Dict":
         return true
     # `fn` is the bare-callable-type keyword spelling (`h: fn()`), lowered by
     # `lower_named_kind`'s primitive arm in hir_lowering/types.spl (the
