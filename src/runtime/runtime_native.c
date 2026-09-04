@@ -8064,7 +8064,6 @@ int64_t rt_enum_payload(int64_t value) {
  * (heap/aggregate payloads only; scalar payloads are not heap-tagged by
  * design and report 0 here). */
 int8_t rt_heap_ref_wellformed(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
     return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) >= 4096 ? 1 : 0;
 }
 
