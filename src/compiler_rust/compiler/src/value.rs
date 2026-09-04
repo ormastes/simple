@@ -621,6 +621,26 @@ impl CowEnv {
 
     /// Insert a key-value pair. Returns the previous value if any.
     pub fn insert(&mut self, key: String, value: Value) -> Option<Value> {
+        // Diagnostic trap (SIMPLE_TRAP_SELF_WRITE=1): a frame's `self` slot
+        // must only ever hold a receiver. Catching the write with a backtrace
+        // is the only way to name the code path, since Expr::FieldAccess has
+        // no span. Record:
+        // doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+        if key == "self"
+            && matches!(value, Value::Bool(_))
+            && std::env::var("SIMPLE_TRAP_SELF_WRITE").is_ok()
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static TRAPPED: AtomicUsize = AtomicUsize::new(0);
+            if TRAPPED.fetch_add(1, Ordering::Relaxed) < 8 {
+            eprintln!(
+                "[self-slot-write] value_type={} value={} backtrace=\n{}",
+                value.type_name(),
+                value.to_debug_string().chars().take(120).collect::<String>(),
+                std::backtrace::Backtrace::force_capture()
+            );
+            }
+        }
         // Both sets are empty in the common frame; a `remove` on an empty
         // set still hashes the key (SipHash over the name) for nothing.
         if !self.tombstones.is_empty() {

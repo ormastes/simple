@@ -1,0 +1,53 @@
+# A chained call whose OUTER link returns a non-receiver value must not
+# overwrite the ROOT variable -- in particular the frame's `self` slot.
+#
+# Bug: doc/08_tracking/bug/hir_register_imported_symbol_inner_self_bound_to_bool_2026-09-01.md
+# Sibling: doc/08_tracking/bug/chained_method_call_writes_result_back_into_receiver_variable_2026-08-31.md
+#
+# `handle_method_call_with_self_update_inner`'s owned-values branch wrote the
+# OUTER call's return value into the root binding, gated only by
+# `updated_inner_self.class == class` -- the outer receiver's class compared to
+# ITSELF, so trivially true and saying nothing about the root. For
+# `val ok = self.symbols.lookup_or_invalid(n).is_valid()` the root is `self` and
+# the outer result is a bool, so the frame's `self` became `false` and every
+# later `self.<field>` failed with "cannot access field on value of type 'bool'".
+# That aborted every native-build at `hir 0/N` inside
+# `register_imported_symbol_inner`. This mirrors that exact shape.
+
+use std.spec
+
+class SlotId:
+    v: i64
+    fn is_valid() -> bool:
+        self.v > 0
+    fn unjittable(f: fn(Any) -> bool) -> bool:
+        f(self.v)
+
+class SlotTable:
+    hits: i64
+    fn lookup_or_invalid(k: i64) -> SlotId:
+        SlotId(v: k)
+
+class SlotOwner:
+    symbols: SlotTable
+    tag: text
+    me probe(k: i64) -> text:
+        val already_bound = self.symbols.lookup_or_invalid(k).is_valid()
+        self.tag
+    me probe_flag(k: i64) -> bool:
+        val already_bound = self.symbols.lookup_or_invalid(k).is_valid()
+        already_bound
+
+describe "chained call must not overwrite the frame's self slot":
+    it "keeps self an object after a chain whose outer link returns bool":
+        var o = SlotOwner(symbols: SlotTable(hits: 0), tag: "kept")
+        expect(o.probe(0)).to_equal("kept")
+
+    it "keeps self usable when the chain's outer link returns true":
+        var o = SlotOwner(symbols: SlotTable(hits: 0), tag: "kept")
+        expect(o.probe(7)).to_equal("kept")
+
+    it "still returns the chain's own value correctly":
+        var o = SlotOwner(symbols: SlotTable(hits: 0), tag: "kept")
+        expect(o.probe_flag(7)).to_equal(true)
+        expect(o.probe_flag(0)).to_equal(false)
