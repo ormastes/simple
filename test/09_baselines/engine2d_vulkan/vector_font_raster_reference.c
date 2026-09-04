@@ -37,37 +37,42 @@ int main(int argc, char **argv) {
         for (int codepoint = FIRST_CODEPOINT; codepoint <= LAST_CODEPOINT; codepoint++) {
             const int64_t bitmap = rt_font_glyph_bitmap(font, codepoint, 24.0);
             if (!bitmap) continue;
-            const int64_t width = rt_font_bitmap_width(bitmap);
-            const int64_t height = rt_font_bitmap_height(bitmap);
-            if (sample == SAMPLE_COUNT - 1) {
-                const int64_t xoff = rt_font_bitmap_xoff(bitmap);
-                const int64_t yoff = rt_font_bitmap_yoff(bitmap);
-                const int64_t advance = rt_font_glyph_advance(font, codepoint, 24.0);
-                rendered_glyphs++;
-                output_pixels += (uint64_t)(width * height);
-                checksum ^= (uint64_t)width;
-                checksum *= 1099511628211ULL;
-                checksum ^= (uint64_t)height;
-                checksum *= 1099511628211ULL;
-                checksum ^= (uint64_t)xoff;
-                checksum *= 1099511628211ULL;
-                checksum ^= (uint64_t)yoff;
-                checksum *= 1099511628211ULL;
-                checksum ^= (uint64_t)advance;
-                checksum *= 1099511628211ULL;
-                for (int64_t y = 0; y < height; y++) {
-                    for (int64_t x = 0; x < width; x++) {
-                        const uint64_t alpha =
-                            (uint64_t)rt_font_bitmap_get_pixel(bitmap, x, y);
-                        coverage += alpha;
-                        checksum ^= alpha;
-                        checksum *= 1099511628211ULL;
-                    }
-                }
-            }
             rt_font_bitmap_free(bitmap);
         }
         samples[sample] = monotonic_ns() - start;
+    }
+
+    /* Accuracy evidence is deliberately outside every timed sample. */
+    for (int codepoint = FIRST_CODEPOINT; codepoint <= LAST_CODEPOINT; codepoint++) {
+        const int64_t bitmap = rt_font_glyph_bitmap(font, codepoint, 24.0);
+        if (!bitmap) continue;
+        const int64_t width = rt_font_bitmap_width(bitmap);
+        const int64_t height = rt_font_bitmap_height(bitmap);
+        const int64_t xoff = rt_font_bitmap_xoff(bitmap);
+        const int64_t yoff = rt_font_bitmap_yoff(bitmap);
+        const int64_t advance = rt_font_glyph_advance(font, codepoint, 24.0);
+        rendered_glyphs++;
+        output_pixels += (uint64_t)(width * height);
+        checksum ^= (uint64_t)width;
+        checksum *= 1099511628211ULL;
+        checksum ^= (uint64_t)height;
+        checksum *= 1099511628211ULL;
+        checksum ^= (uint64_t)xoff;
+        checksum *= 1099511628211ULL;
+        checksum ^= (uint64_t)yoff;
+        checksum *= 1099511628211ULL;
+        checksum ^= (uint64_t)advance;
+        checksum *= 1099511628211ULL;
+        for (int64_t y = 0; y < height; y++) {
+            for (int64_t x = 0; x < width; x++) {
+                const uint64_t alpha =
+                    (uint64_t)rt_font_bitmap_get_pixel(bitmap, x, y);
+                coverage += alpha;
+                checksum ^= alpha;
+                checksum *= 1099511628211ULL;
+            }
+        }
+        rt_font_bitmap_free(bitmap);
     }
     rt_font_free(font);
 
