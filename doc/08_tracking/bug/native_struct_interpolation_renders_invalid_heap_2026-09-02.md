@@ -1,7 +1,7 @@
 # Interpolating a struct in native codegen silently renders `<invalid-heap:0x...>`
 
 **Date:** 2026-09-02
-**Status:** FIXED (runtime rendering, 2026-09-02) — see §Resolution
+**Status:** FIXED (runtime rendering, 2026-09-02) — see §Resolution. NO REGRESSION GUARD EXISTS for it yet.
 **Severity:** HIGH — silently destroys diagnostics, and does so only on failure paths
 
 ## What happens

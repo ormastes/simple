@@ -364,6 +364,35 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
         "runtime_fork.c",
         "runtime_memtrack.c",
         "runtime_process.c",
+        // Owned-process receipt ABI (rt_process_run_owned_observed_bounded_value
+        // and siblings) and the coverage probe/dump ABI. Both were registered by
+        // 97a39131fe3 "fix(runtime): close core tool host providers" and dropped
+        // from this list by the 929de773c88 (#150) stale snapshot alongside
+        // runtime_core_host_services.c (since restored). The pure-Simple backend
+        // list (src/compiler/70.backend/backend/runtime_compiler.spl) has carried
+        // runtime_process_owned throughout, so this was a seed-only lane gap of
+        // the same never-an-archive-member class as runtime_simd_case.c above.
+        // Verified collision-free against every other member (nm, host cc).
+        "runtime_memory.c",
+        // ^ canonical memory provider, compiled WITH -DSIMPLE_RUNTIME_MEMORY_OWNER=1
+        // (see the compile flags below).  It shares 16 symbol NAMES with
+        // runtime_native.c (rt_alloc, rt_free, rt_realloc, rt_memcpy, rt_memset,
+        // rt_struct_alloc, rt_struct_receiver_valid, rt_ptr_*, copy_mem,
+        // rt_mem_guard_stats) but those are not duplicate DEFINITIONS:
+        // runtime_native.c wraps its entire copy of that family in
+        // `#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)` (lines 5893 and 11701), so
+        // exactly one owner survives any given build.  The macro is what makes
+        // the two mutually exclusive, and the seed lane was setting neither the
+        // flag nor the file -- which is why core-C carried NO definition at all
+        // of rt_ptr_read_i32, rt_mem_harden_check_native, rt_mem_profile_*,
+        // rt_transient_raw_scope_* or spl_i64_is_zero: those live ONLY in
+        // runtime_memory.c.  The pure-Simple backend lane already does both
+        // (70.backend/backend/runtime_compiler.spl:521,545 push the define, and
+        // its `sources` array carries "runtime_memory"), and tests.rs:3145-3150
+        // pins that lane's flag -- so this closes a seed-only lane gap rather
+        // than changing the design.
+        "runtime_process_owned.c",
+        "runtime_coverage_core.c",
         // Defines simple_contract_check / simple_contract_check_msg. Migrated
         // Rust -> C by 76371b85c3, then silently dropped from this list by
         // ea30567675 "chore: sync diagnostics and runtime updates" while the .c
@@ -479,6 +508,10 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fPIC")
             .arg("-std=gnu11")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
+            // Selects runtime_memory.c as THE memory provider and compiles out
+            // runtime_native.c's mutually-exclusive fallback copies of the same
+            // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
+            .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
@@ -1153,21 +1186,29 @@ struct Stage4CliCProviderSpec {
     undefined: Stage4CliCUndefinedPolicy,
 }
 
+// Stage4's C time provider is a THIN ABI SHIM only: a hosted clock plus the
+// bounded thread-local progress slots. Calendar arithmetic and progress policy
+// are owned by `std.common.time_utils` in pure Simple (fa170a1350d
+// "refactor(runtime): move timestamp policy to Simple"), and the C bodies for
+// rt_timestamp_* / rt_progress_{init,reset,get_elapsed_seconds} survive ONLY
+// inside `#ifdef SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT` in
+// src/runtime/runtime_timestamp.c -- a macro defined in exactly one place
+// (src/compiler_rust/runtime/build.rs) for the Rust seed's cdylib, which cannot
+// link Pure Simple modules. Stage4 never defines it, so expecting those 12
+// names here asserted a duplicate policy provider that the architecture
+// deliberately removed.
+//
+// fa170a1350d corrected this list to the 6 shim symbols; 929de773c88 (#150,
+// "fix(windows): native-build works end to end") reintroduced the pre-refactor
+// 14 as a stale-snapshot clobber -- it never touched runtime_timestamp.c and
+// added no replacement Windows provider, so this is a revert, not a redesign.
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_get_elapsed_seconds",
-    "rt_progress_init",
-    "rt_progress_reset",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_time_now_seconds_f64",
-    "rt_timestamp_add_days",
-    "rt_timestamp_diff_days",
-    "rt_timestamp_from_components",
-    "rt_timestamp_get_day",
-    "rt_timestamp_get_hour",
-    "rt_timestamp_get_microsecond",
-    "rt_timestamp_get_minute",
-    "rt_timestamp_get_month",
-    "rt_timestamp_get_second",
-    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[

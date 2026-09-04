@@ -1,7 +1,33 @@
 # A statement-leading `-`/`+` at the same indent is silently glued to the previous line
 
 **Filed:** 2026-07-28 · **Lane:** IFCHAIN · **Severity:** critical (silent wrong arithmetic)
-**Status:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
+**Status:** RESOLVED 2026-09-02 for the `-` shape (the `+` shape is now a loud
+parse error, see below) — verified by DIFFERENTIAL MEASUREMENT on two binaries,
+not by inspection. Probe: `fn f() -> i64:` / `15` / `-1`, plus the same shape as
+an `if`-arm's last statement, plus a non-final control.
+
+| binary | `minus_last` | `nested_if` | `minus_middle` (control) |
+|---|---|---|---|
+| deployed seed of 2026-07-25 (pre-fix) | **14** (glued) | **7** (glued) | 99 |
+| seed built from `origin/main` `1b76db1d6c3` | **-1** | **-3** | 99 |
+
+So the silent glue is gone at `origin/main`; the old binary still shows it,
+which is what makes this a measurement rather than an assumption. The `+`
+variant (`+7` as a statement) is now rejected outright —
+`parse: Unexpected token: expected expression, found Plus` — i.e. loud, not
+silently glued; that is the defect's disappearance, not its persistence.
+Lane caveat: only the interpreter lane was exercisable on the verifying host
+(aarch64-apple-darwin); the freshly built seed there has no working JIT. This
+is a layout/parse behaviour, so it is not expected to be engine-specific, but
+that has not been measured on the JIT lane.
+Guards landed with this closure:
+`scripts/check/check-statement-leading-sign-operator.shs` (runs the differential
+probe above; PASS on the fresh seed, FAIL naming both wrong values on the old
+one) and `test/01_unit/statement_leading_sign_operator_spec.spl`.
+The 276-site `LEADOP001` conversion backlog below is NOT closed by this — the
+lint rule and its escalation-to-Deny plan stand on their own.
+
+**Previous status:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
 (`src/compiler/35.semantics/lint/leading_operator.spl`, Warn) flags the same-indent
 shape. 276 existing sites inventoried in `build/leadop_sites.txt`; escalate the rule
 to Deny once they are converted. Lane state: `.spipe/leading_operator_lint/state.md`.

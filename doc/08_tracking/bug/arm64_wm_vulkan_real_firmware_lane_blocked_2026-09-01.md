@@ -1,6 +1,14 @@
 # arm64 WM+Vulkan real-firmware smoke lane is blocked: `arm64-desktop-engine2d` scenario is unregistered (2026-09-01)
 
-Status: **OPEN**. Gate landed **ADVISORY** (honestly RED).
+Status: **OPEN** (Blocker 1 FIXED 2026-09-01, gate still ERROR).
+Gate landed **ADVISORY** (honestly RED).
+
+**Update 2026-09-01:** Blocker 1 is fixed — `arm64-desktop-engine2d` is now
+registered and `os build --scenario=arm64-desktop-engine2d` dispatches instead
+of saying `unknown scenario`. Three further pre-existing blockers were found
+behind it and the kernel is still unproducible; Blocker 2 (real-firmware
+`protocol: linux` handover) remains UNPROVEN because no boot was reached. See
+`arm64_desktop_engine2d_media_chain_blockers_2026-09-01.md`.
 Gate: `scripts/check/check-simpleos-arm64-wm-vulkan-pixel-evidence.shs`
 Arch scope: aarch64/arm64 only. x86_64 and riscv64 are other lanes.
 

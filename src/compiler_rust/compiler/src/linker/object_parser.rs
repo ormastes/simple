@@ -514,8 +514,8 @@ mod tests {
         // "relocation source section .rdata$.refptr is not executable code").
         use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
         use object::{
-            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
-            SymbolFlags, SymbolScope,
+            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind, SymbolFlags,
+            SymbolScope,
         };
 
         let mut object = WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
@@ -586,8 +586,8 @@ mod tests {
         // at all -- are structurally unaffected.
         use object::write::{Object as WriteObject, Relocation, Symbol, SymbolSection};
         use object::{
-            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind,
-            SymbolFlags, SymbolScope,
+            Architecture, BinaryFormat, Endianness, RelocationEncoding, RelocationFlags, RelocationKind, SymbolFlags,
+            SymbolScope,
         };
 
         let mut object = WriteObject::new(BinaryFormat::Coff, Architecture::X86_64, Endianness::Little);
@@ -673,11 +673,8 @@ mod tests {
         );
 
         let named = |r: &SmfRelocation| parsed.symbols[r.symbol_index as usize].name.clone();
-        let mut got: Vec<(String, RelocationType)> = parsed
-            .relocations
-            .iter()
-            .map(|r| (named(r), r.reloc_type))
-            .collect();
+        let mut got: Vec<(String, RelocationType)> =
+            parsed.relocations.iter().map(|r| (named(r), r.reloc_type)).collect();
         got.sort_by(|a, b| a.0.cmp(&b.0));
 
         assert_eq!(

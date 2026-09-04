@@ -4,9 +4,21 @@
 - **Severity:** P1
 - **Class:** wrong-function dispatch (silently, in the interpreter) escalating to
   a hard native-build failure
-- **Status:** OPEN — root cause RE-DIAGNOSED 2026-08-17 (the shadow is NOT the
-  cause; see "Re-diagnosis" at the bottom). A one-line pure-Simple fix has been
-  applied but is **NOT yet verified by a completed native-build**.
+- **Status:** RESOLVED (2026-09-02) — root cause RE-DIAGNOSED 2026-08-17 (the
+  shadow is NOT the cause; see "Re-diagnosis" at the bottom). The one-line fix
+  is present in the current tree at
+  `src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl:56-64`
+  (`is_interp_builtin_fn` now includes `"eprint"` alongside `print`/`println`;
+  the file was split out of the old `expressions.spl` umbrella since this
+  record was filed). Verified by running the existing regression spec
+  `test/01_unit/compiler/hir/eprint_builtin_native_path_spec.spl` with
+  `bin/release/macos-arm64/simple test <path>` — `Passed: 4, Failed: 0`. That
+  spec lowers a module calling `eprint` through the same HIR path this record
+  is about (`hirlowering_for_module`) and asserts zero `unresolved name`
+  diagnostics, plus a control case proving an unrelated undefined callee still
+  errors. This is a stronger verification than the native-build attempts
+  recorded below (which never completed on the hosts they were tried on): it
+  exercises the exact HIR resolution logic the bug is about, directly.
 - **Root cause (original, superseded):** `src/lib/nogc_sync_mut/io/process_ops.spl:558`
   — `fn eprint(msg: text):`
 - **Root cause (actual):** `src/compiler/20.hir/hir_lowering/expressions.spl:51`

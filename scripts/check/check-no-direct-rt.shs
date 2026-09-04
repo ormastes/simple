@@ -4,7 +4,7 @@
 # Counts are measured, never assumed. See:
 #   doc/03_plan/infra/binary_runtime_hardening/plan.md
 #   doc/01_research/infra/sspec_binary/binary_sspec_rt_hardening_frozen_design_2026-08-18.md
-# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...]
+# Usage: sh scripts/check/check-no-direct-rt.shs [--selftest-only] [--root DIR] [--roots r1,r2,...] [--offenders FILE]
 #
 # --roots (comma-separated repo-relative dirs, default "src,examples,tools,scripts,test"):
 # widened 2026-08-28 from src-only to also scan examples/, tools/, scripts/ and
@@ -40,10 +40,17 @@ CRITICAL=0
 # `git commit -a` from any lane then silently landed. See
 # doc/08_tracking/bug/no_direct_rt_baseline_auto_write_2026-08-18.md
 GENERATE_BASELINE=0
+# --offenders FILE: write the per-file forbidden-call tally ("<count> <path>")
+# to FILE instead of discarding it. Read-only reporting: it changes no verdict
+# and no exit code, it only makes the ratchet's debt actionable — without it
+# the offender tally is computed and then deleted, so only the top 5 are ever
+# visible and only on a FAIL.
+OFFENDERS_OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest-only) SELFTEST_ONLY=1 ;;
     --generate-baseline) GENERATE_BASELINE=1 ;;
+    --offenders) shift; OFFENDERS_OUT="$1" ;;
     --critical) CRITICAL=1 ;;
     --root) shift; ROOT="$1" ;;
     --roots) shift; ROOTS="$1" ;;
@@ -61,6 +68,54 @@ RT_RE='^[^#]*\brt_[a-z0-9_]*\('
 # separately so neither class can disappear from the structured result.
 DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
 
+# On Windows (Git Bash / MSYS / Cygwin) ripgrep emits native `\` path
+# separators while `find` emits `/`. That divergence made the manifest
+# equality check below fail for EVERY scan, so this guard returned ERR and
+# could never run on a Windows host. Normalizing rg's output to `/` is gated
+# on Windows only: on POSIX rg already emits `/`, and a literal backslash is
+# a legal character in a POSIX filename, so rewriting it there would corrupt
+# real paths. The Unix code path is byte-for-byte unchanged.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) RT_WIN_SEPS=1 ;;
+  *) RT_WIN_SEPS=0 ;;
+esac
+
+# There is a SECOND Windows divergence beyond separators: ripgrep is a native
+# Win32 binary, so it resolves an MSYS virtual path to its real Windows form
+# (`/tmp/x` -> `C:/Users/.../Temp/x`, `/c/Users/...` -> `C:/Users/...`) while
+# MSYS `find` keeps the virtual form. Both the manifest comparison and the
+# allowlist `rel=` derivation need rg's paths mapped back to the shell's view.
+# rt_win_native_root prints the native form rg will emit for a shell path.
+rt_win_native_root() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# rt_normalize_seps <file> <shell-root> <native-root> <nul|nl>
+# Rewrites `\` to `/` and maps the native root prefix back to the shell root,
+# in place, on Windows only. Deliberately NOT a pipe on the rg invocation:
+# `rg ... | tr` would make `$?` report tr's status and silently launder a
+# scanner error into a pass.
+rt_normalize_seps() {
+  [ "$RT_WIN_SEPS" = "1" ] || return 0
+  [ -f "$1" ] || return 0
+  awk -v shroot="$2" -v natroot="$3" -v rs="$4" '
+    BEGIN { if (rs == "nul") { RS = "\0"; ORS = "\0" } }
+    {
+      gsub(/\\/, "/")
+      if (natroot != "" && index($0, natroot) == 1) {
+        $0 = shroot substr($0, length(natroot) + 1)
+      }
+      print
+    }
+  ' "$1" > "$1.norm" || return 1
+  mv -f "$1.norm" "$1" || return 1
+  return 0
+}
+
 # scan_dir <repo-root> <scan-root> <allowlist-file> [offender-output]
 # stdout: "scanned direct allowed forbidden declarations" counts.
 # <repo-root> is used only to compute repo-relative paths for allowlist
@@ -69,6 +124,7 @@ DECL_RE='^[[:space:]]*extern[[:space:]]+fn[[:space:]]+rt_[a-z0-9_]*\('
 scan_dir() {
   sd_repo_root="$1"; sd_scan_root="$2"; sd_allow="$3"; sd_off="${4:-}"
   sd_scanned=0; sd_allowed=0; sd_forbidden=0; sd_decls=0
+  sd_native_root=$(rt_win_native_root "$sd_scan_root")
   if ! command -v rg >/dev/null 2>&1; then
     echo "ERR"
     return
@@ -91,6 +147,7 @@ scan_dir() {
   fi
   rg --files --null --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$sd_scan_root" > "$tmp_rg_raw"
   st=$?
+  rt_normalize_seps "$tmp_rg_raw" "$sd_scan_root" "$sd_native_root" nul || st=99
   # `rg --files` uses 1 for an empty but successful traversal.
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
@@ -102,13 +159,22 @@ scan_dir() {
     echo "ERR"
     return
   fi
-  if ! sd_scanned=$(awk 'BEGIN { RS = "\0" } END { print NR + 0 }' "$tmp_find"); then
+  # Count NUL terminators, not awk records. one-true-awk (/usr/bin/awk on
+  # macOS) does not honour RS="\0": a 2-record NUL-delimited stream comes back
+  # as NR=1, so this reported scanned=1 for the whole tree and the selftest's
+  # hidden/ignored fixture failed closed with ERROR on every BSD-awk host.
+  # `tr -dc` + `wc -c` is exact and portable.
+  if ! sd_scanned=$(tr -dc '\0' < "$tmp_find" | wc -c | tr -d ' \t'); then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
     echo "ERR"
     return
   fi
   rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$RT_RE" "$sd_scan_root" > "$tmp_matches"
   st=$?
+  # The count outputs feed $f -> rel -> allowlist prefix matching, whose
+  # entries are `/`-separated. Normalizing only the manifest above would
+  # reclassify every allowlisted provider as forbidden.
+  rt_normalize_seps "$tmp_matches" "$sd_scan_root" "$sd_native_root" nl || st=99
   # rg exit 1 means no matches; >1 is a scanner error.
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches"; rmdir "$tmp_scan"
@@ -117,6 +183,7 @@ scan_dir() {
   fi
   rg --count --no-ignore --hidden --glob '*.spl' --glob '!**/vendor/**' "$DECL_RE" "$sd_scan_root" > "$tmp_decls"
   st=$?
+  rt_normalize_seps "$tmp_decls" "$sd_scan_root" "$sd_native_root" nl || st=99
   if [ $st -gt 1 ]; then
     rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"; rmdir "$tmp_scan"
     echo "ERR"
@@ -327,11 +394,16 @@ fi
 
 # ---- real scan ----
 if [ ! -d "$ROOT/src" ]; then echo "ERROR — nothing was checked: no src/ under $ROOT"; exit 2; fi
-OFF_FILE="$(mktemp).off"
+if [ -n "$OFFENDERS_OUT" ]; then OFF_FILE="$OFFENDERS_OUT"; else OFF_FILE="$(mktemp).off"; fi
 : > "$OFF_FILE"
+# Keep the tally only when the caller explicitly asked for it.
+rt_off_done() {
+  if [ -z "$OFFENDERS_OUT" ]; then rm -f "$OFF_FILE"; fi
+  return 0
+}
 counts=$(scan_roots "$ROOT" "$ROOTS" "$ALLOWLIST" "$OFF_FILE")
 if [ "$counts" = "ERR" ]; then
-  rm -f "$OFF_FILE"
+  rt_off_done
   echo "ERROR — nothing was checked: direct runtime scan failed"
   exit 2
 fi
@@ -339,7 +411,7 @@ agg="${counts%%|*}"
 breakdown="${counts#*|}"
 set -- $agg
 if [ $# -ne 5 ]; then
-  rm -f "$OFF_FILE"
+  rt_off_done
   echo "ERROR — nothing was checked: direct runtime scan failed"
   exit 2
 fi
@@ -350,7 +422,7 @@ forbidden=$4
 decls=$5
 
 if [ $((allowed + forbidden)) -ne "$direct_total" ]; then
-  rm -f "$OFF_FILE"
+  rt_off_done
   echo "ERROR — count arithmetic does not balance"
   exit 2
 fi
@@ -366,12 +438,12 @@ echo "  forbidden_by_root:$breakdown"
 echo "  extern_declarations: $decls"
 echo "  match_total_incl_declarations: $((direct_total + decls))"
 
-if [ "$scanned" -eq 0 ]; then rm -f "$OFF_FILE"; echo "ERROR — nothing was checked"; exit 2; fi
+if [ "$scanned" -eq 0 ]; then rt_off_done; echo "ERROR — nothing was checked"; exit 2; fi
 
 # ---- critical mode: phase-A error, no ratchet grace ----
 if [ $CRITICAL -eq 1 ] && [ "$forbidden" -gt 0 ]; then
   top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
-  rm -f "$OFF_FILE"
+  rt_off_done
   echo "fix: route through the std.* semantic API, or a sanctioned provider alias (see scripts/check/no_direct_rt_allowlist.txt)."
   echo "FAIL — critical mode: $forbidden forbidden direct rt_* call site(s) (roots=$ROOTS,$breakdown), extern_decls=$decls; top offenders: $top"
   exit 1
@@ -382,20 +454,20 @@ fi
 if [ ! -f "$BASELINE_FILE" ]; then
   if [ $GENERATE_BASELINE -eq 1 ]; then
     echo "$forbidden" > "$BASELINE_FILE"
-    rm -f "$OFF_FILE"
+    rt_off_done
     echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline recorded)"
     exit 0
   fi
-  rm -f "$OFF_FILE"
+  rt_off_done
   echo "ERROR — nothing was checked: no baseline at $BASELINE_FILE (run with --generate-baseline to record one)"
   exit 2
 fi
 baseline=$(head -1 "$BASELINE_FILE" | tr -cd '0-9')
-if [ -z "$baseline" ]; then rm -f "$OFF_FILE"; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
+if [ -z "$baseline" ]; then rt_off_done; echo "ERROR — baseline file unreadable: $BASELINE_FILE"; exit 2; fi
 
 if [ "$forbidden" -gt "$baseline" ]; then
   top=$(sort -rn "$OFF_FILE" | head -5 | awk '{printf "%s:%s ", $2, $1}')
-  rm -f "$OFF_FILE"
+  rt_off_done
   # Fix-it guidance printed BEFORE the verdict — the verdict must stay the
   # last stdout line per the check-script contract.
   echo "fix: route through the std.* semantic API (e.g. std.io.file.read_text, std.nogc_sync_mut.compression.gzip.crc32_text),"
@@ -407,7 +479,7 @@ if [ "$forbidden" -gt "$baseline" ]; then
   echo "FAIL — forbidden direct rt_* count $forbidden exceeds baseline $baseline (roots=$ROOTS,$breakdown), extern_decls=$decls; top offenders: $top"
   exit 1
 fi
-rm -f "$OFF_FILE"
+rt_off_done
 if [ $GENERATE_BASELINE -eq 1 ]; then
   echo "$forbidden" > "$BASELINE_FILE"
   echo "PASS — $scanned file(s) scanned (roots=$ROOTS,$breakdown), forbidden=$forbidden, extern_decls=$decls (baseline updated $baseline -> $forbidden)"
