@@ -53,7 +53,8 @@ expect(final_state.assistant).to_equal("hello")
 #### Launch Electron with the live Caret page
 
 - Launch the cached Caret artifact with `--electron`.
-- Require the reported Electron child process to remain alive after loading.
+- Require the reported Electron child process to remain alive and its DevTools
+  endpoint to identify the exact Caret loopback URL (a blank shell cannot pass).
 - Capture the visible Electron window as `electron.png`.
 - Require `case=electron-live status=PASS` and a zero exit status.
 

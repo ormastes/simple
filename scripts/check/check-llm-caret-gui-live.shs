@@ -53,6 +53,12 @@ require_metal() {
     [ -x "$metal" ] && [ -f "$provenance" ] || return 1
     expected=$(provenance_value binary_sha256 "$provenance") || return 1
     [ "$(hash_file "$metal")" = "$expected" ] || return 1
+    runtime_path=$(provenance_value runtime_path "$provenance") || return 1
+    runtime_sha=$(provenance_value runtime_sha256 "$provenance") || return 1
+    [ "$(provenance_value runtime "$provenance")" = pure-simple-self-hosted ] || return 1
+    [ "$(provenance_value rust_seed_used "$provenance")" = false ] || return 1
+    [ -x "$root/$runtime_path" ] || return 1
+    [ "$(hash_file "$root/$runtime_path")" = "$runtime_sha" ] || return 1
     committed=$(cd "$root" && jj log -r '@-' --no-graph -T 'commit_id ++ "\n"') || return 1
     [ "$(provenance_value source_commit "$provenance")" = "$committed" ] || return 1
 }
@@ -90,6 +96,8 @@ run_browser() {
     elif ! capture_screen "$shot"; then
         fail "$label" visible-capture-missing "$shot"
     else
+        printf '%s\n' "html_artifact=$html"
+        printf '%s\n' "protocol_artifact=$response"
         pass "$label" "$shot"
     fi
     kill "$server_pid" 2>/dev/null || true
@@ -101,14 +109,17 @@ run_electron() {
     label=electron-live
     electron="$root/tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
     log="$artifact_root/electron.log"
+    devtools="$artifact_root/electron-devtools.http"
     shot="$artifact_root/electron.png"
     port=$((44000 + ($$ % 1000)))
+    debug_port=$((45000 + ($$ % 1000)))
     if [ ! -x "$electron" ]; then
         fail "$label" electron-not-installed "$electron"
         return
     fi
     : >"$log"
-    "$root/bin/caret" --provider dummy --electron --port="$port" >"$log" 2>&1 &
+    LLM_CARET_ELECTRON_DEBUG_PORT="$debug_port" \
+        "$root/bin/caret" --provider dummy --electron --port="$port" >"$log" 2>&1 &
     server_pid=$!
     if ! wait_for_text "$log" "llm_caret Electron launched pid="; then
         fail "$label" electron-not-launched "$log"
@@ -116,11 +127,16 @@ run_electron() {
     fi
     child=$(sed -n 's/.*Electron launched pid=\([0-9][0-9]*\).*/\1/p' "$log" | tail -1)
     sleep 2
+    printf 'GET /json HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' |
+        nc -w 5 127.0.0.1 "$debug_port" >"$devtools" 2>/dev/null || true
     if [ -z "$child" ] || ! kill -0 "$child" 2>/dev/null; then
         fail "$label" electron-child-not-live "$log"
+    elif ! grep -F "http://127.0.0.1:$port/" "$devtools" >/dev/null 2>&1; then
+        fail "$label" electron-caret-page-not-loaded "$devtools"
     elif ! capture_screen "$shot"; then
         fail "$label" visible-capture-missing "$shot"
     else
+        printf '%s\n' "protocol_artifact=$devtools"
         pass "$label" "$shot"
     fi
     [ -z "$child" ] || kill "$child" 2>/dev/null || true
@@ -151,6 +167,7 @@ run_metal() {
     elif ! capture_screen "$shot"; then
         fail "$label" visible-capture-missing "$shot"
     else
+        printf '%s\n' "event_artifact=$events"
         pass "$label" "$shot"
     fi
     kill "$metal_pid" 2>/dev/null || true
