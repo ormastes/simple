@@ -1,0 +1,85 @@
+"""Pure-Simple outline-rasterization evidence matched to the stb C reference."""
+
+use std.gc_async_mut.io.time_ops.{time_now_nanos}
+use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer}
+
+val FONT_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+val FIRST_CODEPOINT: i64 = 33
+val LAST_CODEPOINT: i64 = 126
+val SAMPLE_COUNT: i64 = 31
+
+fn sorted_i64(values: [i64]) -> [i64]:
+    var result = values
+    var i: i64 = 1
+    while i < result.len():
+        val value = result[i]
+        var j = i - 1
+        while j >= 0 and result[j] > value:
+            result[j + 1] = result[j]
+            j = j - 1
+        result[j + 1] = value
+        i = i + 1
+    result
+
+fn raster_receipt() -> text:
+    val rasterizer = FontRasterizer.load_selected(FONT_PATH)
+    if rasterizer.loaded_generation <= 0:
+        return "vector_font_simple_status=failed reason=selected-font-load"
+
+    var samples: [i64] = []
+    var checksum: i64 = 1469598103934665603
+    var coverage: i64 = 0
+    var output_pixels: i64 = 0
+    var rendered_glyphs: i64 = 0
+    var sample: i64 = 0
+    while sample < SAMPLE_COUNT:
+        val start = time_now_nanos()
+        var codepoint = FIRST_CODEPOINT
+        while codepoint <= LAST_CODEPOINT:
+            val glyph = rasterizer.rasterize(codepoint, 24)
+            if glyph == nil:
+                return "vector_font_simple_status=failed reason=glyph-rasterization codepoint={codepoint}"
+            if sample == SAMPLE_COUNT - 1:
+                val width = glyph.?.gbm_width
+                val height = glyph.?.gbm_height
+                val pixels = glyph.?.gbm_pixels
+                if width <= 0 or height <= 0 or pixels.len() != width * height:
+                    return "vector_font_simple_status=failed reason=invalid-glyph codepoint={codepoint}"
+                rendered_glyphs = rendered_glyphs + 1
+                output_pixels = output_pixels + pixels.len()
+                checksum = (checksum ^ width) * 1099511628211
+                checksum = (checksum ^ height) * 1099511628211
+                checksum = (checksum ^ glyph.?.gbm_bearing_x) * 1099511628211
+                checksum = (checksum ^ glyph.?.gbm_bearing_y) * 1099511628211
+                checksum = (checksum ^ glyph.?.gbm_advance) * 1099511628211
+                var pixel: i64 = 0
+                while pixel < pixels.len():
+                    val alpha = pixels[pixel].to_i64()
+                    coverage = coverage + alpha
+                    checksum = (checksum ^ alpha) * 1099511628211
+                    pixel = pixel + 1
+            codepoint = codepoint + 1
+        samples.push(time_now_nanos() - start)
+        sample = sample + 1
+
+    val ordered = sorted_i64(samples)
+    if rendered_glyphs != 94 or coverage <= 0:
+        return "vector_font_simple_status=failed reason=incomplete-evidence"
+    "vector_font_simple_schema=pure-sfnt-raster-v1\n" +
+        "vector_font_simple_glyphs={rendered_glyphs}\n" +
+        "vector_font_simple_samples={SAMPLE_COUNT}\n" +
+        "vector_font_simple_p50_ns={ordered[15]}\n" +
+        "vector_font_simple_p95_ns={ordered[29]}\n" +
+        "vector_font_simple_output_pixels={output_pixels}\n" +
+        "vector_font_simple_coverage={coverage}\n" +
+        "vector_font_simple_checksum={checksum}\n" +
+        "vector_font_simple_status=pass"
+
+fn main() -> i64:
+    val receipt = raster_receipt()
+    print receipt
+    if receipt.contains("vector_font_simple_status=pass"):
+        return 0
+    1
+
+export sorted_i64

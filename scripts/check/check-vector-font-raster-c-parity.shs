@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+BUILD_DIR=${BUILD_DIR:-$ROOT/build/check/vector-font-raster-c-parity}
+SIMPLE_BINARY=${SIMPLE_VECTOR_FONT_BINARY:-}
+FONT=$ROOT/assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf
+SUMMARY=$ROOT/tools/vector_font_diff/out/summary.txt
+
+if [ -z "$SIMPLE_BINARY" ] || [ ! -x "$SIMPLE_BINARY" ]; then
+    echo 'vector_font_raster_c_parity_status=blocked reason=missing-simple-feature-binary'
+    exit 2
+fi
+case "$SIMPLE_BINARY" in
+    *compiler_rust*|*bootstrap*|*phase1*|*phase2*|*phase3*)
+        echo 'vector_font_raster_c_parity_status=blocked reason=bootstrap-artifact-inadmissible'
+        exit 2
+        ;;
+esac
+if [ ! -f "$SUMMARY" ]; then
+    echo 'vector_font_raster_c_parity_status=blocked reason=missing-chrome-accuracy-evidence'
+    exit 2
+fi
+if find "$ROOT/tools/vector_font_diff/simple_vector_font_dump.spl" \
+        "$ROOT/tools/vector_font_diff/chrome_vector_font_dump.js" \
+        "$ROOT/tools/vector_font_diff/vector_font_diff.js" \
+        -newer "$SUMMARY" -print | grep -q .; then
+    echo 'vector_font_raster_c_parity_status=blocked reason=stale-chrome-accuracy-evidence'
+    exit 2
+fi
+grep -q '^glyphs_compared=10$' "$SUMMARY"
+grep -q '^findings=0$' "$SUMMARY"
+grep -q '^vector-font-diff verdict: PASS' "$SUMMARY"
+
+mkdir -p "$BUILD_DIR"
+cc -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
+    -Wno-unused-function -I"$ROOT/src/runtime" \
+    "$ROOT/test/09_baselines/engine2d_vulkan/vector_font_raster_reference.c" \
+    "$ROOT/src/runtime/runtime_font.c" -lm -o "$BUILD_DIR/c-reference"
+"$BUILD_DIR/c-reference" "$FONT" >"$BUILD_DIR/c.receipt"
+"$SIMPLE_BINARY" >"$BUILD_DIR/simple.receipt"
+
+field() {
+    awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$2"
+}
+c_glyphs=$(field vector_font_reference_glyphs "$BUILD_DIR/c.receipt")
+s_glyphs=$(field vector_font_simple_glyphs "$BUILD_DIR/simple.receipt")
+c_samples=$(field vector_font_reference_samples "$BUILD_DIR/c.receipt")
+s_samples=$(field vector_font_simple_samples "$BUILD_DIR/simple.receipt")
+c_p95=$(field vector_font_reference_p95_ns "$BUILD_DIR/c.receipt")
+s_p95=$(field vector_font_simple_p95_ns "$BUILD_DIR/simple.receipt")
+
+[ "$c_glyphs" = 94 ] && [ "$s_glyphs" = "$c_glyphs" ]
+[ "$c_samples" = 31 ] && [ "$s_samples" = "$c_samples" ]
+grep -q '^vector_font_simple_status=pass$' "$BUILD_DIR/simple.receipt"
+if [ -z "$c_p95" ] || [ -z "$s_p95" ] || [ "$c_p95" -le 0 ] || [ "$s_p95" -le 0 ]; then
+    echo 'vector_font_raster_c_parity_status=failed reason=invalid-timing'
+    exit 1
+fi
+if [ "$s_p95" -gt "$((c_p95 * 2))" ]; then
+    echo "vector_font_raster_c_parity_status=failed reason=simple-p95-exceeds-2x-c c_p95_ns=$c_p95 simple_p95_ns=$s_p95"
+    exit 1
+fi
+echo "vector_font_raster_c_parity_status=pass c_p95_ns=$c_p95 simple_p95_ns=$s_p95 accuracy=chrome-differential-pass"
