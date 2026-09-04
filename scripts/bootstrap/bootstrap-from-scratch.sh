@@ -2846,6 +2846,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       stage2_rejected_bin="${stage2_rejected_dir}/simple${exe_suffix}"
       stage2_rejected_receipt="${stage2_rejected_dir}/rejection.env"
       mkdir -p "${stage2_rejected_dir}"
+      # A previous rejection left both artifacts chmod 400/0500, so `mv` onto the
+      # binary and `>` onto the receipt both fail with "Permission denied" and the
+      # run silently keeps the PREVIOUS run's rejection.env -- a stale receipt that
+      # reads as authoritative. Clear them first so every run records truthfully.
+      rm -f "${stage2_rejected_bin}" "${stage2_rejected_receipt}"
       mv "${stage2_bin}" "${stage2_rejected_bin}"
       chmod 400 "${stage2_rejected_bin}"
       {
@@ -3042,6 +3047,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_K1_COMPOSITION_SHA256_BEFORE="${k1_composition_sha256_before}" \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_STAGE3_STREAMING_SURFACES=1 \
+    SIMPLE_KEEP_SOURCE_CONTENTS="${SIMPLE_KEEP_SOURCE_CONTENTS:-}" \
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \

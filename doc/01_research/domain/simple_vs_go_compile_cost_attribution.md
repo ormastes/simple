@@ -88,3 +88,4 @@ publication bounded and host-shared.
   function count, IR bytes, object/archive bytes, and link time.
 - Do not claim a 2x ratio until both tools complete the same corpus on the same
   host and the confidence interval excludes larger ratios.
+

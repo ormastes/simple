@@ -44,3 +44,94 @@ remains open and is the generalizable defect class.
 The build proceeds past the fatal into `surface_build` (43/100 modules at the
 10-minute mark of the first post-fix run); MIR error count measurement in
 progress at time of writing — see the lane report.
+
+---
+
+## REOPENED 2026-09-01 (layer 1 DOES still reproduce) — measured
+
+**Provenance:** HEAD `9fb0d279739ab69b6577e875fb645aabae2ab03d`; working tree dirty
+(18,861 tracked-diff paths overall, dominated by `doc/` + symlink-as-dir entries;
+**25** under `src/` + `scripts/`); seed
+`src/compiler_rust/target/release/simple.exe` == `deps/simple.exe`, md5
+`286f66b8615dce0e0da788f0550c4008`, 39,120,896 bytes, built 2026-09-01 18:21.
+Seed staleness is **discharged for this defect**: the only `.rs` file newer than
+the seed is `compiler/src/linker/object_parser.rs` (COFF linker, unrelated), and
+`_Items/` has **zero** `.spl` churn since `591aad1791e`. `SIMPLE_RESOLVE_METHODS`
+unset (default OFF).
+
+**Result (two independent ~21-minute runs, both rc=1):**
+```
+step 1/6 parse          100/100 OK (76 s)
+step 1/6 surface_build  100/100 OK (~19 min)
+step 2/6 hir              0/100 -> FATAL
+error: semantic: undefined field 'symbols': cannot access field on value of type 'bool'
+```
+The section above says layer 1 "does NOT reproduce". That was measured on a
+different seed (`f9bf124d933a…`) at `591aad1791e`; the `.spl` sources involved
+are byte-identical between the two points, so the difference is either the seed
+or run-to-run nondeterminism in the ambiguous-dispatch fallback the run's own
+`compiler_cross_module_private_symbol_collision` warnings describe
+(`env_get`: 6 defs / 2 signatures; `dir_list`, `file_read_text`, `shell`, …).
+Layer 3 (`log.spl` `.len()` on `Option::None`) is genuinely gone — the run gets
+~19 minutes further than before `628ac26d38d`.
+
+## Call site pinned with `SIMPLE_DEBUG_FIELD_ACCESS=1`
+
+```
+[field-access-error] field=symbols recv_type=bool recv=false expr=Identifier("self")
+stack=register_glob_imported_symbols_depth -> register_imported_symbol
+ -> register_imported_symbol_inner -> materialize_imported_callable_type_dependencies
+ -> materialize_imported_callable_type_dependencies_inner
+ -> materialize_imported_callable_dependency
+ -> materialize_imported_callable_declared_dependency
+ -> materialize_imported_callable_declared_dependency_inner
+ -> register_imported_symbol -> register_imported_symbol_inner
+ -> register_imported_symbol -> register_imported_symbol_inner
+```
+`self` itself is the bad receiver: inside a `me` method it evaluates to the
+boolean `false`. Owner: `src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl`,
+`impl HirLowering: me register_imported_symbol_inner` (declared line 183).
+
+Strongest candidate line: **219**, `val terminal_type = self.symbols.lookup_qualified_type_raw(...)`
+in the `routed_origin` branch — the statement immediately after the recursive
+`self.register_imported_symbol(...)` at 211-214, and the ONLY `self.symbols` in
+this method that is the FIRST `self` access after a recursive call.
+The sibling site at 516 (legacy re-export chase) is **excluded**: it reads
+`self.module_surfaces` before `self.symbols`, so a clobber there would report
+`field=module_surfaces`.
+Working hypothesis: receiver write-back of a void/mutating `me` call stores a
+bool into `self` — the "staged aggregate-receiver accessor hazard" already named
+at `80.driver/driver_hir_pipeline_lowering.spl:587`. NOT yet reproduced in a
+20-line fixture (a plain class with the same shape does not clobber); the
+`impl <Class>:` cross-module extension form is the untested variable.
+
+## Adjacent defect noticed (not proven to be this bug)
+`module_import_registration.spl:177` declares `fn surface_name_position(...)`
+(a non-`me` function) whose body reads `self.name_index_positions`, and it is
+called six times per registration as `self.surface_name_position(...)`.
+It happens to work on the seed interpreter, but `fn` + `self` is the same
+class-surface divergence recorded in `context_helpers.spl:14-27`.
+
+## MIR error count: STILL NOT OBTAINABLE
+MIR lowering is step 3+/6. The build dies at step 2/6 module 0. No MIR error
+count can be produced until this is fixed; the last real number remains 133.
+
+### Probe run 1 (2026-09-01) — line 219 REFUTED
+Two `eprint` probes were inserted in `register_imported_symbol_inner`
+(before line 219 `terminal_type`, tag B; before line 240 `existing_id`, tag C)
+and the full build re-run. Result: **B fired 0 times** — the `routed_origin`
+branch never executes in this closure, so line 219 is NOT the site and the
+"first `self` access after a recursive call" argument does not apply.
+**C fired 33 times**, the last with `local=DapSession`, immediately followed by
+the `[field-access-error]`. So the failing `self.symbols` is at or after the
+composite branch's line 240 within the SAME registration — candidates 243/244
+(`self.symbols.symbols.has(...)` / `[...]`), 272-279, or one of the
+enum/trait/alias/callable/const branches. A follow-up run with a probe before
+every `self.symbols` inside the method is pinning it.
+
+Minimal-fixture status: NOT reproducible small. Three shapes were tried against
+the same seed and all behaved correctly — void mutating `me` ending in a dict
+assignment, mutual recursion through a `_inner` helper, a mutating bool-returning
+`me` called in an `if`, and the same across a cross-module `impl Box:` extension.
+Like the layer-3 `env_get` defect, this only manifests under the full compiler
+closure, which is consistent with the ambiguous-dispatch warnings the run emits.

@@ -236,6 +236,29 @@ val endpoint = "127.0.0.1:8080"_sock
 val pattern = "[a-z]+"_re           # Regex
 ```
 
+### Lazy System Path Templates
+
+The implemented runtime contract uses an inert raw template. Construction does
+not read the environment or inspect the platform:
+
+```simple
+use std.nogc_sync_mut.env.system_location.{LazyPathTemplate}
+
+var cache = LazyPathTemplate.new(r"{sys:compiler_cache}/objects")
+val resolved = cache.resolve()?       # first environment/platform access
+```
+
+Registered references include `home`, `user_local`, `user_cache`,
+`user_config`, `user_data`, `user_state`, `runtime`, `temp`, and
+`compiler_cache`. `compiler_cache` honors `SIMPLE_CACHE`; general locations
+honor their `SIMPLE_SYS_*` override before OS conventions. Resolved logical
+paths always use `/`, including `C:/...` on Windows.
+
+`"{sys:user_cache}/x"_path` and contextual `Path` literals are the canonical
+planned surface, but require pure-Simple typed-string parser parity. Until that
+gate passes, use the raw `LazyPathTemplate` constructor; an ordinary formatted
+string would try to parse `sys:user_cache` as a Simple expression.
+
 ---
 
 ## Numbers

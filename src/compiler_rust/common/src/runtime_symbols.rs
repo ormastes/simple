@@ -383,6 +383,18 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
 pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
+    // Core-required symbols that used to live ONLY in
+    // CORE_REQUIRED_RUNTIME_SYMBOLS: without entries here the generated
+    // runtime-symbol table never contained them, so the seed JIT's static
+    // provider could not resolve rt_struct_alloc and dropped every module to
+    // the interpreter (~100-1000x slowdown on every `run`).
+    "__simple_runtime_init",
+    "__simple_runtime_shutdown",
+    "rt_struct_alloc",
+    "rt_realloc",
+    "print_raw",
+    "rt_time_now_unix",
+    "rt_entropy_hardware_ready",
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
@@ -2122,6 +2134,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vec_sum",
     "rt_vec_with",
     "rt_vulkan_acquire_next_image",
+    "rt_vulkan_accepted_compute_submit_count",
     "rt_vulkan_alloc_buffer",
     "rt_vulkan_begin_compute",
     "rt_vulkan_begin_render_pass_gfx",
@@ -2152,6 +2165,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_copy_to_buffer_raw",
     "rt_vulkan_copy_to_buffer_array",
     "rt_vulkan_create_compute_pipeline",
+    "rt_vulkan_create_compute_pipeline_raw",
     "rt_vulkan_create_descriptor_set",
     "rt_vulkan_create_fence",
     "rt_vulkan_create_framebuffer",
@@ -2188,9 +2202,15 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_get_device",
     "rt_vulkan_get_last_error",
     "rt_vulkan_init",
+    "rt_vulkan_init_external_window_present",
+    "rt_vulkan_init_headless_present",
+    "rt_vulkan_init_window_present",
     "rt_vulkan_is_available",
     "rt_vulkan_map_memory",
     "rt_vulkan_present",
+    "rt_vulkan_present_buffer",
+    "rt_vulkan_provider_device_count",
+    "rt_vulkan_provider_is_available",
     "rt_vulkan_push_constants",
     "rt_vulkan_push_constants_raw",
     "rt_vulkan_push_constants_array",

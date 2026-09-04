@@ -244,7 +244,12 @@ void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
-int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
+/* ABI: rt_file_lock IS in text_arg_indices (calls.rs:2672 `Some(&[0])`), so
+ * `text` splits into a raw (ptr, len) pair -- the OPPOSITE of rt_mmap above.
+ * Confirmed by the codegen spec (runtime_sffi.rs:323 = [I64,I64,I64] -> [I64])
+ * and the Rust runtime (file_ops.rs:679). platform_win.h:276 already had the
+ * correct shape; this declaration was the stale one. */
+int64_t  rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
 /* ===== Offset-based File I/O ===== */
@@ -259,8 +264,15 @@ int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly);
-bool     rt_munmap(void* addr, int64_t size);
+/* ABI: rt_mmap/rt_munmap/rt_madvise/rt_msync are ABSENT from text_arg_indices
+ * (50.mir/text_extern_abi.spl + the Rust twin calls.rs), so generated code
+ * passes `text` as ONE tagged value, not a (ptr, len) pair, and passes the
+ * mapped address as a plain i64. Confirmed by the codegen specs
+ * (runtime_sffi.rs:326 `rt_mmap` = [I64,I64,I64,I64] -> [I64]) and by the Rust
+ * runtime (file_ops.rs:1018). The old `const char*`/`void*` shapes never
+ * matched any generated caller -- same class as rt_readdir above. */
+int64_t  rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readonly);
+bool     rt_munmap(int64_t addr, int64_t size);
 void     rt_invlpg(uint64_t addr);
 uint64_t unsafe_addr_of(int64_t value);
 uint64_t rt_read_cr3(void);
@@ -285,8 +297,8 @@ void     rt_volatile_write_u64(int64_t addr, int64_t value);
 void     rt_memory_barrier(void);
 void     rt_load_barrier(void);
 void     rt_store_barrier(void);
-bool     rt_madvise(void* addr, int64_t size, int64_t advice);
-bool     rt_msync(void* addr, int64_t size);
+bool     rt_madvise(int64_t addr, int64_t size, int64_t advice);
+bool     rt_msync(int64_t addr, int64_t size);
 
 /* ===== Raw mmap/mprotect Syscall Wrappers (address-based, for SMF loader) ===== */
 

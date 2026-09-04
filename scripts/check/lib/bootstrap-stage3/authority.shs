@@ -257,10 +257,8 @@ bootstrap_stage3_host_platform() {
 bootstrap_stage3_target_c_compiler() {
     case "$1" in
         *-pc-windows-msvc)
-            command -v cl 2>/dev/null ||
-                command -v cl.exe 2>/dev/null ||
-                command -v clang-cl 2>/dev/null ||
-                command -v clang-cl.exe 2>/dev/null
+            bootstrap_stage3_windows_runnable_compiler cl.exe '/?' ||
+                bootstrap_stage3_windows_runnable_compiler clang-cl.exe '--version'
             ;;
         x86_64-pc-windows-gnu)
             command -v "${CC_x86_64_pc_windows_gnu:-gcc}" 2>/dev/null
@@ -269,6 +267,47 @@ bootstrap_stage3_target_c_compiler() {
             command -v cc 2>/dev/null
             ;;
     esac
+}
+
+bootstrap_stage3_windows_runnable_compiler() {
+    bootstrap_stage3_windows_name=$1
+    bootstrap_stage3_windows_probe_arg=$2
+    bootstrap_stage3_windows_candidates=""
+    if command -v where.exe >/dev/null 2>&1; then
+        bootstrap_stage3_windows_candidates=$(
+            where.exe "$bootstrap_stage3_windows_name" 2>/dev/null |
+                tr -d '\r'
+        ) || bootstrap_stage3_windows_candidates=""
+    fi
+    if [ -z "$bootstrap_stage3_windows_candidates" ]; then
+        bootstrap_stage3_windows_candidate=$(
+            command -v "$bootstrap_stage3_windows_name" 2>/dev/null
+        ) || return 1
+        bootstrap_stage3_windows_candidates=$bootstrap_stage3_windows_candidate
+    fi
+
+    bootstrap_stage3_windows_old_ifs=$IFS
+    IFS='
+'
+    for bootstrap_stage3_windows_candidate in $bootstrap_stage3_windows_candidates; do
+        IFS=$bootstrap_stage3_windows_old_ifs
+        if command -v cygpath >/dev/null 2>&1; then
+            bootstrap_stage3_windows_candidate=$(
+                cygpath -u "$bootstrap_stage3_windows_candidate" 2>/dev/null
+            ) || continue
+        fi
+        if [ -x "$bootstrap_stage3_windows_candidate" ] &&
+           "$bootstrap_stage3_windows_candidate" \
+                "$bootstrap_stage3_windows_probe_arg" >/dev/null 2>&1; then
+            printf '%s\n' "$bootstrap_stage3_windows_candidate"
+            IFS=$bootstrap_stage3_windows_old_ifs
+            return 0
+        fi
+        IFS='
+'
+    done
+    IFS=$bootstrap_stage3_windows_old_ifs
+    return 1
 }
 
 bootstrap_stage3_resolve_rust_toolchain() (
@@ -722,6 +761,17 @@ bootstrap_stage3_resolve_llvm_build_authority() (
     done
 )
 
+bootstrap_stage3_tool_requested_path() {
+    bootstrap_stage3_requested_name=$1
+    bootstrap_stage3_selected_c_name=$2
+    bootstrap_stage3_selected_c_path=$3
+    if [ "$bootstrap_stage3_requested_name" = "$bootstrap_stage3_selected_c_name" ]; then
+        printf '%s\n' "$bootstrap_stage3_selected_c_path"
+    else
+        command -v "$bootstrap_stage3_requested_name" 2>/dev/null
+    fi
+}
+
 bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_output=$1
     bootstrap_stage3_tool_path=$2
@@ -766,6 +816,19 @@ bootstrap_stage3_tool_authority_snapshot() (
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
     bootstrap_stage3_tool_c_name=cc
+    # Initialise BEFORE the case: the msvc arm below is the only writer, so on
+    # every non-Windows host this stayed unset and `set -u` aborted the whole
+    # Stage-2 trust-root refresh with "bootstrap_stage3_tool_c_path: unbound
+    # variable".
+    #
+    # It must be the RESOLVED cc path, not empty. The tool loop below asks
+    # `bootstrap_stage3_tool_requested_path` for each tool, and that helper
+    # returns this value VERBATIM when the requested name equals
+    # `..._tool_c_name` (:729-731) rather than falling through to `command -v`.
+    # The caller then requires an absolute path (`case ... /*) ;; *) return 1`),
+    # so an empty default made the `cc` iteration fail closed and produced
+    # "could not bind bootstrap tool authority" on every non-Windows host.
+    bootstrap_stage3_tool_c_path=$(command -v cc 2>/dev/null || printf '')
     case "$(bootstrap_stage3_host_platform)" in
         *-pc-windows-msvc)
             bootstrap_stage3_tool_c_path=$(
@@ -780,11 +843,9 @@ bootstrap_stage3_tool_authority_snapshot() (
     for bootstrap_stage3_tool_name in \
         cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
         shasum openssl; do
-        bootstrap_stage3_tool_requested=$(
-            command -v "$bootstrap_stage3_tool_name" 2>/dev/null
-        ) || {
-            return 1
-        }
+        bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
+            "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
+            "$bootstrap_stage3_tool_c_path") || return 1
         case "$bootstrap_stage3_tool_requested" in
             /*) ;;
             *) return 1 ;;
@@ -1765,12 +1826,26 @@ bootstrap_stage3_publish_compatibility_pointer() {
     bootstrap_stage3_compatibility_tmp=\
 "$bootstrap_stage3_compatibility_parent/.bootstrap-link.$$"
     rm -f "$bootstrap_stage3_compatibility_tmp"
-    ln -s "$bootstrap_stage3_compatibility_relative" \
+    bootstrap_stage3_create_compatibility_link \
+        "$bootstrap_stage3_compatibility_relative" \
         "$bootstrap_stage3_compatibility_tmp" || return 1
     perl -e 'rename($ARGV[0], $ARGV[1]) or die "rename: $!\n"' \
         "$bootstrap_stage3_compatibility_tmp" \
         "$bootstrap_stage3_compatibility_path" || return 1
     rm -f "$bootstrap_stage3_compatibility_marker"
+}
+
+bootstrap_stage3_create_compatibility_link() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_link_target=$1
+    bootstrap_stage3_link_path=$2
+    MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" \
+        ln -s "$bootstrap_stage3_link_target" \
+            "$bootstrap_stage3_link_path" || return 1
+    [ -L "$bootstrap_stage3_link_path" ] || {
+        rm -rf "$bootstrap_stage3_link_path"
+        return 1
+    }
 }
 
 # Bind the checked-out commit plus the actual tracked dirty bytes/symlink

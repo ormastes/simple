@@ -86,6 +86,11 @@ pub struct Lowerer {
     pub(super) type_aliases: HashMap<String, String>,
     /// Function aliases: alias_name -> original_name
     pub(super) function_aliases: HashMap<String, String>,
+    /// Free-function names THIS module's own source declares. Used to detect a
+    /// `use m.{f as g}` whose original name `f` is also defined locally: on the
+    /// non-flattened (native/AOT) lane, rewriting `g` back to the bare `f`
+    /// there binds the LOCAL `f` and silently loses the import.
+    pub(super) own_declared_function_names: std::collections::HashSet<String>,
     /// Reverse lookup for suggestions: original -> Vec<aliases>
     pub(super) type_aliases_reverse: HashMap<String, Vec<String>>,
     /// Reverse lookup for function suggestions: original -> Vec<aliases>
@@ -231,6 +236,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -287,6 +293,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
@@ -366,6 +373,7 @@ impl Lowerer {
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
             function_aliases: HashMap::new(),
+            own_declared_function_names: std::collections::HashSet::new(),
             import_alias_bindings: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),

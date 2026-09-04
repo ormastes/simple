@@ -291,6 +291,93 @@ fn _tok_wants_reset(body: text) -> bool:
         return true
     extract_field(body, "args").contains("--reset")
 
+# ---------------------------------------------------------------------------
+# Code burn: where the tokens actually went
+# ---------------------------------------------------------------------------
+#
+# `tok_stats_text` answers "how much did the mimics save". This answers the
+# other half — WHICH tool spent the budget — by ranking every feature/tool
+# pair on bytes_returned (what actually reached the model). `saved` on the
+# same row is the comparison against the unoptimized original: the bytes the
+# tool consumed minus the bytes it handed back.
+
+struct TokBurn:
+    key: text
+    calls: i64
+    captured: i64
+    returned: i64
+    saved: i64
+
+fn _tok_burn_find(rows: [TokBurn], key: text) -> i64:
+    var i: i64 = 0
+    for r in rows:
+        if r.key == key:
+            return i
+        i = i + 1
+    -1
+
+# Grouped by "<feature>/<tool>", ranked by bytes_returned descending.
+fn tok_burn_rows(events: [TokEvent]) -> [TokBurn]:
+    var rows: [TokBurn] = []
+    for e in events:
+        val key = e.feature + "/" + e.tool
+        val at = _tok_burn_find(rows, key)
+        var row = if at >= 0: rows[at] else: TokBurn(key: key, calls: 0, captured: 0, returned: 0, saved: 0)
+        row.calls = row.calls + 1
+        row.returned = row.returned + e.returned
+        if not e.hit:
+            row.captured = row.captured + e.captured
+            row.saved = row.saved + tok_tokens_saved(e.captured, e.returned)
+        if at >= 0:
+            rows[at] = row
+        else:
+            rows.push(row)
+    # Selection sort: the row count is the number of distinct tools, not events.
+    var i: i64 = 0
+    while i < rows.len():
+        var best = i
+        var j = i + 1
+        while j < rows.len():
+            if rows[j].returned > rows[best].returned:
+                best = j
+            j = j + 1
+        if best != i:
+            val tmp = rows[i]
+            rows[i] = rows[best]
+            rows[best] = tmp
+        i = i + 1
+    rows
+
+fn _tok_pct(part: i64, whole: i64) -> i64:
+    if whole <= 0:
+        return 0
+    (part * 100) / whole
+
+fn tok_burn_text() -> text:
+    val events = tok_load_events()
+    val rows = tok_burn_rows(events)
+    var lines: [text] = []
+    lines.push("code burn — where tokens were spent (ledger: " + tok_telemetry_path() + ")")
+    if rows.len() == 0:
+        lines.push("(no recorded calls yet)")
+        return lines.join("\n")
+    var total_returned: i64 = 0
+    var total_saved: i64 = 0
+    for r in rows:
+        total_returned = total_returned + r.returned
+        total_saved = total_saved + r.saved
+    lines.push("feature/tool | calls | bytes_to_model | share% | tokens_saved_vs_original")
+    for r in rows:
+        lines.push(r.key + " | " + str(r.calls) + " | " + str(r.returned) + " | " + str(_tok_pct(r.returned, total_returned)) + "% | " + str(r.saved))
+    lines.push("TOTAL | " + str(events.len()) + " | " + str(total_returned) + " | 100% | " + str(total_saved))
+    val original = total_returned + total_saved * 4
+    lines.push("unoptimized original would have been ~" + str(original) + " byte(s); optimized to " + str(total_returned) + " (" + str(_tok_pct(total_returned, original)) + "% of original)")
+    lines.push("(bytes_to_model = what the tool returned; tokens_saved = max(0, captured - returned)/4 over cache misses)")
+    lines.join("\n")
+
+fn handle_simple_token_burn(id: text, body: text) -> text:
+    make_tool_result(id, tok_burn_text())
+
 fn handle_simple_token_stats(id: text, body: text) -> text:
     if _tok_wants_reset(body):
         tok_reset()
@@ -298,6 +385,7 @@ fn handle_simple_token_stats(id: text, body: text) -> text:
     make_tool_result(id, tok_stats_text())
 
 export handle_simple_token_stats, tok_stats_text, tok_rollup, tok_tokens_saved
+export handle_simple_token_burn, tok_burn_text, tok_burn_rows, TokBurn
 export tok_record, tok_record_at, tok_load_events, tok_reset
 export tok_memo_key, tok_memo_get, tok_memo_put, tok_telemetry_path, tok_memo_path
 export TokEvent, TokRollup, TokMemo, TOK_FEATURE_CTX, TOK_FEATURE_PONYTAIL

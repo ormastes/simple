@@ -201,9 +201,22 @@ git_in_repo() {
         git -C "$gir_repo" "$@"
 }
 
-CARGO_TARGET_ROOT=${CARGO_TARGET_ROOT:-/mnt/data/cargo-target-seed-build-guard}
+# /mnt/data is a fast NVMe scratch volume that exists on the Linux CI hosts and
+# NOWHERE ELSE. Hardcoding it made this guard FAIL — not skip, FAIL — on macOS
+# with `error: failed to create directory \`/mnt/data\``, so the mandatory
+# pre-push seed-build gate could never pass from a mac and every push aborted
+# part-way through the gate list. the bootstrap preflight guard (scripts/check/, line 33) already had
+# the right shape (`if [ -d /mnt/data ]`); this is the same idea, extended to
+# prefer the declared user storage root when there is one.
+_seed_scratch_base() {
+    if [ -d /mnt/data ] && [ -w /mnt/data ]; then echo /mnt/data; return; fi
+    if [ -n "${SIMPLE_USER_STORAGE_ROOT:-}" ]; then echo "$SIMPLE_USER_STORAGE_ROOT"; return; fi
+    echo "${TMPDIR:-/tmp}"
+}
+SEED_SCRATCH_BASE=$(_seed_scratch_base)
+CARGO_TARGET_ROOT=${CARGO_TARGET_ROOT:-$SEED_SCRATCH_BASE/cargo-target-seed-build-guard}
 KEEP_BUILD_DIR=${KEEP_BUILD_DIR:-0}
-SEED_GREEN_MARKER_DIR=${SEED_GREEN_MARKER_DIR:-/mnt/data/.seed-build-guard-green}
+SEED_GREEN_MARKER_DIR=${SEED_GREEN_MARKER_DIR:-$SEED_SCRATCH_BASE/.seed-build-guard-green}
 
 TMPROOT=""
 WORKTREE=""

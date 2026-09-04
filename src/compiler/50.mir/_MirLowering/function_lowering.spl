@@ -1292,10 +1292,28 @@ impl MirLowering:
                 val zk_span_nil = zk_span == nil
                 val zk_span_zero = zk_span == 0
                 eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} module={self.current_module_id} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil} spannil={zk_span_nil} spanzero={zk_span_zero} scope_hint={fn_ctx}\n")
+                # The `else` branch here USED to deref zk_span.file/.line/.col.
+                # It was removed 2026-09-03 after a live run proved it repeats
+                # the exact mistake the "Round 2 REVERTED" comment below already
+                # documents: this object is corrupt (disc=-1, kind not an enum),
+                # so NO further field of it is a safe read -- including span's,
+                # even though span passes both `== nil` and `== 0`.
+                #
+                # Measured: with the deref in place the probe emitted line A
+                # twice and line B ZERO times (0 occurrences of `at=` in an
+                # 8,924,312-byte log AND in the 492,027-byte full stderr), while
+                # the run continued and exited normally. The print was silently
+                # swallowed mid-eprint.
+                #
+                # That silent swallow IS the finding, so it is reported rather
+                # than retried: a span that is neither nil nor zero yet cannot be
+                # dereferenced is a dangling read, which means the whole HirType
+                # is a corrupt aggregate -- NOT a producer that merely forgot to
+                # write `kind`.
                 if zk_span_nil or zk_span_zero:
-                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} at=<span-unreadable> -- the HirType came from a zeroed/nil-span block; the producer never wrote span either\n")
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=zeroed-or-nil -- producer never wrote span either\n")
                 else:
-                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} at={zk_span.file}:{zk_span.line}:{zk_span.col} start={zk_span.start} end={zk_span.end} len={zk_span.length}\n")
+                    eprint("[mir-zerokind-raise] seq={mir_zerokind_raise_probe_seq} span=non-nil-non-zero-but-UNDEREFERENCEABLE -- corrupt aggregate, not an unset field (see comment; do not re-add the deref)\n")
             self.error_fatal("E-MIR-TYPE-ZeroKind: lower_type received a well-formed HirType whose `kind` field is raw 0 (never written) while lowering '{fn_ctx}' -- fix the PRODUCER that left kind unset, not lower_type", nil)
             return MirType.i64()
         # Round 2 REVERTED (2026-08-30). This block briefly read five MORE
