@@ -228,11 +228,38 @@ Two readings, and they have different fixes:
    an independent defect that happened to make it fatal earlier.
 
 Evidence that would separate them, cheaply, next time: the transport-receipt
-print in that `case _` did NOT fire (0 occurrences) even though the arm ran 16
-times, so `POST_MONO_TRANSPORT_RECEIPT_LIMIT` or the counter guard needs
-checking before relying on it. Fixing that instrumentation is the cheapest next
-step, because it is the one probe already sited where a malformed type is known
-to arrive and it costs no extra bootstrap.
+print in that `case _` did NOT fire (0 occurrences in BOTH the stage-3 build log
+and the untruncated worker stderr) even though the arm ran 16 times. This is not
+a limit or counter problem — both prints sit on the same path under the same
+guard (`transport_receipts < 16`, incremented only inside `hit_unreachable`), so
+if the guard admitted the 16 `unreachable_variant` prints it admitted the
+transport print too.
+
+**Ruled out by direct probe on this host (native-built by the admitted Stage 2,
+so the same codegen that runs the verifier):**
+
+- string interpolation of a plain field, of an arithmetic expression
+  (`{self.n + 1}`), of a module-level `val`, and of several in one string — all
+  print correctly;
+- a guarded `print` nested inside an `if` inside a `case _` arm of a `match`,
+  followed by a method call that mutates the receiver — prints correctly, twice,
+  with the counter advancing as expected;
+- a Rust-side emitter of the same text — none exists (`grep` over
+  `src/compiler_rust/**`, vendored code excluded); the line matches the Simple
+  source byte for byte.
+
+So the swallow is narrower than "print does not work in that position". The
+remaining differences between the two prints are the `{self.symbol}` (`text`
+field) interpolation and the receiver's state at that moment — note the verifier
+holds a `Dict<i64, text>` field, and the object being walked is already known to
+be malformed. That this specific diagnostic vanishes while its neighbour
+survives is the same "silently swallowed mid-eprint" signature recorded in
+`function_lowering.spl`'s round-2 comment, which is itself evidence about the
+receiver rather than about `print`.
+
+Fixing that instrumentation is still the cheapest next step, because it is the
+one probe already sited where a malformed type is known to arrive and it costs
+no extra bootstrap run.
 
 Do NOT re-derive the "which construct forgot to write kind" framing; this record
 already refuted it, and the `current_module_id` finding is further evidence that
