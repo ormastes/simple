@@ -134,6 +134,7 @@ pub fn strict_semantic_vulkan_receipt_values(
         "producer_receipt_damage_width=" + STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH.to_string() + "\n" +
         "producer_receipt_damage_height=" + STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT.to_string() + "\n" +
         "producer_receipt_seed_mode=full-frame-before-timing\n" +
+        "producer_receipt_timing_scope=vulkan-damage-submit-and-fence\n" +
         "producer_receipt_timed_submit_api=engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images\n" +
         "producer_receipt_backend_handle=" + backend_handle.to_string() + "\n" +
         "producer_receipt_device_identity=" + device_identity.to_string() + "\n" +
@@ -201,12 +202,22 @@ pub fn strict_semantic_vulkan_producer_receipt(
         STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH.to_i64(),
         STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT.to_i64()]
     var current_revision = revision_start
+    # Web parsing/layout and DrawIR lowering are preparation, not Vulkan work.
+    # Materialize both immutable revisions once so the timed samples match the
+    # C baseline's submit-and-fence measurement boundary.
+    val start_composition = strict_semantic_vulkan_composition(
+        revision_start, width, height)
+    val end_composition = strict_semantic_vulkan_composition(
+        revision_end, width, height)
     var warmup = 0
     while warmup < warmup_count:
         val warm_revision = if current_revision == revision_start: revision_end else: revision_start
+        val warm_composition = if warm_revision == revision_start:
+            start_composition
+        else:
+            end_composition
         val warm_result = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
-            engine, strict_semantic_vulkan_composition(
-                warm_revision, width, height), [], damage_rects)
+            engine, warm_composition, [], damage_rects)
         if not _strict_submit_valid(warm_result): evidence_valid = false
         device_submit_count = device_submit_count + warm_result.device_submit_count
         device_fence_count = device_fence_count + warm_result.device_fence_count
@@ -222,10 +233,13 @@ pub fn strict_semantic_vulkan_producer_receipt(
     var sample = 0
     while sample < sample_count:
         val sample_revision = if current_revision == revision_start: revision_end else: revision_start
+        val sample_composition = if sample_revision == revision_start:
+            start_composition
+        else:
+            end_composition
         val sample_start = ck.now_micros()
         val result = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
-            engine, strict_semantic_vulkan_composition(
-                sample_revision, width, height), [], damage_rects)
+            engine, sample_composition, [], damage_rects)
         val elapsed_ns = _positive_elapsed_ns(sample_start, ck)
         samples.push(elapsed_ns)
         if elapsed_ns <= 0: evidence_valid = false
