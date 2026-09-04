@@ -11,7 +11,7 @@ const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["g++", "clang++"];
 const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-gcc"];
 const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-g++"];
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang", "cl.exe"];
-const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
+const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang", "cl.exe"];
 
 fn compiler_matches_flavor(compiler: &str, flavor: LinkerFlavor) -> bool {
     match flavor {
@@ -104,7 +104,7 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
         }
     }
     if flavor == LinkerFlavor::Msvc {
-        "clang-cl".to_string()
+        "cl.exe".to_string()
     } else {
         "g++".to_string()
     }
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(MSVC_C_COMPILERS, &["clang-cl", "clang", "cl.exe"]);
         assert_eq!(
             cxx_candidates(&target, LinkerFlavor::Msvc),
-            &["clang-cl", "clang++", "clang"]
+            &["clang-cl", "clang++", "clang", "cl.exe"]
         );
         assert!(compiler_matches_flavor("clang-cl", LinkerFlavor::Msvc));
         assert_eq!(target.linker_flavor(), LinkerFlavor::Msvc);
