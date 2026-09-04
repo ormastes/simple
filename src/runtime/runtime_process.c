@@ -2445,7 +2445,19 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     for (;;) {
         int status = 0;
         pid_t r = waitpid((pid_t)pid, &status, WNOHANG);
-        if (r < 0) return -1;
+        if (r < 0) {
+            /* A failed wait is NOT a signal death, and collapsing it to -1 made
+               the two indistinguishable: the caller renders both as 255 and the
+               bootstrap then reports "worker was KILLED ... signal number was
+               discarded", which sent two investigations after an OOM that the
+               cgroup counters say never happened (oom_kill 0). ECHILD here means
+               the child was already reaped elsewhere -- its real exit status is
+               simply lost, and the worker may well have SUCCEEDED. Say which. */
+            fprintf(stderr, "[rt_process_wait] waitpid(%lld) failed: errno=%d (%s)\n",
+                    (long long)pid, errno, strerror(errno));
+            fflush(stderr);
+            return -1;
+        }
         if (r > 0) {
             if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
             /* Reaped but not normally exited => killed by a signal. Collapsing
