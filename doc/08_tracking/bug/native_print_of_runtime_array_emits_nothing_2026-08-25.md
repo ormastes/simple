@@ -1,7 +1,7 @@
 # `print(<array>)` emits NOTHING on the native lane
 
 - **Filed:** 2026-08-25
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-09-02 (the native lane prints runtime arrays -- see the RESOLVED section at the bottom). Was: OPEN
 - **Lane:** native (`native-build`) only. Both seed lanes (`interpret`, `jit`) are correct.
 - **Found by:** `scripts/check/check-engine-differential.shs`, fixture
   `test/fixtures/engine_differential/closure_runtime_facing.spl`, while clearing
@@ -116,3 +116,22 @@ separate regression, filed as
 native lane last worked at `5f2ad54578f`, so all native measurements in this
 record were taken there. `origin/main` has since moved on to `73d6deb5f66`,
 which has not been probed.
+
+---
+
+## RESOLVED 2026-09-02 — the native lane prints runtime arrays
+
+Host aarch64-apple-darwin. Binary: `src/compiler_rust/target/release/simple` (Rust seed, 37,291,896 B, 2026-09-01 09:24). `bin/simple` on this host is the BOOTSTRAP cli (`simple-bootstrap 1.0.0-beta`, `compile`/`native-build` only) and answers `unknown command 'run'`, so it is NOT the lane used below., native lane = `native-build` of the program then running the produced
+binary.
+
+```
+val xs = [1, 2, 3, 4]
+print(xs)                 -> [1, 2, 3, 4]
+print(xs.map(\x: x * 3))  -> [3, 6, 9, 12]
+print("A_done")           -> A_done
+```
+
+Both the plain array and the `map` result print, and the surrounding print is
+still correct, so this is not a "printed less" ordering artifact. The filed
+symptom -- no output at all for an array argument -- does not occur. Marking
+RESOLVED.

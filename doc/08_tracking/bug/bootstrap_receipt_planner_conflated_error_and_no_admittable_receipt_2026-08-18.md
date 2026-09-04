@@ -2,6 +2,31 @@
 
 Status: PARTIALLY FIXED (message defect fixed) / OPEN (P1 — admission still unsatisfiable here)
 
+### Defect 1 re-verified CLOSED 2026-09-02 (`origin/main` @ `1b76db1d6c3`)
+
+The conflated message is gone. `src/app/build/bootstrap_receipt_planner.spl`
+now splits the two causes into two distinct, separately-reachable diagnostics:
+
+```
+:80-83   if receipt.len() == 0:
+             print("bootstrap-policy-error: reason-not-allowed-for-target: target=" +
+                 bootstrap_target + " reason=" + reason_name)
+             return 2
+:84-86   if not file_write(receipt_path, receipt + "\n"):
+             print("bootstrap-policy-error: receipt-write-failed: " + receipt_path)
+             return 2
+```
+
+`receipt-write-failed` is now emitted only for a genuine write failure, so the
+misdiagnosis this record documents (a policy rejection reported as a filesystem
+problem) can no longer occur. The four admission-hash flags are also validated
+up front with their own message (`admission-hash-required: <flag>`, `:72-77`),
+which is what the original measurement was actually hitting.
+
+**Defect 2 (no admittable receipt can be produced on this tree) remains OPEN**
+— confirming it requires running a bootstrap, which was out of scope for this
+pass.
+
 ## Symptom
 
     bin/simple run src/app/build/bootstrap_receipt_main.spl \

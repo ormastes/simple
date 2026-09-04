@@ -1255,6 +1255,7 @@ impl MirLowering:
             method == "to_lower" or method == "to_upper" or method == "split" or
             method == "replace" or method == "rfind" or method == "find" or
             method == "contains" or method == "parse_f64" or
+            method == "upper" or method == "chars" or method == "to_float" or
             method == "split_lines" or method == "lines"
         # A custom nominal/static receiver must keep its selected owner even
         # when its method leaf collides with a primitive text builtin.
@@ -2504,7 +2505,22 @@ impl MirLowering:
         # be independently declared per backend. to_upper is safe on BOTH:
         # rt_string_to_upper and rt_string_to_float use the shared tagged-value
         # ABI on both LLVM and Cranelift.
-        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
+        # `upper`, plain-expression `chars`, and `to_float` joined this arm
+        # 2026-09-01 (native_string_methods_unresolved_in_mir_2026-07-17
+        # addendum): each spelled a text method the interpreter accepts but
+        # this arm never claimed, so a directly-typed `text` receiver died
+        # with "unresolved method call". `upper` aliases `to_upper`
+        # (interpreter_method/string.rs:79 -> rt_string_to_upper). `chars`
+        # reuses rt_string_chars, the exact symbol the for-in text lane
+        # (mir_lowering_stmts.spl, `text.chars()` counted loop) already
+        # links. `to_float` is TOTAL in the interpreter
+        # (interpreter_method/string.rs:447 -- 0.0 on parse failure), unlike
+        # nullable `parse_f64`, so it unboxes through rt_value_as_float below
+        # instead of taking parse_f64's Optional marking. Numeric receivers
+        # (`int.to_float()`, interpreter_method/primitives.rs:31) never enter
+        # this arm -- text_builtin_resolution_allowed requires a proven Str
+        # receiver -- and stay a loud native gap, enumerated in the bug record.
+        if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "upper" or method == "chars" or method == "to_float" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and (text_builtin_resolution_allowed or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
             if mir_mc_trace_state == 1:
                 eprint("[mir-method-call] text-special-enter method={method}\n")
             val ts_arity_ok = match method:
@@ -2563,8 +2579,9 @@ impl MirLowering:
                     case "rfind": "rt_string_rfind"
                     case "find": "rt_string_find"
                     case "contains": "rt_string_contains"
-                    case "to_upper": "rt_string_to_upper"
-                    case "parse_f64": "rt_string_to_float"
+                    case "to_upper" | "upper": "rt_string_to_upper"
+                    case "chars": "rt_string_chars"
+                    case "parse_f64" | "to_float": "rt_string_to_float"
                     case _: "rt_string_to_lower"
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] text-special-symbol method={method}\n")
@@ -2582,7 +2599,7 @@ impl MirLowering:
                 # of "a-b" (silent wrong, no error at all; verified via
                 # SIMPLE_KEEP_LLVM_IR).
                 val ts_dest_ty = match method:
-                    case "replace" | "trim" | "strip" | "lower" | "to_lower" | "to_upper":
+                    case "replace" | "trim" | "strip" | "lower" | "to_lower" | "to_upper" | "upper":
                         MirType(kind: MirTypeKind.Opaque("str"))
                     case "contains":
                         MirType.bool()
@@ -2615,6 +2632,34 @@ impl MirLowering:
                         kind: HirTypeKind.Optional(float_type),
                         span: receiver.span
                     ), 2, 0)
+                # `to_float` is total per the interpreter (0.0 on failure), so
+                # unbox rt_string_to_float's tagged result to a raw f64 via
+                # rt_value_as_float (defined in BOTH runtimes: runtime.h:342 /
+                # runtime_native.c, and value/sffi/value_ops.rs:91). NIL
+                # decodes to 0.0, which is exactly the interpreter's failure
+                # value (interpreter_method/string.rs:447).
+                if method == "to_float":
+                    val tfv_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_value_as_float"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.f64(), is_variadic: false)))
+                    ))
+                    var b_tfv = self.builder
+                    val tfv_res = b_tfv.emit_call(tfv_op, [mir_operand_copy(ts_local)], MirType.f64())
+                    self.builder = b_tfv
+                    if val tfv_local = tfv_res:
+                        self.remember_local_hir_type(tfv_local.id, HirType(kind: HirTypeKind.Float(64), span: receiver.span), 2, 0)
+                        return tfv_local
+                    return ts_local
+                # `chars` returns a tagged rt_array handle of 1-codepoint
+                # strings; flag it exactly like `split` below so downstream
+                # indexing / for-in routes through rt_array_get, and record the
+                # Array(Str) HIR element type so the for-in stmt lane's
+                # element_type_from_hir repair types each element as text (the
+                # missing piece behind the 2026-09-01 empty-concat symptom).
+                if method == "chars":
+                    self.runtime_array_locals[ts_local.id] = true
+                    val chars_hir_elem = HirType(kind: HirTypeKind.Str, span: receiver.span)
+                    self.remember_local_hir_type(ts_local.id, HirType(kind: HirTypeKind.Array(chars_hir_elem, nil), span: receiver.span), 2, 0)
                 # rt_string_split returns a tagged rt_array handle; flag it
                 # so downstream indexing/for-in routes through rt_array_get.
                 if method == "split":
@@ -3258,12 +3303,35 @@ impl MirLowering:
                         val conv_widened = b_conv_n.emit_cast(mir_operand_copy(conv_narrowed), MirType.i64())
                         self.builder = b_conv_n
                         return conv_widened
-                    # `to_i64` on an already-i64 receiver is the identity; the
-                    # receiver local is already lowered and i64-typed.
+                    # `to_i64` on an already-i64 receiver is the identity -- but
+                    # this arm is the ERASED-receiver arm, so the receiver may
+                    # just as well be a TEXT handle, and returning it unchanged
+                    # silently yields the handle's tagged word instead of the
+                    # parsed number. That is exactly the defect measured in the
+                    # Windows MSVC Stage 2 candidate on the LLVM seed lane
+                    # (`(value.to_i64() ?? 0) > 0` compiled to `test %rsi,%rsi;
+                    # setle`), which made `--threads 1` "not a positive integer"
+                    # while `--threads 0` was accepted. Dispatch at runtime
+                    # instead: rt_to_int_dynamic parses a registry-validated
+                    # heap string and is the IDENTITY for everything else, so
+                    # the genuinely-i64 case is bit-for-bit unchanged.
+                    # doc/08_tracking/bug/windows_msvc_stage2_rejected_struct_receiver_route_threads_2026-09-01.md
                     if method == "to_i64":
                         if mir_conv_log_on():
-                            eprint("[conv-lower] identity conversion arm hit method={method}\n")
-                        return unresolved_receiver_local
+                            eprint("[conv-lower] dynamic to_i64 arm hit method={method}\n")
+                        val conv_dyn_ty = MirType.i64()
+                        val conv_dyn_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_to_int_dynamic"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: [], return_type: conv_dyn_ty, is_variadic: false)))
+                        ))
+                        var b_conv_dyn = self.builder
+                        val conv_dyn_local = b_conv_dyn.emit_call_value(
+                            conv_dyn_op,
+                            [mir_operand_copy(unresolved_receiver_local)],
+                            conv_dyn_ty)
+                        self.builder = b_conv_dyn
+                        return conv_dyn_local
                     # Float conversions genuinely change representation, so they
                     # are a single Cast with no widen-back (the result IS f64).
                     if method == "to_f64" or method == "to_f32":

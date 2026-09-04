@@ -320,6 +320,12 @@ class ScreenWebHost:
     var event_seq: i64
     var last_html_len: i64
     var last_unsupported_count: i64
+    var last_html: text
+    var html_write_count: i64
+    var html_serialize_count: i64
+    var last_scene_generation: u32
+    var last_scene_id: u32
+    var has_retained_scene: bool
 
     static fn open(w: i32, h: i32, doc_path: text, event_dir: text) -> ScreenWebHost?:
         """nil when there is no document path to publish to -- with nowhere to
@@ -329,7 +335,10 @@ class ScreenWebHost:
         ScreenWebHost(
             w: w, h: h, doc_path: doc_path.trim(),
             event_dir: event_dir.trim(), event_seq: 0, last_html_len: 0,
-            last_unsupported_count: 0
+            last_unsupported_count: 0, last_html: "", html_write_count: 0,
+            html_serialize_count: 0,
+            last_scene_generation: 0u32, last_scene_id: 0u32,
+            has_retained_scene: false
         )
 
     static fn open_from_env(w: i32, h: i32) -> ScreenWebHost?:
@@ -347,14 +356,33 @@ impl ScreenHost for ScreenWebHost:
         (self.w, self.h)
 
     me present_scene(scene: DrawIrV3Scene) -> bool:
+        if (scene.generation > 0u32 and self.has_retained_scene and
+            scene.scene_id == self.last_scene_id and
+            scene.generation == self.last_scene_generation):
+            return true
         self.last_unsupported_count = web_scene_unsupported_count(scene)
         if self.last_unsupported_count > 0:
             return false
         val html = web_scene_to_html(scene, self.w, self.h)
+        self.html_serialize_count = self.html_serialize_count + 1
         self.last_html_len = html.len().to_i64()
         if self.last_html_len == 0:
             return false
-        write_file(self.doc_path, html)
+        if html == self.last_html:
+            if scene.generation > 0u32:
+                self.last_scene_generation = scene.generation
+                self.last_scene_id = scene.scene_id
+                self.has_retained_scene = true
+            return true
+        if not write_file(self.doc_path, html):
+            return false
+        self.last_html = html
+        self.html_write_count = self.html_write_count + 1
+        if scene.generation > 0u32:
+            self.last_scene_generation = scene.generation
+            self.last_scene_id = scene.scene_id
+            self.has_retained_scene = true
+        true
 
     me poll_input() -> HostInputEvent?:
         if self.event_dir == "":
@@ -364,6 +392,14 @@ impl ScreenHost for ScreenWebHost:
         if ev == nil:
             return nil
         self.event_seq = next
+        match ev!:
+            HostInputEvent.Resize(resize_w, resize_h):
+                if resize_w > 0 and resize_h > 0:
+                    self.w = resize_w
+                    self.h = resize_h
+                    self.has_retained_scene = false
+            _:
+                pass
         ev
 
     me shutdown():

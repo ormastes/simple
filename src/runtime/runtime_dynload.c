@@ -60,6 +60,15 @@ static void simple_gpu_unlock(void) {
     atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
 }
 
+/* Forward declaration: the definition is Windows-only and lives near the
+ * bottom of this file, but simple_gpu_open() below calls it. Without this
+ * clang-cl emits an implicit declaration returning int and then errors with
+ * "conflicting types for 'runtime_dynload_open_utf8'" at the real HMODULE
+ * definition, which broke the Windows MSVC stage 2 runtime probe. */
+#ifdef _WIN32
+static HMODULE runtime_dynload_open_utf8(const char *path);
+#endif
+
 static void *simple_gpu_open(const char *path) {
 #ifdef _WIN32
     return (void *)runtime_dynload_open_utf8(path);

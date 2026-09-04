@@ -2440,6 +2440,14 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
         if (r < 0) return -1;
         if (r > 0) {
             if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+            /* Reaped but not normally exited => killed by a signal. Collapsing
+               that to a bare -1 discarded WTERMSIG and made every signal death
+               indistinguishable, which is precisely why a Stage-3 worker kill
+               could not be attributed: no .ips, no JetsamEvent, and a status
+               that carried no signal number. Report -(128+signo), the shell's
+               own convention, so the caller can recover the signal. Callers
+               that only test `== -1` still see a negative status. */
+            if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
             return -1;
         }
         if (waited_ms >= timeout_ms) return -2;

@@ -127,15 +127,44 @@ impl HirLowering:
         if origin_lookup.found:
             val origin_index_value = hir_export_origin_surface_index(
                 self.module_surfaces, origin_lookup.owner_module)
-            if origin_index_value < 0 or
-               origin_index_value >= self.module_surfaces.surfaces.len():
-                state.valid = false
-                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
-            return HirReexportSource(
-                found: true,
-                module_index: origin_index_value,
-                module_name: self.module_surfaces.surfaces[origin_index_value].preferred_registry_name,
-                item_name: origin_lookup.source_name)
+            if origin_index_value >= 0 and
+               origin_index_value < self.module_surfaces.surfaces.len():
+                return HirReexportSource(
+                    found: true,
+                    module_index: origin_index_value,
+                    module_name: self.module_surfaces.surfaces[origin_index_value].preferred_registry_name,
+                    item_name: origin_lookup.source_name)
+            # ORIGINBAIL (2026-09-03): this used to `return` not-found right
+            # here, ABORTING the whole walk. The three arms below -- the
+            # facade's own named imports, its recorded export routes, and
+            # package-sibling inference -- read the frozen registry directly
+            # and do NOT depend on the export-origin index, so an origin entry
+            # whose OWNER cannot be resolved to a surface index (an unpublished
+            # canonical alias, or `hir_export_origin_surface_index` failing
+            # closed on two spellings that canonicalize together) discarded
+            # three independent, still-valid routes.
+            #
+            # Failing that way is silent all the way out: the caller
+            # `find_reexport_source` returns not-found, and
+            # `register_imported_symbol_inner`'s final else
+            # (module_import_registration.spl) had `if hop.found:` with NO
+            # else, so a failed chase registered nothing and reported nothing.
+            # The name then resurfaced far later as a hard
+            # `unresolved type: {wanted}` attributed to an INNOCENT importing
+            # module that never names the facade -- exactly the shape of the
+            # Stage-3 phase-3 population that PR #320 made visible, where every
+            # dominant cluster reaches its type through an `export use` facade
+            # and no victim imports the declaring module directly.
+            #
+            # `state.valid` stays false so the miss is never memoized as a
+            # fact: `find_reexport_source` only records a negative when
+            # `state.complete and state.valid` (module_import_registration.spl),
+            # so a retryable miss is still retried. Falling through can only
+            # ADD resolutions -- it cannot change an answer the first arm
+            # already produced, because that path still returns above.
+            state.valid = false
+            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                eprint("[reexport-origin-owner-unresolved] facade={facade_mod.preferred_registry_name} wanted={wanted} owner={origin_lookup.owner_module} source={origin_lookup.source_name}: origin owner does not resolve to a surface index; continuing with imports/routes/siblings")
 
         var import_idx = 0
         while import_idx < facade_mod.imports.len():

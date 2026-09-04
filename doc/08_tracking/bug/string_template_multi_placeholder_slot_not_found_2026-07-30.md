@@ -4,8 +4,19 @@
 - **Severity:** medium — silently unusable feature shape (string template with
   a repeated bare placeholder), no known workaround inside the template
   itself
-- **Status:** open — root cause NOT pinned down; mechanism confirmed distinct
-  from the nested-call-arg bug fixed alongside it
+- **Status:** RESOLVED (2026-09-02) — root cause was pinned down the same day
+  this record was filed (see "Root cause (pinned down, 2026-07-30, lane TPL1)"
+  below) and both fixes (Rust seed `placeholder.rs` + pure-Simple mirror
+  `placeholder_lambda.spl`) are present in the current tree. Re-verified
+  2026-09-02: `cargo test -p simple-parser --lib placeholder` in
+  `src/compiler_rust` — `11 passed, 0 failed`, including
+  `two_bare_placeholders_in_one_fstring_share_one_param` and
+  `same_bare_placeholder_reused_twice_in_one_fstring_shares_one_param`
+  (this run built only the `simple-parser` crate directly, not the seed
+  binary or bootstrap, so it did not touch or disturb the in-flight
+  bootstrap). The self-hosted mirror still needs a redeploy to become live on
+  `EXPR_INTERPOLATED_STRING` (see "Still dead code" note below) — that part
+  remains as documented, not re-litigated here.
 - **Found via:** lane TMF1 (mission-critical robustness campaign), bisecting
   `test/01_unit/compiler/backend/type_mapper_spec.spl`'s "handles composite
   types using each backend strategy" failure (see bonus-find update in

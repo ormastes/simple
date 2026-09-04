@@ -24,14 +24,23 @@ use os.kernel.arch.riscv64.display.{
     riscv64_display_height,
     riscv64_display_pitch,
     riscv64_display_bpp,
-    riscv64_display_present
+    riscv64_display_present,
+    riscv64_display_fill_rect_argb
 }
-use os.kernel.arch.riscv64.console.{serial_init}
+# The UART is brought up straight from the shared RISC-V console primitive
+# rather than through os.kernel.arch.riscv64.console. console.spl also hosts the
+# interactive console SHELL, so it imports fs_exec_spawn, vfs_write_ops and
+# ssh_auth; pulling it in for serial_init() alone dragged the scheduler, the
+# VFS, the IPC syscall table and the compression stack into this render-smoke
+# closure, which is where 66 undefined symbols at link came from. serial_init()
+# is exactly riscv_uart_init(RISCV_VIRT_UART_BASE, ...) -- console.spl's
+# UART_BASE is defined as RISCV_VIRT_UART_BASE -- so this is the same bring-up,
+# not a weaker one. console_common imports only uart16550_mmio.
+use os.kernel.arch.riscv.console_common.{RISCV_VIRT_UART_BASE, riscv_uart_init}
 use build.os.generated.rv64_wm_nonce.{rv64_wm_nonce, rv64_wm_nonce_r, rv64_wm_nonce_g, rv64_wm_nonce_b}
 
 extern fn serial_println(msg: text)
 extern fn __simple_call_module_inits()
-extern fn rt_mmio_write_u32(addr: u64, value: u32)
 
 # The nonce patch: a 64x64 rectangle at a FIXED origin, filled with a colour
 # derived from this build's nonce. Fixed so the host knows exactly which bytes
@@ -45,39 +54,50 @@ val WM_PATCH_H: u32 = 64u32
 fn wm_vulkan_smoke_row() -> bool:
     true
 
-fn paint_nonce_patch(base: u64, pitch: u32) -> u32:
-    # BGRA8888, matching the scanout format the display module reports.
+fn paint_nonce_patch() -> u32:
+    # BGRA8888, matching the scanout format the display module reports. The
+    # pixels go through riscv64_display_fill_rect_argb -- the scanout facade --
+    # so this entry declares no framebuffer extern of its own (UI backend
+    # isolation: examples call facades, backends own the raw writes).
     val r = rv64_wm_nonce_r()
     val g = rv64_wm_nonce_g()
     val b = rv64_wm_nonce_b()
     val argb: u32 = 0xFF000000u32 + (r * 65536u32) + (g * 256u32) + b
-    var painted: u32 = 0u32
-    var row: u32 = 0u32
-    while row < WM_PATCH_H:
-        var col: u32 = 0u32
-        while col < WM_PATCH_W:
-            val off = ((WM_PATCH_Y + row) * pitch) + ((WM_PATCH_X + col) * 4u32)
-            rt_mmio_write_u32(base + off.to_u64(), argb)
-            painted = painted + 1u32
-            col = col + 1u32
-        row = row + 1u32
-    painted
+    riscv64_display_fill_rect_argb(WM_PATCH_X, WM_PATCH_Y, WM_PATCH_W, WM_PATCH_H, argb)
 
 fn boot_main(hart_id: u64, dtb_addr: u64):
     val _hart_id = hart_id
     val _dtb_addr = dtb_addr
 
+# The freestanding boot chain (boot_entry.c, baremetal_stubs.c,
+# baremetal_uart_stdout.c) calls `spl_start()` with no arguments, and the seed's
+# linker bridges the bare `spl_start` to the entry module's own
+# `<module>__spl_start`. 24 of the 28 riscv64 entries in this directory already
+# follow that convention; this row spelled it `boot_main(hart_id, dtb_addr)`,
+# which nothing in the boot chain or the linker looks for, so the link failed on
+# an undefined `spl_start`. The two handover registers were already discarded
+# here, which is exactly what boot_entry.c documents ("the handover registers
+# are accepted and deliberately ignored"), so dropping them changes no behaviour.
+# wm_vulkan_smoke_row is the symbol the builder asserts is present, as its proof
+# that this row was linked in rather than garbage-collected out. It used to be a
+# separate `fn ... -> bool: true` marker that NOTHING called, so it folded to a
+# constant and --gc-sections dropped it -- the assertion could never hold. It is
+# now the row itself: it does the render work and returns whether the row
+# succeeded, so the symbol survives because it is genuinely reachable and the
+# builder's assertion means what it says. Forcing the linker to retain an
+# uncalled symbol would instead have made that check pass on a row that never runs.
+fn wm_vulkan_smoke_row() -> bool:
     if not riscv64_display_boot_memory_initialize():
         serial_println("[wm-rv64] fatal reason=display-memory")
-        return
+        return false
     __simple_call_module_inits()
-    serial_init()
+    riscv_uart_init(RISCV_VIRT_UART_BASE, false)
     serial_println("[wm-rv64] SimpleOS riscv64 WM render smoke (OpenSBI fw_payload)")
     serial_println("[wm-rv64] serial up, bringing up the VirtIO-GPU scanout")
 
     if not riscv64_display_initialize():
         serial_println("[wm-rv64] fatal reason=scanout-init")
-        return
+        return false
 
     val width = riscv64_display_width()
     val height = riscv64_display_height()
@@ -86,17 +106,17 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     val address = riscv64_display_framebuffer_address()
     if address == 0u64 or width == 0u32 or height == 0u32 or pitch != width * 4u32 or bpp != 32u32:
         serial_println("[wm-rv64] fatal reason=scanout-metadata")
-        return
+        return false
     serial_println("[wm-rv64] scanout-ready width={width} height={height} stride={pitch} bpp={bpp}")
 
-    val painted = paint_nonce_patch(address, pitch)
+    val painted = paint_nonce_patch()
     if painted != WM_PATCH_W * WM_PATCH_H:
         serial_println("[wm-rv64] fatal reason=patch-incomplete painted={painted}")
-        return
+        return false
 
     if not riscv64_display_present():
         serial_println("[wm-rv64] fatal reason=scanout-present")
-        return
+        return false
 
     val nonce = rv64_wm_nonce()
     val r = rv64_wm_nonce_r()
@@ -106,3 +126,11 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     serial_println("WM_RENDER_SIMPLEOS_RISCV64_OK nonce={nonce} patch={WM_PATCH_X},{WM_PATCH_Y},{WM_PATCH_W},{WM_PATCH_H} rgb={r},{g},{b}")
     serial_println("WM_RENDER_SIMPLEOS_RISCV64 second line proves the WM row kept running")
     serial_println("[wm-rv64] wm render row exited rc=0")
+    return true
+
+
+# The freestanding boot chain calls spl_start() with no arguments; this shim is
+# all it needs, with the row's own success/failure reported on the serial log.
+fn spl_start():
+    if not wm_vulkan_smoke_row():
+        serial_println("[wm-rv64] wm render row exited rc=1")

@@ -28,7 +28,7 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler;
-    /// also queried by `first_unresolved_import` to detect NULL-jump imports).
+    /// also queried by `first_unresolved_import_called` to detect NULL-jump imports).
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
@@ -167,7 +167,7 @@ impl JitCompiler {
         // reports these as a clean "undefined symbol" relocation error, but
         // JIT would crash. Detect them here and fail the JIT compile so the
         // driver's interpreter fallback runs instead (matching AOT behaviour).
-        if let Some(name) = self.first_unresolved_import() {
+        if let Some(name) = self.first_unresolved_import_called(mir) {
             // Make the de-JIT LOUD. A silent whole-module drop to the
             // interpreter is a proven catastrophic-cost defect class here: one
             // unresolvable name cost ~1000x (parse_html 3.56s -> 19.4ms,
@@ -424,19 +424,47 @@ impl JitCompiler {
     }
 
     /// Return the name of a declared `Linkage::Import` function that will not
-    /// resolve to a real address at finalize time, if any.
+    /// resolve to a real address at finalize time AND is directly called from
+    /// compiled code, if any.
     ///
     /// Mirrors cranelift-jit's own `lookup_symbol` (registered runtime symbols
-    /// plus a `dlsym(RTLD_DEFAULT)` fallback). Any import for which both miss
+    /// plus a `dlsym(RTLD_DEFAULT)` fallback). An import that neither resolves
     /// would be bound to a NULL GOT slot; see `compile_module`.
-    fn first_unresolved_import(&self) -> Option<String> {
+    ///
+    /// The guard is deliberately scoped to imports that are DIRECTLY called
+    /// from compiled code (`MirInst::Call`). The hybrid transform
+    /// (mir/hybrid.rs) rewrites calls to unresolvable externs into InterpCall
+    /// bridges resolved by name through the interpreter's extern table at
+    /// runtime — a bridged name still appears as a declared import, but its
+    /// NULL slot is never jumped to, so rejecting it dropped whole modules to
+    /// the interpreter for no safety gain (measured: every GPU/showcase run
+    /// de-JITed on spl_thread_current_id even though the call bridged fine).
+    fn first_unresolved_import_called(&self, mir: &MirModule) -> Option<String> {
         use cranelift_module::{Linkage, Module};
+        let mut directly_called: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let crate::mir::MirInst::Call { target, .. } = inst {
+                        let raw = target.name();
+                        directly_called.insert(raw);
+                        // Mirror the alias expansion in referenced_call_names
+                        // (common_backend.rs): a Call to `rt_file_delete` also
+                        // needs `rt_file_remove` declared/resolved.
+                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
+                        if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
+                            directly_called.insert(alias);
+                        }
+                    }
+                }
+            }
+        }
         for (_id, decl) in self.backend.module.declarations().get_functions() {
             if decl.linkage != Linkage::Import {
                 continue;
             }
             if let Some(name) = decl.name.as_deref() {
-                if !jit_import_resolves(self.provider.as_ref(), name) {
+                if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
                     return Some(name.to_string());
                 }
             }

@@ -2,6 +2,7 @@
 
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_module_name, module_surface_logical_name_from_path, module_surface_package_name_from_name}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
 use std.common.crypto.sha256.{sha256_text}
 
@@ -144,7 +145,41 @@ pub(package) fn module_surface_resolve_relative_key(
     val absolute_name = if package_name == "": tail else package_name + "." + tail
     if module_surface_registry_index(registry, absolute_name) >= 0:
         return absolute_name
-    module_surface_resolve_absolute_key(registry, absolute_name)
+    val direct = module_surface_resolve_absolute_key(registry, absolute_name)
+    if direct != "":
+        return direct
+    # RELBASE-SURFACE (2026-09-01): the splice above walks
+    # `facade.canonical_name`, which `module_surface_logical_name_from_path`
+    # builds under the header contract "Do not apply tier, std, or lib folds"
+    # (module_surface_source_identity.spl:39). The registry, in contrast, keys
+    # surfaces by the TIER-STRIPPED logical name
+    # (`compiler.mono.monomorphize.types`), so for every relative `use .x`
+    # written inside a numbered-tier directory this function builds
+    # `compiler.40.mono.monomorphize.types`, misses, and returns "" -- which
+    # `module_surface_import_resolution_trace_v1` records as selected="" and
+    # the pre-freeze projection turns into `import_target_indices[i] = -1`.
+    # The explicit-import sweep in
+    # _Items/module_reexport_materialization.spl:672 skips every row whose
+    # target_index is < 0, so a relative import row is invisible to it and the
+    # owner is advised `[hir-callable-dep-origin-unresolved]`.
+    # This is the surface-registry twin of the importer-side defect already
+    # fixed by `resolve_module_key_relative`
+    # (_Items/module_import_resolution.spl:349, commit 9558f80457a); the same
+    # derivation is reused here. ADDITIVE ONLY: `canonical_name` and every
+    # other primary key are untouched, and this leg runs solely after the
+    # existing spelling has already missed, so any import that resolves today
+    # keeps its current answer byte for byte.
+    var tier_base = module_logical_name_from_path(facade.canonical_path)
+    var tier_index = 0
+    while tier_index < dots:
+        tier_base = module_surface_package_name_from_name(tier_base)
+        tier_index = tier_index + 1
+    val tier_absolute = if tier_base == "": tail else: tier_base + "." + tail
+    if tier_absolute == absolute_name:
+        return ""
+    if module_surface_registry_index(registry, tier_absolute) >= 0:
+        return tier_absolute
+    module_surface_resolve_absolute_key(registry, tier_absolute)
 
 pub(package) fn module_surface_resolve_import_key(
     registry: ModuleSurfacesByName,

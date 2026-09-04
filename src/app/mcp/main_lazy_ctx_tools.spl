@@ -50,6 +50,7 @@
 use .main_lazy_json.{extract_field, extract_field_raw, make_tool_error, make_tool_result}
 use .main_lazy_node_tools.{require_external_tool}
 use .main_lazy_telemetry.{tok_record, tok_rollup, tok_load_events, TOK_FEATURE_CTX}
+use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plugins_text, LOG_OPT_FEATURE}
 
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, file_move_cross_device, dir_create, time_now_unix_micros}
 use std.database.core.{parse_sdn_table}
@@ -813,17 +814,25 @@ fn ctx_smart_truncate(stdout: text, cap: i64, marker: text) -> (text, i64, i64):
 # Apply the return cap to an execute result: when the stdout exceeds
 # `_CTX_RETURN_CAP_BYTES` the full text is indexed under `exec:<ts>` and the
 # returned stdout is the head+tail with an annotation naming that source.
+fn _ctx_with_stdout(r: CtxExecResult, stdout: text) -> CtxExecResult:
+    CtxExecResult(stdout: stdout, stderr_summary: r.stderr_summary, exit_code: r.exit_code, timed_out: r.timed_out, wall_ms: r.wall_ms, raw_bytes: r.raw_bytes)
+
 fn ctx_cap_exec_stdout(r: CtxExecResult) -> CtxExecResult:
-    if r.stdout.len() <= _CTX_RETURN_CAP_BYTES:
-        return r
+    # A toolchain log optimizer runs BEFORE the size cap: dropping progress
+    # noise routinely keeps the one real error INSIDE the cap instead of
+    # leaving it past the truncation point. The raw text is what gets
+    # indexed below, so a dropped line is still reachable by search.
+    val raw = r.stdout
+    val filtered = log_opt_optimize_recorded(raw)
+    if filtered.len() <= _CTX_RETURN_CAP_BYTES:
+        return _ctx_with_stdout(r, filtered)
     val source = "exec:" + str(time_now_unix_micros())
-    val (kept, omitted_lines, omitted_bytes) = ctx_smart_truncate(r.stdout, _CTX_RETURN_CAP_BYTES, "[...truncated: see below]")
+    val (kept, omitted_lines, omitted_bytes) = ctx_smart_truncate(filtered, _CTX_RETURN_CAP_BYTES, "[...truncated: see below]")
     if omitted_lines == 0:
-        return r
-    val n = ctx_index_text(r.stdout, source)
+        return _ctx_with_stdout(r, filtered)
+    val n = ctx_index_text(raw, source)
     val note = "[...truncated — " + str(omitted_lines) + " line(s) / " + str(omitted_bytes) + " byte(s) omitted from the middle; full output indexed as " + str(n) + " chunk(s): simple_ctx_search(queries: [...], source: '" + source + "')]"
-    val marked = kept.replace("[...truncated: see below]", note)
-    CtxExecResult(stdout: marked, stderr_summary: r.stderr_summary, exit_code: r.exit_code, timed_out: r.timed_out, wall_ms: r.wall_ms, raw_bytes: r.raw_bytes)
+    _ctx_with_stdout(r, kept.replace("[...truncated: see below]", note))
 
 fn ctx_format_exec(label: text, r: CtxExecResult) -> text:
     var head = "-- " + label + " (exit: " + str(r.exit_code) + ", " + str(r.wall_ms) + "ms) --"
@@ -991,6 +1000,22 @@ fn handle_simple_ctx_fetch_and_index(id: text, body: text) -> text:
     tok_record(TOK_FEATURE_CTX, "simple_ctx_fetch_and_index", resp.body.len(), msg.len(), false)
     make_tool_result(id, msg)
 
+# ---------------------------------------------------------------------------
+# Toolchain log optimizer (plugin engine lives in main_lazy_log_opt)
+# ---------------------------------------------------------------------------
+
+# With no `log` argument this lists the loaded plugin descriptors, so an
+# operator can see what is installed without feeding it a build log.
+fn handle_simple_log_optimize(id: text, body: text) -> text:
+    val raw = ctx_unescape_json(extract_field(body, "log"))
+    if raw == "":
+        return make_tool_result(id, log_opt_plugins_text())
+    val (out, name, dropped) = log_opt_optimize(raw)
+    if name == "":
+        return make_tool_result(id, "[log-opt] no descriptor claimed this log; returned unchanged\n" + out)
+    tok_record(LOG_OPT_FEATURE, "logopt:" + name, raw.len(), out.len(), false)
+    make_tool_result(id, out)
+
 fn _ctx_stat_get(d: Dict<text, i64>, k: text) -> i64:
     if d.contains_key(k):
         return d[k]
@@ -1146,7 +1171,7 @@ fn handle_simple_ctx_upgrade(id: text, body: text) -> text:
 export handle_simple_ctx_index, handle_simple_ctx_search, handle_simple_ctx_execute
 export handle_simple_ctx_execute_file, handle_simple_ctx_batch_execute
 export handle_simple_ctx_fetch_and_index, handle_simple_ctx_stats
-export handle_simple_ctx_doctor, handle_simple_ctx_upgrade
+export handle_simple_ctx_doctor, handle_simple_ctx_upgrade, handle_simple_log_optimize
 export ctx_store_dir, ctx_index_text, ctx_bm25_search, ctx_tokenize, ctx_chunk_text
 export ctx_normalize, ctx_prepare_index, ctx_bm25_search_index, ctx_capture_max_bytes, ctx_run_bounded
 export ctx_escape_cell, ctx_unescape_cell, ctx_parse_string_array, ctx_unescape_json

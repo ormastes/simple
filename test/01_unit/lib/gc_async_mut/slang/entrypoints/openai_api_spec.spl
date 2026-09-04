@@ -1,0 +1,175 @@
+"""
+## Purpose and audience
+Purpose: Pin slang's OpenAI-compatible HTTP surface (phase A6) — what it
+serves, what it refuses, and the fact that it NEVER fabricates a completion.
+Audience: engineers wiring an OpenAI-compatible client (llm_caret's
+`caret:slang/<model>` provider) at the in-repo slang runtime.
+
+## Operator workflow
+I point a client at the slang server. I ask it which models it has, and the
+answer must be exactly the packs sitting on disk — no more, no fewer. I send
+a chat request. Because only phase A1 (the weight loader) of
+doc/05_design/ml/slang/slang_master_plan.md is implemented, there is no
+attention kernel, no KV cache, no worker and no engine, so I must get an
+explicit, structured "model not runnable" refusal that announces itself as a
+stub — never invented prose that I could mistake for a real answer.
+
+## Compatibility and limitations
+This build is an ANNOUNCED STUB for inference: `/v1/chat/completions` cannot
+return generated text and says so in its payload (`"stub":true`). Streaming is
+out of scope and is rejected. Fixtures are real directories written under
+build/test/ and read back through the phase-A1 manifest parser.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{parse_chat_request, openai_error_response, openai_models_response, json_string_field, json_int_field, json_array_object_count}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, model_ids, find_model, read_model_entry}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.io_runtime.{dir_create_all, file_write, dir_remove_all}
+
+fn valid_manifest(model_id: text) -> text:
+    "{\"schema_version\":0,\"model_id\":\"" + model_id + "\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}"
+
+# Build a real on-disk model root and return its path. Two valid packs, one
+# directory with no manifest at all, one with a manifest the A1 parser rejects.
+fn populated_root() -> text:
+    val root = "build/test/slang_openai_a6/populated"
+    dir_remove_all(root)
+    dir_create_all(root + "/pack-a")
+    dir_create_all(root + "/pack-b")
+    dir_create_all(root + "/not-a-pack")
+    dir_create_all(root + "/broken")
+    file_write(root + "/pack-a/manifest.sdn", valid_manifest("slang-demo-a"))
+    file_write(root + "/pack-b/manifest.sdn", valid_manifest("slang-demo-b"))
+    file_write(root + "/not-a-pack/readme.txt", "no manifest here")
+    file_write(root + "/broken/manifest.sdn", "{\"schema_version\":0,\"model_id\":\"\"}")
+    root
+
+fn empty_root() -> text:
+    val root = "build/test/slang_openai_a6/empty"
+    dir_remove_all(root)
+    dir_create_all(root)
+    root
+
+describe "GET /v1/models reflects what is actually on disk":
+    it "lists exactly the directories holding a manifest the A1 loader accepts":
+        step("Verify: two valid packs are listed; a manifest-less dir and a malformed manifest are not")
+        val root = populated_root()
+        val ids = model_ids(discover_models(root))
+        expect(ids.len()).to_equal(2)
+        expect(find_model(discover_models(root), "slang-demo-a") != nil).to_equal(true)
+        expect(find_model(discover_models(root), "slang-demo-b") != nil).to_equal(true)
+
+    it "reports the manifest's own model_id, not the directory name":
+        step("Verify: the advertised id is what the loader would be asked to load")
+        val entry = read_model_entry(populated_root() + "/pack-a")
+        expect(entry != nil).to_equal(true)
+        expect(entry!.id).to_equal("slang-demo-a")
+        expect(entry!.revision).to_equal("v0")
+
+    it "answers 200 with an empty data array when no packs exist":
+        step("Verify: the empty case is a valid empty list, never an error")
+        val response = slang_api_dispatch("GET", "/v1/models", "", empty_root())
+        expect(response.status).to_equal(200)
+        expect(json_string_field(response.body, "object")).to_equal("list")
+        expect(json_array_object_count(response.body, "data")).to_equal(0)
+
+    it "answers 200 with one entry per on-disk pack":
+        step("Verify: the served list length equals the on-disk pack count")
+        val response = slang_api_dispatch("GET", "/v1/models", "", populated_root())
+        expect(response.status).to_equal(200)
+        expect(json_array_object_count(response.body, "data")).to_equal(2)
+
+    it "rejects a non-GET method on /v1/models with 405":
+        step("Verify: wrong verb on a known route is 405, not 404")
+        val response = slang_api_dispatch("POST", "/v1/models", "", populated_root())
+        expect(response.status).to_equal(405)
+        expect(json_string_field(response.body, "code")).to_equal("method_not_allowed")
+
+describe "POST /v1/chat/completions rejects malformed requests":
+    it "rejects a body that is not valid JSON with 400":
+        step("Verify: broken JSON is a client error carrying the OpenAI error envelope")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{not json", populated_root())
+        expect(response.status).to_equal(400)
+        expect(json_string_field(response.body, "type")).to_equal("invalid_request_error")
+        expect(json_string_field(response.body, "code")).to_equal("invalid_request")
+
+    it "rejects a request with no model field with 400":
+        step("Verify: the required model field is enforced")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(response.status).to_equal(400)
+
+    it "rejects a request with an empty messages array with 400":
+        step("Verify: an empty conversation is not a servable request")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-a\",\"messages\":[]}", populated_root())
+        expect(response.status).to_equal(400)
+
+    it "rejects stream=true with 400 because streaming is out of scope":
+        step("Verify: streaming is refused explicitly rather than silently ignored")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-a\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(response.status).to_equal(400)
+
+    it "accepts a well-formed body and reports the parsed fields":
+        step("Verify: model, message count and max_tokens are read back from the wire body")
+        match parse_chat_request("{\"model\":\"slang-demo-a\",\"max_tokens\":64,\"messages\":[{\"role\":\"system\",\"content\":\"s\"},{\"role\":\"user\",\"content\":\"hi\"}]}"):
+            Ok(request) =>
+                expect(request.model).to_equal("slang-demo-a")
+                expect(request.message_count).to_equal(2)
+                expect(request.max_tokens).to_equal(64)
+                expect(request.stream).to_equal(false)
+            Err(_) =>
+                expect(false).to_equal(true)
+
+describe "POST /v1/chat/completions never fabricates a completion":
+    it "answers 404 model_not_found for a model that is not on disk":
+        step("Verify: an unknown model is a 404, distinct from the not-runnable case")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"no-such-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(response.status).to_equal(404)
+        expect(json_string_field(response.body, "code")).to_equal("model_not_found")
+
+    it "answers 503 model_not_runnable for a model that IS on disk":
+        step("Verify: a well-formed request for a real pack returns the structured refusal, not text")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-a\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(response.status).to_equal(503)
+        expect(json_string_field(response.body, "type")).to_equal("server_error")
+        expect(json_string_field(response.body, "code")).to_equal("model_not_runnable")
+
+    it "announces itself as a stub and names the missing phases":
+        step("Verify: the payload carries stub=true, the implemented phase, and the design doc")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(json_string_field(response.body, "implemented_phase")).to_equal("A1")
+        expect(json_string_field(response.body, "design_doc")).to_equal("doc/05_design/ml/slang/slang_master_plan.md")
+        expect(response.body.find("\"stub\":true") >= 0).to_equal(true)
+
+    it "carries no assistant content or choices field a client could read as an answer":
+        step("Verify: the refusal cannot be mistaken for an OpenAI success payload")
+        val response = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"slang-demo-a\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", populated_root())
+        expect(response.body.find("\"choices\"") < 0).to_equal(true)
+        expect(response.body.find("\"content\"") < 0).to_equal(true)
+
+describe "routing and envelopes":
+    it "answers 404 for an unknown route":
+        step("Verify: an unrouted path is a structured 404, not a crash")
+        val response = slang_api_dispatch("GET", "/v1/embeddings", "", populated_root())
+        expect(response.status).to_equal(404)
+        expect(json_string_field(response.body, "code")).to_equal("not_found")
+
+    it "ignores a query string and a trailing slash when routing":
+        step("Verify: /v1/models/ and /v1/models?x=1 reach the same handler")
+        expect(slang_api_dispatch("GET", "/v1/models/", "", empty_root()).status).to_equal(200)
+        expect(slang_api_dispatch("GET", "/v1/models?limit=1", "", empty_root()).status).to_equal(200)
+
+    it "escapes quotes in an error message so the envelope stays parseable":
+        step("Verify: a hostile model name cannot break out of the JSON string")
+        val response = openai_error_response(400, "bad \"quoted\" name", "invalid_request_error", "invalid_request", "")
+        expect(json_string_field(response.body, "type")).to_equal("invalid_request_error")
+        expect(response.body.find("\\\"quoted\\\"") >= 0).to_equal(true)
+
+    it "builds a model list envelope with the OpenAI object fields":
+        step("Verify: each entry carries id/object/owned_by as clients expect")
+        val response = openai_models_response(["m1"], "slang")
+        expect(json_string_field(response.body, "id")).to_equal("m1")
+        expect(json_string_field(response.body, "owned_by")).to_equal("slang")
+        expect(json_int_field(response.body, "created", -1)).to_equal(0)

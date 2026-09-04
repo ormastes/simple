@@ -1,0 +1,189 @@
+#!/bin/sh
+# Pre-commit line-ending normalizer.
+#
+# Strips CR from staged TEXT files so nothing lands in the repo with Windows
+# line endings -- EXCEPT *.cmd and *.bat, which cmd.exe genuinely misparses
+# when they are LF-only and which must therefore stay CRLF.
+#
+# Why this exists even though .gitattributes already says `*.spl text eol=lf`:
+# .gitattributes only governs files added AFTER it landed (2026-08-18). Blobs
+# committed before that keep their CRLF until re-added, and measured on
+# origin/main many still do (src/lib/blink/css_parser/parser.spl: 629 CR
+# lines). CRLF in a .spl file matters here because the parser is
+# indentation-sensitive, and CRLF in a shebang script (`#!/usr/bin/env sh\r`)
+# fails to exec at all. It also makes git see every line as changed, which
+# turned several merge conflicts in this repo into whole-file conflicts.
+#
+# Verdict convention (per doc/07_guide/infra/detector/detector_standard.md):
+#   PASS  -- exit 0, always states how many files were examined
+#   FAIL  -- exit 1
+#   ERROR -- exit 2, "nothing was checked"; a vacuous run is never a pass.
+#
+# --selftest runs first and is fatal.
+
+set -u
+
+EXCLUDE_RE='\.(cmd|bat)$'
+VENDOR_RE='(src/compiler_rust/vendor/|src/runtime/vendor/|/miniaudio\.h$|/stb_image\.h$|/stb_truetype\.h$)'
+
+# Treat as binary if git says so, or if the blob contains a NUL byte.
+is_binary() {
+    if git diff --cached --numstat -- "$1" 2>/dev/null | head -1 | grep -q '^-	-'; then
+        return 0
+    fi
+    # NUL detection: command substitution CANNOT carry a null byte (the shell
+    # silently drops it, making `grep -qU "$(printf '\000')"` an empty pattern
+    # that matches EVERY file and classifies all of them binary). Compare the
+    # byte count with and without NULs instead.
+    _sz="$(wc -c < "$1" 2>/dev/null)"
+    _nz="$(LC_ALL=C tr -d '\000' < "$1" 2>/dev/null | wc -c)"
+    if [ "$_sz" != "$_nz" ]; then
+        return 0
+    fi
+    return 1
+}
+
+strip_cr() {
+    _f="$1"
+    _tmp="${_f}.__eolnorm.$$"
+    if sed 's/\r$//' "$_f" > "$_tmp" 2>/dev/null; then
+        mv -f "$_tmp" "$_f"
+        return 0
+    fi
+    rm -f "$_tmp" 2>/dev/null
+    return 1
+}
+
+has_crlf() {
+    LC_ALL=C grep -qU "$(printf '\r')$" "$1" 2>/dev/null
+}
+
+selftest() {
+    _d="$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/eolnorm.$$")"
+    mkdir -p "$_d" || { echo "selftest: cannot create temp dir"; return 1; }
+    _rc=0
+
+    # (a) a CRLF .spl must be normalized
+    printf 'fn main():\r\n    print("x")\r\n' > "$_d/a.spl"
+    strip_cr "$_d/a.spl"
+    if has_crlf "$_d/a.spl"; then echo "selftest FAIL: .spl CR not stripped"; _rc=1; fi
+
+    # (b) content must be otherwise preserved
+    if [ "$(tr -d '\n' < "$_d/a.spl")" != 'fn main():    print("x")' ]; then
+        echo "selftest FAIL: content altered beyond CR removal"; _rc=1
+    fi
+
+    # (c) an LF file must be left byte-identical (idempotence)
+    printf 'a\nb\n' > "$_d/c.spl"; cp "$_d/c.spl" "$_d/c.orig"
+    strip_cr "$_d/c.spl"
+    if ! cmp -s "$_d/c.spl" "$_d/c.orig"; then echo "selftest FAIL: LF file modified"; _rc=1; fi
+
+    # (d) the .cmd/.bat exclusion pattern must match, and must NOT match .spl
+    if ! printf 'bin/simple.cmd\n' | grep -Eq "$EXCLUDE_RE"; then
+        echo "selftest FAIL: .cmd not excluded"; _rc=1
+    fi
+    if ! printf 'x/y.bat\n' | grep -Eq "$EXCLUDE_RE"; then
+        echo "selftest FAIL: .bat not excluded"; _rc=1
+    fi
+    if printf 'src/lib/a.spl\n' | grep -Eq "$EXCLUDE_RE"; then
+        echo "selftest FAIL: .spl wrongly excluded"; _rc=1
+    fi
+
+    # (e) vendored paths must be excluded
+    if ! printf 'src/runtime/vendor/x.c\n' | grep -Eq "$VENDOR_RE"; then
+        echo "selftest FAIL: vendor path not excluded"; _rc=1
+    fi
+
+    # (f) a lone CR mid-line must survive (we only strip at EOL)
+    printf 'a\rb\r\n' > "$_d/f.txt"
+    strip_cr "$_d/f.txt"
+    if ! LC_ALL=C grep -qU "$(printf 'a\rb')" "$_d/f.txt" 2>/dev/null; then
+        echo "selftest FAIL: mid-line CR destroyed"; _rc=1
+    fi
+
+    # (g) a TEXT file must NOT be classified binary, and a file containing a
+    # NUL byte MUST be. Regression fixture: the original NUL test used
+    # `grep -qU "$(printf '\000')"`, but a shell strips NUL from command
+    # substitution, so the pattern was empty, matched everything, and the hook
+    # skipped every file as "binary" while still printing PASS -- a silent
+    # no-op that looked green.
+    printf 'plain text\n' > "$_d/g.txt"
+    if is_binary "$_d/g.txt"; then
+        echo "selftest FAIL: text file misclassified as binary"; _rc=1
+    fi
+    printf 'a\000b\n' > "$_d/g.bin" 2>/dev/null
+    if ! is_binary "$_d/g.bin"; then
+        echo "selftest FAIL: NUL-containing file not detected as binary"; _rc=1
+    fi
+
+    rm -rf "$_d" 2>/dev/null
+    return $_rc
+}
+
+if ! selftest; then
+    echo "FAIL - selftest failed; refusing to run"
+    exit 1
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS - selftest only, 8 fixtures"
+    exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)" 2>/dev/null || {
+    echo "ERROR - nothing was checked (not inside a git repository)"
+    exit 2
+}
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null)"
+
+if [ -z "$STAGED" ]; then
+    # A commit with no staged text files is legitimate (e.g. a merge commit).
+    echo "PASS - 0 staged file(s); nothing to normalize"
+    exit 0
+fi
+
+examined=0
+fixed=0
+skipped_cmd=0
+skipped_bin=0
+fixed_list=""
+
+for f in $STAGED; do
+    [ -f "$f" ] || continue
+
+    if printf '%s\n' "$f" | grep -Eq "$VENDOR_RE"; then
+        continue
+    fi
+
+    if printf '%s\n' "$f" | grep -Eq "$EXCLUDE_RE"; then
+        skipped_cmd=$((skipped_cmd + 1))
+        continue
+    fi
+
+    if is_binary "$f"; then
+        skipped_bin=$((skipped_bin + 1))
+        continue
+    fi
+
+    examined=$((examined + 1))
+
+    if has_crlf "$f"; then
+        if strip_cr "$f"; then
+            git add -- "$f" 2>/dev/null
+            fixed=$((fixed + 1))
+            fixed_list="$fixed_list $f"
+        else
+            echo "FAIL - could not rewrite $f"
+            exit 1
+        fi
+    fi
+done
+
+if [ "$fixed" -gt 0 ]; then
+    echo "line-endings: normalized CRLF -> LF in $fixed file(s) and re-staged:"
+    for f in $fixed_list; do echo "  $f"; done
+fi
+
+echo "PASS - $examined text file(s) examined, $fixed normalized, ${skipped_cmd} .cmd/.bat kept CRLF, ${skipped_bin} binary skipped"
+exit 0
