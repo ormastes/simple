@@ -75,6 +75,28 @@ use build.os.generated.dbfs_roundtrip_nonce.{dbfs_roundtrip_nonce}
 use os.services.vfs.nvme_boot_runtime_owner.{vfs_boot_probe_pure_simple_nvme_adapter}
 use os.services.vfs.vfs.{Filesystem, VfsManager, vfs_mount}
 use os.services.dbfs.dbfs_filesystem_ops.{}
+# WHY `os.kernel.net.thread_shim` IS DELIBERATELY *NOT* IMPORTED HERE.
+# thread_shim.spl is SimpleOS's would-be critical-section provider:
+# `@export("C") spl_mutex_create/lock/unlock` over a bounded boot arena word
+# and an architecture acquire/release CAS, with the lock word carrying
+# cpu_id+1. Its SOURCE is right. Its CODEGEN is not. Measured 2026-09-01 by
+# importing it here and disassembling the resulting kernel: the seed's
+# cranelift freestanding backend does NOT honour `@naked`. Each `asm volatile`
+# body is emitted as a separate `__simple_asm_H<hash>` thunk WITH a frame
+# prologue prepended --
+#     __simple_asm_H9630faa93e1d40d9:
+#         push %rbp ; mov %rsp,%rbp ; mov %esi,%eax
+#         lock cmpxchgl %edx,(%rdi) ; sete %al ; movzbl %al,%eax ; ret
+# -- so the body's own `ret` pops the SAVED RBP as a return address and jumps
+# wild; and the caller is lowered as `call *%rsi` followed by `ud2`, so even a
+# correctly-returning thunk lands on a trap. Importing thread_shim therefore
+# does not give this lane a working lock, it gives it a wild jump during
+# module init, BEFORE any serial rung is printed -- strictly worse than the
+# clean fail-closed refusal below. Left unimported on purpose until the naked
+# lowering is fixed (tail-call, no prologue on either side, return value
+# propagated). See
+# doc/08_tracking/bug/naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01.md
+use std.db.dbfs_driver.device_commit_owner.{dbfs_device_serialization_blocker}
 use std.db.dbfs_engine.superblock.{
     dbfs_superblock_set_device, dbfs_superblock_probe_disk, dbfs_superblock_read_from_disk
 }
@@ -145,6 +167,14 @@ fn _start():
     # formatted with the plain dbfs_superblock_format_disk carries 0 here, and
     # open_on_device rejects anything under 4. Always report it.
     serial_println("[dbfsrt] dbfs superblock block_count={sb.block_count}")
+
+    # --- 2b. Critical-section provider admission ---------------------------
+    # Printed BEFORE the open so a refusal is attributable. "ready" here means
+    # the linked provider passed the behavioural handshake in
+    # device_commit_owner.spl (create, lock, unlock, DOUBLE UNLOCK MUST FAIL,
+    # relock, release); a stubbed provider prints the probe-failed blocker.
+    val provider = dbfs_device_serialization_blocker()
+    serial_println("[dbfsrt] critical-section provider=" + provider)
 
     val driver_r = DbFsDriver.open_on_device(dev, DBFSRT_ARENA_BASE_LBA, sb.block_count.to_i64())
     if driver_r.is_err():

@@ -1,0 +1,118 @@
+# LLM Caret - SHORT launch-spec grammar for the `cs` caret-suite launcher.
+#
+# Grammar: harness[:provider][/model]
+#   claude                    -> harness=claude
+#   claude/opus               -> harness=claude, model=opus
+#   caret:kimi                -> harness=caret,  provider=kimi
+#   caret:glm/glm-4.6         -> harness=caret,  provider=glm, model=glm-4.6
+#
+# Only the `caret` harness (caret's own TUI) accepts a provider; the CLI
+# harnesses drive an external agent binary and take a model only.
+
+struct HarnessSpec:
+    harness: text
+    provider: text
+    model: text
+    valid: bool
+    error: text
+
+fn known_harnesses() -> [text]:
+    ["claude", "codex", "kimi", "opencode", "gemini", "caret"]
+
+fn known_caret_providers() -> [text]:
+    ["claude_api", "openai", "openai_compat", "kimi", "glm", "slang",
+        "local_torch", "dummy", "deepseek"]
+
+fn _is_known_harness(name: text) -> bool:
+    for h in known_harnesses():
+        if h == name:
+            return true
+    false
+
+fn _is_known_caret_provider(name: text) -> bool:
+    for p in known_caret_providers():
+        if p == name:
+            return true
+    false
+
+fn _bad(message: text) -> HarnessSpec:
+    HarnessSpec(harness: "", provider: "", model: "", valid: false, error: message)
+
+fn _count_char(s: text, needle: text) -> i64:
+    var n = 0
+    for part in s.split(needle):
+        n = n + 1
+    n - 1
+
+fn parse_harness_spec(s: text) -> HarnessSpec:
+    if s == "":
+        return _bad("empty launch spec: expected harness[:provider][/model]")
+    if s.starts_with(":") or s.starts_with("/"):
+        return _bad("launch spec must start with a harness name: " + s)
+    if s.ends_with(":"):
+        return _bad("empty provider after ':' in launch spec: " + s)
+    if s.ends_with("/"):
+        return _bad("empty model after '/' in launch spec: " + s)
+    if _count_char(s, ":") > 1:
+        return _bad("at most one ':' is allowed in a launch spec: " + s)
+    if _count_char(s, "/") > 1:
+        return _bad("at most one '/' is allowed in a launch spec: " + s)
+
+    # Split off the model first so that a ':' inside the model segment is caught.
+    var head = s
+    var model = ""
+    if _count_char(s, "/") == 1:
+        val slash_parts = s.split("/")
+        head = slash_parts[0]
+        model = slash_parts[1]
+    if model.contains(":"):
+        return _bad("':' must precede '/' in a launch spec: " + s)
+    if head == "":
+        return _bad("empty harness name in launch spec: " + s)
+
+    var harness = head
+    var provider = ""
+    if _count_char(head, ":") == 1:
+        val colon_parts = head.split(":")
+        harness = colon_parts[0]
+        provider = colon_parts[1]
+        if harness == "":
+            return _bad("empty harness name in launch spec: " + s)
+        if provider == "":
+            return _bad("empty provider after ':' in launch spec: " + s)
+
+    if not _is_known_harness(harness):
+        return _bad("unknown harness '" + harness + "': expected one of claude, codex, kimi, opencode, gemini, caret")
+    if provider != "" and harness != "caret":
+        return _bad("harness '" + harness + "' does not take a provider; only 'caret' does")
+    if provider != "" and not _is_known_caret_provider(provider):
+        return _bad("unknown caret provider '" + provider + "'")
+
+    HarnessSpec(harness: harness, provider: provider, model: model, valid: true, error: "")
+
+fn harness_spec_display(h: HarnessSpec) -> text:
+    if not h.valid:
+        return ""
+    var out = h.harness
+    if h.provider != "":
+        out = out + ":" + h.provider
+    if h.model != "":
+        out = out + "/" + h.model
+    out
+
+fn harness_is_cli(h: HarnessSpec) -> bool:
+    if not h.valid:
+        return false
+    h.harness != "caret"
+
+fn harness_agent_provider(h: HarnessSpec) -> text:
+    if not h.valid:
+        return ""
+    if h.harness == "caret":
+        return ""
+    if h.harness == "opencode":
+        return "opencode_cli"
+    h.harness
+
+export HarnessSpec
+export parse_harness_spec, harness_spec_display, harness_is_cli, harness_agent_provider, known_harnesses, known_caret_providers

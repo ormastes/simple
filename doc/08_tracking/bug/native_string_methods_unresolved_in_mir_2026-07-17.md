@@ -97,3 +97,43 @@ mirroring exactly how `to_lower` is already wired in the same arm.
   `env -u SIMPLE_BOOTSTRAP bin/simple run` (oracle) and
   `env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH bin/simple native-build`
   (native).
+
+## Addendum 2026-09-01: `.upper()`, plain-expression `.chars()`, `.to_float()` — same class, fixed
+
+Third instance of the class. All three failed at MIR lowering with
+`unresolved method call:` on a directly-typed `text` receiver (no `any`
+erasure), while the interpreter accepted them. Fixed in the text-special
+arm of `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`:
+
+| method | runtime symbol | semantics chosen (= interpreter) |
+|---|---|---|
+| `upper` | `rt_string_to_upper` (runtime.h:686, collections.rs:4157) | exact alias of `to_upper` (interpreter_method/string.rs:79) |
+| `chars` (expression position) | `rt_string_chars` (runtime.h:403, collections.rs:3970) | array of 1-codepoint strings; result flagged `runtime_array_locals` + HIR `Array(Str)` |
+| `to_float` | `rt_string_to_float` (runtime.h:687, collections.rs:4259) then unbox `rt_value_as_float` (runtime.h:342, value_ops.rs:91) | TOTAL: trims, 0.0 on parse failure (string.rs:447) — unlike nullable `parse_f64` |
+
+**Empty-concat root cause (WIP commit `d260c9246e2`):** the WIP branch's
+`mir_lowering_stmts.spl` for-in lane predated the `element_type_from_hir`
+repair (zero grep hits on that branch), so `for c in s.chars()` elements
+typed as i64 and the accumulation never emitted a string concat — output
+came out empty, silently. Current main carries the repair; with the chars
+arm recording `Array(Str)`, the loop lowers to
+`rt_string_chars` → `rt_array_len`/`rt_array_get` → `rt_strcat_tagged`
+(verified in-process against the real MIR lowering, Windows seed
+md5 `f9bf124d933a0de0af5d999444234996`).
+
+**Deliberate divergence, still open:** `int.to_float()`
+(interpreter_method/primitives.rs:31) stays LOUD natively — the text arm
+requires a proven Str receiver; routing an int through `rt_string_to_float`
+would be silent garbage. Needs a numeric-conversion arm.
+
+**Live census (lowered, not grepped), 2026-09-01:** interpreter-accepted
+zero-arg methods still without any MIR arm: text 12/25 probed (capitalize,
+title, swapcase, reversed, is_empty, char_count, to_int, parse_int,
+trim_start, trim_end, chomp, ord), i64 17/19 probed (abs, to_float, floor,
+ceil, round, sqrt, is_even, is_odd, to_hex, to_bin, to_oct, bit_length,
+count_ones, trailing_zeros, signum, fract, to_str).
+
+Specs (both green on Windows, engine parity verified interpreter vs
+cranelift-jit via `[engine-receipt]`):
+- `test/01_unit/compiler/mir/text_upper_chars_to_float_mir_lowering_spec.spl` (defect repro + empty-concat pin)
+- `test/01_unit/compiler/mir/text_number_method_mir_arm_census_spec.spl` (class generalization census)

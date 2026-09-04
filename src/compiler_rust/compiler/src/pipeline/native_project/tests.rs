@@ -6197,7 +6197,9 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
     // Must stay an EXACT match, not a prefix: an unrelated application symbol
     // that merely starts with "__cpu" is a real stub candidate and must not
     // be silently swallowed by this exclusion.
-    assert!(!super::tools::is_compiler_rt_builtin_symbol("__cpu_scaling_governor_get"));
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "__cpu_scaling_governor_get"
+    ));
 }
 
 #[test]

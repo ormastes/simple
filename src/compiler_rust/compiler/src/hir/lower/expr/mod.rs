@@ -338,10 +338,7 @@ impl Lowerer {
             // was typed from `f` but still emitted `Global("g")` -- a symbol
             // nothing defines, because flattening merges the import under its
             // ORIGINAL name. Emit the symbol whose type we just took.
-            let symbol = self
-                .resolve_function_alias(name)
-                .map(str::to_string)
-                .unwrap_or_else(|| name.to_string());
+            let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
                 ty,
@@ -352,10 +349,7 @@ impl Lowerer {
             // global typed under the ALIAS name, so `use m.{f as g}` whose
             // target is not inlined into `module.functions` landed here and
             // emitted `Global("g")` -- unresolved at link time.
-            let symbol = self
-                .resolve_function_alias(name)
-                .map(str::to_string)
-                .unwrap_or_else(|| name.to_string());
+            let symbol = self.import_alias_symbol(name);
             Ok(HirExpr {
                 kind: HirExprKind::Global(symbol),
                 ty,
@@ -460,6 +454,34 @@ impl Lowerer {
                         .or_else(|| self.globals.get(target).copied())
                 })
             })
+    }
+
+    /// Symbol to emit for an identifier that may be a selective-import alias.
+    ///
+    /// A `use m.{f as g}` is normally rewritten to its ORIGINAL name `f`,
+    /// because module flattening merges the import in under that name and
+    /// nothing defines `g`. That rewrite is WRONG when this module also
+    /// declares its own `fn f`: the bare name is then claimed by the local
+    /// definition, and on the non-flattened (native/AOT) lane
+    /// `native_project::mangle` binds it to the LOCAL mangled symbol before it
+    /// ever consults `use_map` -- which does hold the correct
+    /// alias -> `other__f` row, keyed by the ALIAS. Keeping the alias name here
+    /// is what lets that row be reached, and it is exactly the case the
+    /// interpreter already got right via `import_alias_bindings`.
+    ///
+    /// `fn f(): g()` under the old behaviour lowered to a call to itself and
+    /// died with a stack overflow. See
+    /// `doc/08_tracking/bug/aliased_import_shadowed_by_local_fn_native_codegen_2026-09-03.md`.
+    fn import_alias_symbol(&self, name: &str) -> String {
+        match self.resolve_function_alias(name) {
+            Some(original)
+                if original != name && self.own_declared_function_names.contains(original) =>
+            {
+                name.to_string()
+            }
+            Some(original) => original.to_string(),
+            None => name.to_string(),
+        }
     }
 
     pub(super) fn named_callable_value_type(&mut self, name: &str) -> Option<TypeId> {

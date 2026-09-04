@@ -1,13 +1,56 @@
 #!/bin/sh
 # Static lexical-boundary guard for the bootstrap argument probe.
 # This checks source shape only; it does not admit, sign, or verify a provider.
-set -eu
+set -u
+
+_checked=0
+_fails=""
+_fail() { _fails="${_fails}${_fails:+; }$1"; }
+chk() { # chk <label> <expected> <actual>
+    _checked=$((_checked + 1))
+    [ "$2" = "$3" ] || _fail "$1 (expected $2, actual $3)"
+}
+chk_grep() { # chk_grep <label> <pattern> <file>
+    _checked=$((_checked + 1))
+    grep -q -- "$2" "$3"
+    rc=$?
+    [ "$rc" -eq 0 ] || _fail "$1 (pattern absent: $2)"
+}
+chk_ngrep() { # chk_ngrep <label> <pattern> <file>
+    _checked=$((_checked + 1))
+    grep -q -- "$2" "$3"
+    rc=$?
+    [ "$rc" -ne 0 ] || _fail "$1 (forbidden pattern present: $2)"
+}
+chk_le() { # chk_le <label> <ceiling> <actual>
+    _checked=$((_checked + 1))
+    [ "$3" -le "$2" ] || _fail "$1 (ceiling $2, actual $3)"
+}
+require_module() {
+    [ -f "$1" ] || { echo "ERROR — nothing was checked (audited module missing: $1)"; exit 2; }
+}
+verdict() { # verdict <summary>
+    if [ "$_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+    if [ -n "$_fails" ]; then
+        echo "FAIL — $_fails"
+        exit 1
+    fi
+    echo "PASS — $_checked assertion(s) checked${1:+; $1}"
+    exit 0
+}
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 module="$root/src/app/cli/bootstrap_probe_args.spl"
+require_module "$module"
 
-test "$(grep -c '^@unsafe(reason: "raw bootstrap argument-array ABI", capabilities: \[ffi\])$' "$module")" -eq 1
-test "$(grep -c '^extern fn rt_get_args() -> \[text\]$' "$module")" -eq 1
-test "$(grep -c 'unsafe(capabilities: \[ffi\]): rt_get_args()' "$module")" -eq 1
+chk "@unsafe(reason, capabilities: [ffi]) declaration tag" 1 \
+    "$(grep -c '^@unsafe(reason: "raw bootstrap argument-array ABI", capabilities: \[ffi\])$' "$module")"
+chk "rt_get_args extern declaration" 1 \
+    "$(grep -c '^extern fn rt_get_args() -> \[text\]$' "$module")"
+chk "rt_get_args call wrapped in unsafe(capabilities: [ffi])" 1 \
+    "$(grep -c 'unsafe(capabilities: \[ffi\]): rt_get_args()' "$module")"
 
-echo 'Bootstrap args probe SFFI authority: PASS declarations=1 lexical_calls=1 direct_call_shape=preserved artifact_admission=absent'
+verdict "declarations=1 lexical_calls=1 direct_call_shape=preserved artifact_admission=absent"

@@ -6,9 +6,14 @@ use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.common.gpu.font_atlas_composite.{font_atlas_composite_program_version_valid, font_atlas_composite_cache_identity, font_atlas_composite_metal_source, font_atlas_subrect_pixels, font_destination_origin}
 use std.common.crypto.sha256.{sha256_text}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, font_render_batch_atlas_owner_identity}
-use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_upload_ptr}
+use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_write_u32s_to_ptr}
 use std.gc_async_mut.io.metal_sffi.{
-    metal_sffi_alloc_buffer, metal_sffi_free_buffer
+    metal_sffi_alloc_buffer, metal_sffi_free_buffer,
+    metal_sffi_create_command_buffer, metal_sffi_create_compute_encoder,
+    metal_sffi_set_buffer, metal_sffi_dispatch_compute,
+    metal_sffi_end_compute_encoder, metal_sffi_commit_command_buffer,
+    metal_sffi_wait_completed,
+    metal_sffi_destroy_compute_encoder, metal_sffi_destroy_command_buffer
 }
 
 extern fn rt_alloc(size: i64) -> i64
@@ -102,10 +107,13 @@ class MetalFontBackendState:
         val host = rt_alloc(bytes)
         if host == 0:
             return false
-        var i: i64 = 0
-        while i < count:
-            rt_ptr_write_i32(host, i * 4, batch.atlas_pixels[i] as i32)
-            i = i + 1
+        # One-call block marshalling (the helper exists precisely for this):
+        # the old per-pixel rt_ptr_write_i32 loop costs ~1M FFI round trips
+        # for a 1024x1024 atlas.
+        val written = metal_write_u32s_to_ptr(host, batch.atlas_pixels)
+        if written != count:
+            rt_free(host)
+            return false
         val ok = metal_buffer_upload_ptr(self.atlas_buffer, host, bytes) != 0
         rt_free(host)
         if ok:
@@ -130,27 +138,81 @@ class MetalFontBackendState:
             return 0
         if not self._upload(session, batch):
             return 0
+        # PERF: the old loop submitted one full Metal command buffer PER QUAD
+        # (create + encode + commit + waitUntilCompleted each, ~10 ms of fixed
+        # cost). A 30-text frame is ~360 quads, i.e. ~36 s of pure submission
+        # overhead per frame. One encoder now carries every quad of the batch:
+        # setBuffer binds happen once, per-quad params are re-staged with
+        # setBytes, and there is exactly ONE commit + ONE completion wait.
+        if session.pipe_font_atlas_composite == 0:
+            return 0
+        val cmd = metal_sffi_create_command_buffer(session.command_queue)
+        if cmd == 0:
+            return 0
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_sffi_destroy_command_buffer(cmd)
+            return 0
+        val host = rt_alloc(52)
+        if host == 0:
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            return 0
+        var ok = metal_sffi_set_buffer(encoder, self.atlas_buffer, 0, 0)
+        ok = ok and metal_sffi_set_buffer(encoder, framebuffer, 0, 1)
         var done: i64 = 0
-        while done < batch.quads.len():
+        while ok and done < batch.quads.len():
             val q = batch.quads[done]
             val pixels = font_atlas_subrect_pixels(batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
                 q.atlas_x, q.atlas_y, q.width, q.height, q.color)
             val total = q.width.to_i64() * q.height.to_i64()
             if total <= 0 or pixels.len() != total:
-                return done
+                break
             val dst_x = font_destination_origin(origin_x, q.dst_x, q.width)
             val dst_y = font_destination_origin(origin_y, q.dst_y, q.height)
             if dst_x == nil or dst_y == nil:
-                return done
-            val p = metal_font_atlas_composite_params(batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
+                break
+            _font_params_into_host(host, batch.atlas_width, batch.atlas_height, batch.atlas_pixels.len(),
                 q.atlas_x, q.atlas_y, q.width, q.height, width, height, dst_count,
                 dst_x.?, dst_y.?, q.color)
-            if not session.dispatch_font_atlas_composite(self.atlas_buffer, framebuffer, p, total):
-                return done
-            if mirror_enabled and mirror.width() == width and mirror.height() == height:
+            ok = ok and (metal_set_bytes_ptr(encoder, host, 52, 2) != 0)
+            ok = ok and metal_sffi_dispatch_compute(
+                encoder, session.pipe_font_atlas_composite, (total + 63) / 64, 1, 1, 64, 1, 1)
+            if ok and mirror_enabled and mirror.width() == width and mirror.height() == height:
                 mirror.draw_image_blend(dst_x.?, dst_y.?, q.width, q.height, pixels)
-            done = done + 1
+            if ok:
+                done = done + 1
+        if ok:
+            ok = metal_sffi_end_compute_encoder(encoder)
+        if ok:
+            ok = metal_sffi_commit_command_buffer(cmd)
+        if ok:
+            ok = metal_sffi_wait_completed(cmd)
+        rt_free(host)
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
         done
+
+# Pack the 13-field FontAtlasCompositeParams into a host i32 buffer (little
+# endian, identical layout to metal_font_atlas_composite_params' [u8] form).
+fn _font_params_into_host(host: i64, atlas_width: i32, atlas_height: i32, atlas_count: i64,
+                          atlas_x: i32, atlas_y: i32, quad_width: i32, quad_height: i32,
+                          dst_width: i32, dst_height: i32, dst_count: i64,
+                          dst_x: i32, dst_y: i32, color: u32):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i32(host, 0, atlas_width)
+        rt_ptr_write_i32(host, 4, atlas_height)
+        rt_ptr_write_i32(host, 8, atlas_count as i32)
+        rt_ptr_write_i32(host, 12, atlas_x)
+        rt_ptr_write_i32(host, 16, atlas_y)
+        rt_ptr_write_i32(host, 20, quad_width)
+        rt_ptr_write_i32(host, 24, quad_height)
+        rt_ptr_write_i32(host, 28, dst_width)
+        rt_ptr_write_i32(host, 32, dst_height)
+        rt_ptr_write_i32(host, 36, dst_count as i32)
+        rt_ptr_write_i32(host, 40, dst_x)
+        rt_ptr_write_i32(host, 44, dst_y)
+        rt_ptr_write_i32(host, 48, color as i32)
 
 export MetalFontBackendState
 export METAL_FONT_PARAMS_BYTES

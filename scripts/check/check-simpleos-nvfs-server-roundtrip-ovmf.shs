@@ -147,6 +147,73 @@ scan_image() {
 }
 
 # ---------------------------------------------------------------------------
+# WEAK-STUB DETECTOR (L11/L12) — mandatory, and the reason it exists.
+#
+# On 2026-08-31 this lane was reported GREEN while it was not. The banner AND
+# the fs-type=nvfs assertion were both satisfied by a FABRICATED symbol:
+# boot_fs_mount.spl called boot_nvfs_root_mount_transaction_v1 with NO `use`
+# import, the build log said FABRICATED-NEW, and a weak body returning 0 reads
+# as a non-error Result — an "NVFS mount" that moved no data and mounted
+# nothing. Every serial rung above can be satisfied by such a build, so serial
+# scanning alone is structurally incapable of catching this class.
+#
+# NVFS_SEAL_SYMBOLS are the load-bearing symbols of the NVFS root mount path.
+# Two independent checks, both fail-closed:
+#   L11 the kernel build log fabricated NONE of them (zero tolerance)
+#   L12 every one of them has a real definition in src/, and the caller
+#       actually imports the transaction module
+# SIMPLE_ALLOW_FREESTANDING_STUBS=1 is a different, permitted flag; it does not
+# license fabricating any symbol on this list.
+# ---------------------------------------------------------------------------
+NVFS_SEAL_SYMBOLS="boot_nvfs_root_mount_transaction_v1
+vfs_nvfs_root_mount_stage_v1
+vfs_nvfs_root_mount_commit_v1
+vfs_nvfs_root_mount_abort_v1
+NvfsRootMountSealV1
+acquire_nvfs_root_mount_seal
+revalidate_nvfs_root_mount_seal
+close_nvfs_root_mount_seal
+abort_nvfs_root_mount_seal
+remove_exact_nvfs_root_mount
+sosix_fs_kernel_uninstalled_positioned_state_v1"
+
+# scan_build_log_fabrication <buildlog> — 0 when no load-bearing NVFS symbol
+# was fabricated/stubbed by the compiler. A missing log is NOT a pass.
+scan_build_log_fabrication() {
+    STUB_FOUND=""
+    [ -f "$1" ] || { STUB_FOUND="build-log-missing"; return 1; }
+    for _s in $NVFS_SEAL_SYMBOLS; do
+        if grep -E "FABRICATED-NEW|FABRICATED|fabricated|stub-fallback|weak stub" "$1" 2>/dev/null \
+             | grep -qF "$_s"; then
+            STUB_FOUND="$STUB_FOUND $_s"
+        fi
+    done
+    [ -z "$STUB_FOUND" ]
+}
+
+# scan_source_definitions <srcroot> — 0 when every load-bearing symbol has a
+# real definition and boot_fs_mount.spl imports the transaction module.
+scan_source_definitions() {
+    DEF_MISSING=""
+    _src=$1
+    [ -d "$_src" ] || { DEF_MISSING="src-root-missing"; return 1; }
+    for _s in $NVFS_SEAL_SYMBOLS; do
+        if ! grep -rqE "^[[:space:]]*(pub )?(me |static )?(fn|struct|enum|val) +$_s\b" \
+                --include='*.spl' "$_src" 2>/dev/null; then
+            DEF_MISSING="$DEF_MISSING $_s"
+        fi
+    done
+    _bfm="$_src/os/kernel/boot/boot_fs_mount.spl"
+    if [ -f "$_bfm" ]; then
+        grep -qE '^use +os\.kernel\.boot\.nvfs_root_mount_transaction' "$_bfm" \
+            || DEF_MISSING="$DEF_MISSING missing-import:boot_fs_mount"
+    else
+        DEF_MISSING="$DEF_MISSING boot_fs_mount.spl-missing"
+    fi
+    [ -z "$DEF_MISSING" ]
+}
+
+# ---------------------------------------------------------------------------
 # argv self-check. Needles are assembled from fragments so this check can
 # neither be defeated by, nor accidentally fire on, the surrounding prose.
 # ---------------------------------------------------------------------------
@@ -270,13 +337,66 @@ EOF
         echo "  selftest F10 FAILED (argv guard rejected a compliant argv)"; _rc=1
     fi
 
+    # F11 stub detector must-PASS: a clean build log fabricating nothing.
+    cat > "$_t/clean-build.log" <<'EOF'
+[build] compiling os.kernel.boot.boot_fs_mount
+[build] compiling os.kernel.boot.nvfs_root_mount_transaction
+[build] FABRICATED-NEW some_unrelated_freestanding_shim
+[build] link ok
+EOF
+    scan_build_log_fabrication "$_t/clean-build.log" \
+        || { echo "  selftest F11 FAILED (clean build log rejected:$STUB_FOUND)"; _rc=1; }
+
+    # F12 must-FAIL — THE REGRESSION FIXTURE. This is the literal 2026-08-31
+    # build log shape that produced the false green: the mount transaction
+    # symbol fabricated as a weak stub while every serial rung still printed.
+    cat > "$_t/stub-build.log" <<'EOF'
+[build] compiling os.kernel.boot.boot_fs_mount
+[build] FABRICATED-NEW boot_nvfs_root_mount_transaction_v1
+[build] link ok
+EOF
+    if scan_build_log_fabrication "$_t/stub-build.log"; then
+        echo "  selftest F12 FAILED (fabricated boot_nvfs_root_mount_transaction_v1 accepted)"; _rc=1
+    fi
+
+    # F13 must-FAIL: a missing build log is not evidence of a clean build.
+    if scan_build_log_fabrication "$_t/no-such-build.log"; then
+        echo "  selftest F13 FAILED (missing build log accepted)"; _rc=1
+    fi
+
+    # F14 must-PASS: the real tree defines every load-bearing symbol and
+    # boot_fs_mount.spl really imports the transaction module.
+    scan_source_definitions "$ROOT/src" \
+        || { echo "  selftest F14 FAILED (real tree missing:$DEF_MISSING)"; _rc=1; }
+
+    # F15 must-FAIL — the ORIGINAL defect, reproduced: a tree whose
+    # boot_fs_mount.spl calls the transaction with no `use` import.
+    mkdir -p "$_t/src/os/kernel/boot"
+    for _s in $NVFS_SEAL_SYMBOLS; do
+        printf 'pub fn %s():\n    ()\n' "$_s" >> "$_t/src/defs.spl"
+    done
+    printf 'fn m():\n    boot_nvfs_root_mount_transaction_v1(dev, n)\n' \
+        > "$_t/src/os/kernel/boot/boot_fs_mount.spl"
+    if scan_source_definitions "$_t/src"; then
+        echo "  selftest F15 FAILED (unimported transaction call accepted)"; _rc=1
+    fi
+
+    # F16 must-FAIL: a tree with the import but NO seal definitions at all —
+    # the exact origin/main state this lane had to repair.
+    mkdir -p "$_t/src2/os/kernel/boot"
+    printf 'use os.kernel.boot.nvfs_root_mount_transaction.{boot_nvfs_root_mount_transaction_v1}\n' \
+        > "$_t/src2/os/kernel/boot/boot_fs_mount.spl"
+    if scan_source_definitions "$_t/src2"; then
+        echo "  selftest F16 FAILED (tree with zero seal definitions accepted)"; _rc=1
+    fi
+
     rm -rf "$_t"
     [ "$_rc" -eq 0 ] || { echo "ERROR — nothing was checked: selftest failed"; exit 2; }
-    echo "[nvfsrt] selftest: 11 fixture(s) OK"
+    echo "[nvfsrt] selftest: 17 fixture(s) OK"
 }
 
 selftest
-[ "${1:-}" = "--selftest" ] && { echo "PASS — 11 check(s) checked, selftest fixtures only (no VM was booted)"; exit 0; }
+[ "${1:-}" = "--selftest" ] && { echo "PASS — 17 check(s) checked, selftest fixtures only (no VM was booted)"; exit 0; }
 
 # ---------------------------------------------------------------------------
 # Preconditions — every one of these is ERROR, never a pass.
@@ -458,6 +578,20 @@ if scan_image "$IMG" "$NONCE"; then
     echo "  [OK]   L10 nonce bytes found in the raw NVMe image (host-side filesystem check)"
 else
     MISSING="$MISSING L10"
+fi
+CHECKED=$((CHECKED + 1))
+
+if scan_build_log_fabrication "$OUT/kernel-build.log"; then
+    echo "  [OK]   L11 no load-bearing NVFS symbol was fabricated by the build"
+else
+    MISSING="$MISSING L11(fabricated:$STUB_FOUND)"
+fi
+CHECKED=$((CHECKED + 1))
+
+if scan_source_definitions "$ROOT/src"; then
+    echo "  [OK]   L12 every load-bearing NVFS symbol is really defined and imported"
+else
+    MISSING="$MISSING L12(undefined-or-unimported:$DEF_MISSING)"
 fi
 CHECKED=$((CHECKED + 1))
 
