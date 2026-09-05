@@ -252,7 +252,29 @@ src/app/spipe_docgen/spipe_docgen/generator.spl:7
 working copy**; the committed `common.spl` does not contain it while the
 committed `generator.spl` already imports it. Docgen fails identically on an
 untouched pre-existing spec (`sspec_maintain/cache_spec.spl`), so this is not
-specific to the new spec — it is an unlanded half sitting in the dirty set.
+specific to the new spec — it is an unlanded change sitting in the dirty set.
+
+**Attempted and deliberately abandoned (2026-09-05).** This lane added the
+5-line `spec_kw_line` helper to unbreak the tip. It resolved, and docgen then
+failed on the NEXT missing symbol, `scenario_at_is_unconditional_pending`
+(`parser.spl:1802`, also uncommitted). Measuring the real shape:
+
+```
+git diff --stat -- src/app/spipe_docgen/ src/app/sspec_maintain/analyzer.spl
+    common.spl      |  5 +
+    generator.spl   |  8 +-
+    parser.spl      | 82 ++++++++++
+    analyzer.spl    | 13 +-
+    4 files changed, 105 insertions(+), 3 deletions(-)
+```
+
+The tip is not broken by one stray helper; it is missing a coherent ~105-line
+feature across four files, three of which are dirty. Porting that wholesale
+would mean committing another lane's entire in-progress change under this
+lane's name, creating exactly the silent-divergence hazard that argues against
+duplicating even one helper. **The addition was reverted.** The fix belongs to
+the lane that owns the change; this document reports it so that lane, or the
+next person to snapshot the tree, knows the tip does not build docgen.
 
 Consequence for anyone reading a docgen result today: on a fresh clone the
 command prints `OK <spec> (N lines)` and *then* errors, so a caller that reads
