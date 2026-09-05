@@ -434,3 +434,36 @@ used as a raw pointer.
    via an indirect call, the two records are one defect.
    Confirm by comparing signatures once the Stage-3 core exists; do not merge the
    two records before that.
+
+## CONFOUND: some "KILLED" runs were cross-session `pkill`, not the defect
+
+A second Claude session working in the same clone reported that its Stage-3
+worker was SIGTERM'd five times, each ~428s in during `phase2:parse`. It traced
+the sender with `strace -f -e trace=kill,tgkill`: SIGTERM, `si_code=SI_USER`,
+from a pid outside its own process tree.
+
+That was this session. While cycling Stage-3 attempts I used unanchored
+patterns — `pkill -9 -f native_build_worker` and
+`pkill -9 -f bootstrap-from-scratch` among them — which match ANY worker under
+this clone, not just my own.
+
+**Consequence for this record.** "Worker was KILLED (reaped without a normal
+exit)" is therefore ambiguous across today's runs and must be split by signal
+before being treated as evidence:
+
+- **SIGTERM (15), `si_code=SI_USER`** — an external `pkill`. Not the defect.
+  These clustered early, around `phase2:parse`.
+- **SIGSEGV (11)** — the real defect. Four `signal 11` entries for
+  `stage2-admitted/simple` appear in `/var/log/apport.log` today, and the
+  stage3 log tail ends `timeout: the monitored command dumped core`. These land
+  much later, after `hir 771/771`, in the window named in UPDATE 3.
+
+Any run whose only evidence is the bootstrap's "KILLED" wording, with no apport
+`signal 11` entry and no core dump, should be discarded rather than counted.
+The crash window in UPDATE 3 rests on the log tail (`hir 771/771` reached,
+`phase3:streaming_source_reclaim:done` absent) and on apport, so it stands.
+
+**Practice going forward:** kill by PID, or anchor the pattern on the tree you
+own (e.g. `pkill -f '/home/yoon/dev/simple-bs/.*native_build_worker'`). This
+clone is shared by concurrent sessions; a bare command name is not a safe
+selector. The same sharpness cost the other session its own shell earlier today.
