@@ -452,6 +452,39 @@ if [ "${validate_bootstrap_receipt}" -eq 1 ]; then
   exit 0
 fi
 
+# Conflict-marker pre-flight. This script builds $PWD, not a commit, so a
+# parallel session mid-write in the shared working copy is read as source. On
+# 2026-09-05 a Stage-3 lane died 2 minutes in with "failed to parse
+# src/lib/nogc_sync_mut/io_runtime.spl at 64:1 ... found TripleLt" -- TripleLt
+# being `<<<`, a conflict marker -- while the file was clean in git, identical
+# to HEAD, and last committed 22 hours earlier. Its mtime was 51 seconds AFTER
+# the run started: another session held markers on disk for part of a minute.
+# Every conflict-marker guard in the repo is range-based on COMMITTED content
+# by deliberate design (see
+# doc/08_tracking/bug/conflict_markers_reported_at_origin_were_working_copy_only_2026-08-11.md),
+# so none of them can see this, and the wrapper had no pre-flight of its own.
+# The Rust side already refuses ("Rust inputs changed during full bootstrap");
+# this is the missing .spl equivalent.
+# Deliberately placed AFTER the --validate-bootstrap-receipt early exit so a
+# validation-only invocation never trips it, and BEFORE any stage starts.
+# A single line-initial marker is enough: unlike prose, no valid Simple source
+# begins a line with one, and a torn read often exposes only one side of the
+# pair. Costs ~0.2s over the tracked .spl set.
+# doc/08_tracking/bug/bootstrap_reads_transiently_broken_shared_working_copy_2026-09-05.md
+if git -C "${bootstrap_early_repo_root}" rev-parse --git-dir >/dev/null 2>&1; then
+  bootstrap_marker_hits=$(git -C "${bootstrap_early_repo_root}" grep -l -I \
+    -e '^<<<<<<<' -e '^>>>>>>>' -e '^%%%%%%%' -- 'src/*.spl' 2>/dev/null | head -5)
+  if [ -n "${bootstrap_marker_hits}" ]; then
+    echo "bootstrap-policy-error: working-copy-conflict-markers; refusing to build a torn tree" >&2
+    echo "${bootstrap_marker_hits}" | while IFS= read -r bootstrap_marker_file; do
+      [ -n "${bootstrap_marker_file}" ] && echo "  ${bootstrap_marker_file}" >&2
+    done
+    echo "  These are WORKING-COPY markers; git may well report the files clean by the" >&2
+    echo "  time you look. Re-run once the writing session has finished." >&2
+    exit 64
+  fi
+fi
+
 case "${progress_interval}" in
   ''|*[!0-9]*|0)
     echo "error: --progress-interval requires a positive integer" >&2
@@ -507,6 +540,15 @@ if [ -n "${resume_stage3_output}" ]; then
     exit 1
   }
   case "${jobs}" in ''|1) ;; *) echo "error: Stage 3 resume permits only --jobs=1 (it execs resume-stage3-from-admitted.sh, which takes no jobs argument and pins the stage-3 recompile to --threads 1 unless SIMPLE_NATIVE_BUILD_THREADS is set; a jobs value here would be silently ignored)" >&2; exit 1 ;; esac
+  # resume-stage3-from-admitted.sh reads the planner receipt from
+  # SIMPLE_BOOTSTRAP_REASON_RECEIPT, not from argv. Without this export a
+  # --bootstrap-receipt= given here was accepted, parsed, and then silently
+  # dropped: the resume refused with planner-admission-v2-required while the
+  # operator could see the receipt right there on the command line.
+  if [ -n "${bootstrap_receipt_path}" ]; then
+    SIMPLE_BOOTSTRAP_REASON_RECEIPT="${bootstrap_receipt_path}"
+    export SIMPLE_BOOTSTRAP_REASON_RECEIPT
+  fi
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -2939,7 +2981,16 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # signal, and WTERMSIG was being discarded. The runtime now reports
       # -(128+signo) so the number survives; a bare 255 means an older runtime
       # or a genuine wait failure.
-      echo "  warning: stage3 self-host worker was KILLED (reaped without a normal exit; the signal number was discarded by an older runtime -- rebuild to get -(128+signo)); NOT a compile failure; Stage 4 unavailable"
+      # RESOLVED 2026-09-05: on this host the 255 was the native-build wrapper's
+      # own -1 and the worker had CRASHED -- `timeout: the monitored command
+      # dumped core` in the stage3 log, and /var/log/apport.log recording
+      # signal 11 against stage2-admitted/simple. So 255 here means only "the
+      # wrapper could not report a real status"; it does NOT establish a kill,
+      # and asserting one cost three investigations. Send the reader to the log
+      # that actually carries the classification instead of guessing.
+      # doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md
+      echo "  warning: stage3 self-host ended with 255 = the native-build wrapper's own -1: the worker's real status was lost, NOT necessarily a kill; Stage 4 unavailable"
+      echo "  next: grep -n 'dumped core\|Segmentation fault\|CRASHED\|\[TIMEOUT:' '${log_dir}/stage3-native-build.log' and check /var/log/apport.log for a signal against the stage2 binary"
     elif [ "${stage3_status}" -gt 128 ] && [ "${stage3_status}" -le 192 ]; then
       # A signal death is not a compile failure. earlyoom(1) is userspace, so an
       # out-of-memory kill leaves nothing in dmesg and used to surface here as a
