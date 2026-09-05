@@ -1,0 +1,171 @@
+# @cover src/lib/common/gpu/engine2d/gpu_provider_conformance.spl 80%
+"""
+## Purpose and audience
+Grades what a GPU provider (Vulkan, Metal, DirectX) can actually offer the
+Engine2D epoch scheduler, and decides whether autonomous device-initiated
+submission may be switched on. The reader is a graphics or scheduler engineer
+asking "may I trust this provider with an unattended submission lane, and if
+not, exactly what is missing?". Category: Stdlib.
+## Operator workflow
+SIMPLE_LIB=src bin/release/macos-arm64/simple test test/01_unit/lib/common/gpu/engine2d/gpu_provider_conformance_spec.spl
+## Compatibility and limitations
+Pure logic only: no device is touched, so this spec runs identically on a host
+with no GPU. Device-side evidence lives in
+test/03_system/app/ui.browser/feature/gpu_provider_conformance_device_spec.spl.
+Nothing here can prove device execution; grading is routing evidence only.
+## Verification guidance and troubleshooting
+The retained evidence is the conformance summary line. A RED on the autonomy
+scenarios normally means the profile policy in gpu_epoch.spl changed; a RED on
+the api_level scenario means somebody relabelled the D3D11/DXVK lane as D3D12,
+which this tree has no provider for.
+"""
+# Lifecycle: doc/01_research/local/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/04_architecture/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/gpu_scheduler_hardening_gpu_resident_rendering.md
+# @manual_section: primary
+
+use std.spec
+use std.spec.step
+use common.gpu.engine2d.gpu_provider_conformance.{
+    ENGINE2D_GPU_GRADE_FULL,
+    ENGINE2D_GPU_GRADE_ROUTING_ONLY,
+    ENGINE2D_GPU_GRADE_UNAVAILABLE,
+    ENGINE2D_GPU_PROVIDER_DIRECTX,
+    ENGINE2D_GPU_PROVIDER_METAL,
+    ENGINE2D_GPU_PROVIDER_VULKAN,
+    Engine2dGpuProviderReport,
+    engine2d_gpu_provider_conformance,
+    engine2d_gpu_provider_conformance_summary,
+    engine2d_gpu_provider_report_unavailable
+}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PROFILE_DEVICE_INITIATED,
+    ENGINE2D_GPU_PROFILE_SCENE_REQUIRED,
+    ENGINE2D_GPU_TRUTH_FULL,
+    ENGINE2D_GPU_TRUTH_NONE,
+    ENGINE2D_GPU_TRUTH_PARTIAL
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_COMPUTE_PASSES,
+    DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS
+}
+
+# @step: Describe a provider that reports everything a full grade needs
+fn fully_capable_report(provider: text, capabilities: u32) -> Engine2dGpuProviderReport:
+    Engine2dGpuProviderReport(
+        provider: provider,
+        api_level: "vulkan-1.x",
+        available: true,
+        device_name: "Reference Device",
+        device_type: "discrete_gpu",
+        driver_identity: "reference-driver-1.0",
+        capabilities: capabilities,
+        distinct_phases: true,
+        fence_token_available: true,
+        device_timestamps_available: true,
+        probe_error: ""
+    )
+
+# @step: Describe a present provider that can only route work
+fn routing_only_report(provider: text, capabilities: u32) -> Engine2dGpuProviderReport:
+    Engine2dGpuProviderReport(
+        provider: provider,
+        api_level: "metal",
+        available: true,
+        device_name: "Reference Device",
+        device_type: "integrated_gpu",
+        driver_identity: "reference-driver-1.0",
+        capabilities: capabilities,
+        distinct_phases: false,
+        fence_token_available: false,
+        device_timestamps_available: false,
+        probe_error: ""
+    )
+
+describe "Engine2D GPU provider conformance":
+
+    it "reports an absent provider as unavailable rather than merely non-conformant":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Describe a host on which the Vulkan loader was not found")
+        val report = engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_VULKAN, "vulkan runtime not available on this host")
+        step("Grade that provider against the ordinary scene-required profile")
+        val graded = engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)
+        # @capture(exec): the conformance summary for an absent provider
+        step("Verify the grade is unavailable and no scheduling assurance is claimed")
+        expect(graded.grade).to_equal(ENGINE2D_GPU_GRADE_UNAVAILABLE)
+        expect(graded.conformant).to_equal(false)
+        expect(graded.missing_for_full).to_equal("unavailable")
+        expect(graded.truth.scheduling_assurance).to_equal(ENGINE2D_GPU_TRUTH_NONE)
+
+    it "grades a present provider that cannot fence as routing-only and names every gap":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Describe a Metal device that is present but exposes no fence token and no separate phases")
+        val report = routing_only_report(ENGINE2D_GPU_PROVIDER_METAL, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        step("Grade it against the scene-required profile")
+        val graded = engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)
+        # @capture(exec): the named gaps that keep this provider off a full grade
+        step("Verify the report is routing-only and that both the fence and the phase gap are named")
+        expect(graded.grade).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+        expect(graded.conformant).to_equal(false)
+        expect(graded.missing_for_full).to_contain("fence")
+        expect(graded.missing_for_full).to_contain("phases")
+        expect(graded.truth.scheduling_assurance).to_equal(ENGINE2D_GPU_TRUTH_PARTIAL)
+
+    it "permits autonomous submission only for a full provider on the device-initiated profile":
+        # @req REQ-GPU-SCHED-AUTONOMY-001
+        step("Describe a provider that fences, separates phases, and reports device-generated commands")
+        val report = fully_capable_report(ENGINE2D_GPU_PROVIDER_VULKAN, DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS)
+        step("Grade it against the device-initiated experimental profile")
+        val graded = engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)
+        # @capture(exec): the summary of the only configuration that unlocks autonomy
+        step("Verify the grade is full and autonomous submission is unlocked")
+        expect(graded.grade).to_equal(ENGINE2D_GPU_GRADE_FULL)
+        expect(graded.conformant).to_equal(true)
+        expect(graded.autonomous_submission_allowed).to_equal(true)
+        expect(graded.truth.submission_autonomy).to_equal(ENGINE2D_GPU_TRUTH_FULL)
+
+    it "withholds autonomous submission from a full provider whose profile does not ask for it":
+        # @req REQ-GPU-SCHED-AUTONOMY-001
+        step("Describe the same fully capable, device-generated-commands provider")
+        val report = fully_capable_report(ENGINE2D_GPU_PROVIDER_VULKAN, DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS)
+        step("Grade it against the ordinary scene-required profile instead")
+        val graded = engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)
+        # @capture(exec): a full provider held back by profile policy
+        step("Verify the provider is still conformant but autonomy stays off")
+        expect(graded.conformant).to_equal(true)
+        expect(graded.autonomous_submission_allowed).to_equal(false)
+        expect(graded.truth.submission_autonomy).to_equal(ENGINE2D_GPU_TRUTH_NONE)
+
+    it "refuses autonomous submission to a routing-only provider even when the profile and capability ask for it":
+        # @req REQ-GPU-SCHED-AUTONOMY-001
+        step("Describe a present provider that advertises device-generated commands but cannot fence")
+        val report = routing_only_report(ENGINE2D_GPU_PROVIDER_METAL, DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_DEVICE_GENERATED_COMMANDS)
+        step("Grade it against the device-initiated experimental profile, the most permissive one")
+        val graded = engine2d_gpu_provider_conformance(report, ENGINE2D_GPU_PROFILE_DEVICE_INITIATED)
+        # @capture(exec): the adverse case — capability advertised, autonomy still refused
+        step("Verify the capability bit alone does not unlock autonomy")
+        expect(graded.grade).to_equal(ENGINE2D_GPU_GRADE_ROUTING_ONLY)
+        expect(graded.autonomous_submission_allowed).to_equal(false)
+        expect(graded.truth.submission_autonomy).to_equal(ENGINE2D_GPU_TRUTH_NONE)
+
+    it "labels the DirectX lane as D3D11 via DXVK and never as D3D12":
+        # @req REQ-GPU-SCHED-PROVIDER-001
+        step("Describe a host with no D3D11/DXVK adapter")
+        val report = engine2d_gpu_provider_report_unavailable(ENGINE2D_GPU_PROVIDER_DIRECTX, "no D3D11/DXVK provider on macos")
+        # @capture(exec): the api_level string produced for the DirectX lane
+        step("Verify the api level names D3D11 via DXVK, because this tree has no D3D12 provider")
+        expect(report.api_level).to_equal("d3d11-dxvk")
+        expect(report.api_level).to_not_contain("d3d12")
+
+    it "summarises a graded provider as a single evidence line":
+        # @req REQ-GPU-SCHED-PROOF-001
+        step("Grade a routing-only Metal provider")
+        val graded = engine2d_gpu_provider_conformance(routing_only_report(ENGINE2D_GPU_PROVIDER_METAL, DRAW_IR_V3_CAP_COMPUTE_PASSES), ENGINE2D_GPU_PROFILE_SCENE_REQUIRED)
+        step("Render the retained evidence line")
+        val summary = engine2d_gpu_provider_conformance_summary(graded)
+        # @capture(exec): the retained conformance summary line
+        step("Verify the summary carries the provider, the grade, and the autonomy verdict")
+        expect(summary).to_contain("provider=metal")
+        expect(summary).to_contain("grade=routing_only")
+        expect(summary).to_contain("autonomous=false")
