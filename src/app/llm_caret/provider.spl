@@ -6,6 +6,7 @@
 use app.llm_caret.claude_api.{claude_api_send}
 use app.llm_caret.claude_cli.{claude_cli_send}
 use app.llm_caret.local_torch.{local_torch_send}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_generate, engine_backend_available, engine_lib_path}
 use app.llm_caret.codex_cli.{codex_cli_send}
 use app.llm_caret.opencode_cli.{opencode_cli_send}
 use app.llm_caret.openai_api.{openai_send}
@@ -46,7 +47,7 @@ fn new_llm_error(provider: text, error_msg: text) -> LLMResponse:
 # ============================================================================
 
 fn list_providers() -> [text]:
-    ["dummy", "claude_cli", "codex_cli", "opencode_cli", "claude_api", "openai", "openai_compat", "kimi", "glm", "deepseek", "slang", "local_torch"]
+    ["dummy", "claude_cli", "codex_cli", "opencode_cli", "claude_api", "openai", "openai_compat", "kimi", "glm", "deepseek", "slang", "slang_local", "local_torch"]
 
 fn is_valid_provider(provider: text) -> bool:
     if provider == "dummy":
@@ -70,6 +71,8 @@ fn is_valid_provider(provider: text) -> bool:
     if provider == "deepseek":
         return true
     if provider == "slang":
+        return true
+    if provider == "slang_local":
         return true
     if provider == "local_torch":
         return true
@@ -152,6 +155,11 @@ fn dispatch_send_advanced(
             # closed here instead of sending an unauthenticated request.
             return new_llm_error("deepseek", "deepseek requires an API key")
         return _dispatch_compat(base_url, api_key, model, messages_json, max_tokens, provider)
+    elif provider == "slang_local":
+        # slang in-process, no socket. `base_url` carries the model ROOT
+        # directory here rather than a URL -- slang_local has no transport, and
+        # reusing the field keeps the caller's argument surface unchanged.
+        return _dispatch_slang_local(base_url, model, prompt, max_tokens, cli_path)
     elif provider == "local_torch":
         return _dispatch_local_torch(cli_path, model, prompt, max_tokens)
     else:
@@ -298,6 +306,30 @@ fn _dispatch_compat(base_url: text, api_key: text, model: text, messages_json: t
 # ============================================================================
 # Local Torch dispatch
 # ============================================================================
+
+# slang's offline entrypoint: this process loads the model and runs slang's own
+# decode loop. Distinct from the "slang" provider above, which reaches a
+# separate slang_server over HTTP -- the two differ in transport, not in engine,
+# and both report provider identity truthfully so a caller can tell which ran.
+fn _dispatch_slang_local(model_root: text, model: text, prompt: text, max_tokens: i64, lib_path: text) -> LLMResponse:
+    var root = model_root
+    if root == "":
+        root = "models"
+    val answer = slang_generate(root, model, prompt, max_tokens, lib_path, 0)
+    if answer.is_error:
+        return new_llm_error("slang_local", answer.error)
+    LLMResponse(
+        content: answer.content,
+        model: answer.model,
+        provider: "slang_local/" + answer.backend,
+        session_id: "",
+        stop_reason: "stop",
+        input_tokens: 0,
+        output_tokens: 0,
+        error: "",
+        is_error: false,
+        raw: ""
+    )
 
 fn _dispatch_local_torch(python_path: text, model_path: text, prompt: text, max_tokens: i64) -> LLMResponse:
     val resp = local_torch_send(python_path, model_path, prompt, max_tokens)

@@ -162,7 +162,14 @@ run_fixture_in() {
     # artifact that looks exactly like a tree defect. (It misread origin/main as broken once
     # already.) Provision it, pointing at the same binary this guard is driving.
     mkdir -p "$_dir/bin" 2>/dev/null
-    ln -sf "$(readlink -f "$_bin")" "$_dir/bin/simple" 2>/dev/null
+    # Never relink when the tree under test IS the tree the driving binary lives in:
+    # `readlink -f` of a regular-file wrapper is that same path, so the ln would point
+    # bin/simple at itself and every later exec dies with ELOOP ("Too many levels of
+    # symbolic links"). That destroys the deployed CLI of whoever ran the push, and the
+    # selftest then reports the damage as a tree defect. Compare resolved paths first.
+    _want=$(readlink -f "$_bin" 2>/dev/null)
+    _have=$(readlink -f "$_dir/bin/simple" 2>/dev/null)
+    [ -n "$_want" ] && [ "$_have" = "$_want" ] || ln -sf "$_want" "$_dir/bin/simple" 2>/dev/null
     _out=$(cd "$_dir" && timeout "$TEST_TIMEOUT" "$_bin" test "$FIXTURE" 2>&1)
     _rc=$?
     if [ "$_rc" -eq 0 ]; then
