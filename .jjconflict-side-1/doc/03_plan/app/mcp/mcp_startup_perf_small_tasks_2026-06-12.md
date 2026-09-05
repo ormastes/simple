@@ -36,13 +36,28 @@ Model levels: **haiku** = mechanical/measurement, **sonnet** = scoped implementa
 
 ## Lane C — Wrapper/scripts (`scripts/setup/setup.shs`, wrapper templates only)
 
-- [ ] C1 (sonnet): wrapper probe uses `candidate --probe` when supported (fallback to the
+- [x] C1 (sonnet): wrapper probe uses `candidate --probe` when supported (fallback to the
       existing full-handshake grep when `--probe` unsupported) — removes one full server
-      boot from cold/stale starts.
+      boot from cold/stale starts. — verified `scripts/setup/setup.shs` `mcp_probe_native`
+      now runs `<candidate> --probe </dev/null` under `SIMPLE_MCP_NATIVE_PROBE_QUICK_TIMEOUT`
+      (default 2s) and returns early on exit 0 + `simple-mcp probe ok`, writing the stamp;
+      anything else logs `probe_flag_unsupported ... fallback=full_handshake` and falls
+      through to the unchanged four-message handshake. Stamp version bumped to
+      `simple_mcp_server:4.2.0-probe-flag`. Harness-tested against two fake natives: a
+      `--probe`-aware one is admitted via the flag alone (`probe_flag_ok ... stamp=written`),
+      one predating the flag falls through (`probe_flag_unsupported ... rc=0`) and is then
+      judged by the handshake. `sh -n` clean on both the generator and the extracted wrapper.
+      Acceptance oracle `mcp_startup_perf_small_tasks_spec.spl` C1 PASSES.
 - [x] C2 (haiku): keep full handshake probe in CI smoke
       (`scripts/check/check-mcp-native-smoke.shs`) — verify unchanged, no sleeps. — verified scripts/check/check-mcp-native-smoke.shs:100 `mcp_init` (full initialize / notifications/initialized / tools/list / tools/call framing; zero `sleep` in the script)
-- [ ] C3 (haiku): note in docs: never benchmark via
+- [x] C3 (haiku): note in docs: never benchmark via
       `test/03_system/tools/mcp/mcp_startup_test_system.shs` (sleep 1 × 3) or via npx.
+      — verified `doc/07_guide/app/mcp/mcp.md` § "Benchmarking startup — what NOT to measure
+      with" names both pitfalls and the replacements. The sleep count is measured, not
+      assumed: `grep -c sleep test/03_system/tools/mcp/mcp_startup_test_system.shs` = 7
+      (`sleep 1` at lines 36/38/40 for the MCP run and 53/55/57 for the LSP MCP run, plus one
+      comment), i.e. a ~3000 ms artificial floor per server. Acceptance oracle
+      `mcp_startup_perf_small_tasks_spec.spl` C3 PASSES.
 
 ## Lane D — Dependency cut (`src/lib/nogc_sync_mut/mcp_sdk/**` only)
 

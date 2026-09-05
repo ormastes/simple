@@ -331,6 +331,15 @@ bin/simple test test/01_unit/app/office/sheets/formula_*.spl > baseline.log
 - [x] Research complete (5 agents, 5 artifacts)
 - [ ] All 21 Phase 2-3 functions migrated
 - [ ] All formula tests pass (100% coverage)
+  - blocked 2026-09-05, three stacked infrastructure blockers, none of them a
+    formula defect: (1) `ulimit -v` is unimplemented on Darwin so every bounded
+    child exited 125 (FIXED in `src/lib/nogc_sync_mut/io/resource_scope.spl`);
+    (2) the runner's `ulimit -u 64` is a per-UID cap that makes `timeout` fail
+    to fork on a workstation; (3) DOMINANT -- the deny-level
+    `spipe_empty_examples` lint does not recognise `assert_*` as a real
+    assertion, so `simple test`'s compile-first path fails all 79 sheets specs
+    that every one of which PASSES under `simple run`. Full evidence and fix
+    order: doc/08_tracking/bug/test_runner_ulimit_caps_unusable_on_macos_2026-09-05.md
 - [ ] No performance regression
 - [ ] Code size reduced by ~500-1000 lines
 - [ ] Documentation updated
