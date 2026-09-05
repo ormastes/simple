@@ -44,6 +44,8 @@ second registry/loader, or a Tiny edit while the Tiny lane holds the file.
 
 ## Blockers (explicit)
 
+0. **`simple ui tui` is a stub** (`doc/08_tracking/bug/ui_tui_cli_entry_is_a_stub_2026-09-05.md`): the parser-backed TUI has no CLI caller, so the closure win on `async_app.spl` does not reach the shipped command until a wiring decision is made (Wave 2, needs owner decision).
+0b. **`deps fast` ignores bare tier-rooted imports** (`common.X`, `nogc_sync_mut.X`); closure numbers are lower bounds and the gate now ERRORs on unresolved edges instead of passing blind.
 1. Baseline binary on macOS — needs deployed pure-Simple `ui`; until then all numbers are seed-lane diagnostic.
 2. Tiny file ownership — `tiny_ui_web_wm` lane open with FAIL review.
 3. Async kernel_plugin layer absent — static composition only; do not stub it.
