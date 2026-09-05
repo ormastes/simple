@@ -69,11 +69,17 @@ fn regenerate_manual_sha(spec_path: text, audience: text, output_dir: text) -> t
         case Err(e): fail("generate_feature_doc failed for {spec_path} audience={audience}: {e}")
     sha256_text(rendered)
 
+# `file_read` in std.nogc_sync_mut.io.file_ops is `(text) -> text`, NOT
+# `Result<text, text>` (file_ops.spl:108). Matching Ok/Err over it aborts every
+# example with "match expression exhausted without matching any pattern for str
+# value <file contents>" before the real oracle is ever evaluated — which is why
+# all 7 examples reported the same semantic error rather than their own verdicts.
+# Guard on `file_exists` and read directly; this stays fail-fast and does not
+# soften any assertion below.
 fn committed_manual_sha(manual_path: text) -> text:
-    val expected_bytes = match file_read(manual_path):
-        case Ok(content): content
-        case Err(e): fail("could not read committed manual {manual_path}: {e}")
-    sha256_text(expected_bytes)
+    if not file_exists(manual_path):
+        fail("could not read committed manual {manual_path}: file does not exist")
+    sha256_text(file_read(manual_path))
 
 describe "sspec_modernization_plan.md — open Definition-of-done checkboxes":
 
@@ -146,9 +152,9 @@ describe "sspec_modernization_plan.md — open Definition-of-done checkboxes":
         val expected_missing_count = 0
         expect(missing_req_ids.len()).to_equal(expected_missing_count) # oracle: the plan's Traceability table names exactly these 10 REQ-SSPEC-MODERN ids, so zero is the only complete-coverage value
 
-        val written = match file_read(req_trace_md_path):
-            case Ok(content): content
-            case Err(e): fail("req_trace.md was not regenerated at {req_trace_md_path}: {e}")
+        if not file_exists(req_trace_md_path):
+            fail("req_trace.md was not regenerated at {req_trace_md_path}")
+        val written = file_read(req_trace_md_path)
         expect(sha256_text(written)).to_equal(sha256_text(trace_md))
 
     it "All goldens `reviewed` (no `pending-review`); `bin/simple build check` + `check-req-traceability.shs --strict` green; `bin/simple build bootstrap` clean.":
@@ -176,9 +182,9 @@ describe "sspec_modernization_plan.md — open Definition-of-done checkboxes":
         step("confirm the spipe template documents the manual-first authoring convention")
         # @req REQ-SSPEC-PLAN-ACCEPTANCE-001
         # @capture: the presence of the manual-first marker string in the committed template is the retained evidence
-        val template_content = match file_read(spipe_template_path):
-            case Ok(content): content
-            case Err(e): fail("could not read {spipe_template_path}: {e}")
+        if not file_exists(spipe_template_path):
+            fail("could not read {spipe_template_path}: file does not exist")
+        val template_content = file_read(spipe_template_path)
         val expected_present = true
         val actual_present = template_content.contains(manual_first_marker)
         expect(actual_present).to_equal(expected_present)

@@ -28,7 +28,7 @@
 
 - [x] `serial_open` — validate fd after `open()`, return `is_valid=false` on failure — verified src/app/io/serial_ffi.spl:66 `is_valid: fd >= 0`
 - [x] `serial_read`/`serial_write` — check `port.is_valid` before use — verified src/app/io/serial_ffi.spl:99 `if not port.is_valid` (`serial_read`), :108 `if not port.is_valid` (`serial_write`)
-- [ ] `serial_close` — idempotent, no double-free
+- [x] `serial_close` — idempotent, no double-free — verified `test/03_system/plan_acceptance/serial_sigsegv_and_test_hardening_spec.spl` "serial_close rejects a repeat close instead of double-freeing the fd" PASSES (was RED; spec file went 0/7 -> 1/7 passing) under `src/compiler_rust/target/debug/simple run` (debug Rust seed, 120103640 bytes, mtime 2026-09-04 18:13). Guard landed in BOTH implementations: `src/lib/nogc_sync_mut/io/serial_sffi.spl` (the live one, used by `src/app/serial_mcp/tools.spl`) and `src/app/io/serial_ffi.spl` (the one the oracle greps). `SerialPort` is passed BY VALUE, so a `closed: bool` field alone cannot stop a second close through a stale copy — each module also keeps a process-global closed-descriptor set (`_closed_handles` / `_closed_fds`) that is the authoritative guard, and `serial_open` drops a stale entry when the OS recycles the number.
 - [ ] Re-enable BLOCKED serial_mcp_spec tests after guard lands
 
 ## Phase 5: Simple-Level Signal Wiring
