@@ -95,6 +95,20 @@ describe "native-build / bootstrap CLI entry source contract":
         expect(eof.len()).to_equal(1)
         expect(eof[0]).to_equal("error: eof")
 
+    it "keeps the core-dump line that names a crashed worker":
+        ## `timeout: the monitored command dumped core` is the ONLY evidence that
+        ## a worker died by SIGSEGV rather than being killed or exiting -1. It
+        ## was not a recognised diagnostic on 2026-09-05, so the middle-dropping
+        ## truncation discarded it and three investigations chased an OOM, a
+        ## rogue killer and a double reap instead. See
+        ## doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md
+        val crash = native_build_collect_diagnostics(
+            "noise\ntimeout: the monitored command dumped core\nnoise\n")
+        expect(crash.len()).to_equal(1)
+        expect(crash[0]).to_equal("timeout: the monitored command dumped core")
+        expect(native_build_collect_diagnostics("sh: line 1: 42 (core dumped)\n").len())
+            .to_equal(1)
+
     it "streams diagnostic lines without retaining a full split array":
         val src = file_read("src/app/cli/native_build_main.spl")
         expect(src).to_contain("output.index_of(\"\\n\", line_start)")
@@ -106,7 +120,11 @@ describe "native-build / bootstrap CLI entry source contract":
         val substring_pos = src.index_of(
             "output.substring(line_start, line_end)", match_pos)
         expect(substring_pos).to_be_greater_than(match_pos)
-        expect(src).not_to_contain("for line in output.split(\"\\n\")")
+        # `not_to_contain` is not a matcher this spec runtime has (only `to_contain`
+        # plus the i64-only `not_()`), so this line ERRORED on every run since it
+        # was written -- which is how the streaming implementation it guards came
+        # to be clobbered by a merge without anyone noticing. Assert the boolean.
+        expect(src.contains("for line in output.split(\"\\n\")")).to_be_false()
 
     it "treats a zero exit with no output binary as a hard failure":
         # @req REQ-SSPEC-UNIT

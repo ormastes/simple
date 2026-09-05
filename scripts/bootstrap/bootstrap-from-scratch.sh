@@ -2948,7 +2948,16 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # signal, and WTERMSIG was being discarded. The runtime now reports
       # -(128+signo) so the number survives; a bare 255 means an older runtime
       # or a genuine wait failure.
-      echo "  warning: stage3 self-host worker was KILLED (reaped without a normal exit; the signal number was discarded by an older runtime -- rebuild to get -(128+signo)); NOT a compile failure; Stage 4 unavailable"
+      # RESOLVED 2026-09-05: on this host the 255 was the native-build wrapper's
+      # own -1 and the worker had CRASHED -- `timeout: the monitored command
+      # dumped core` in the stage3 log, and /var/log/apport.log recording
+      # signal 11 against stage2-admitted/simple. So 255 here means only "the
+      # wrapper could not report a real status"; it does NOT establish a kill,
+      # and asserting one cost three investigations. Send the reader to the log
+      # that actually carries the classification instead of guessing.
+      # doc/08_tracking/bug/stage3_worker_reaped_silently_in_hir_typecheck_2026-09-05.md
+      echo "  warning: stage3 self-host ended with 255 = the native-build wrapper's own -1: the worker's real status was lost, NOT necessarily a kill; Stage 4 unavailable"
+      echo "  next: grep -n 'dumped core\|Segmentation fault\|CRASHED\|\[TIMEOUT:' '${log_dir}/stage3-native-build.log' and check /var/log/apport.log for a signal against the stage2 binary"
     elif [ "${stage3_status}" -gt 128 ] && [ "${stage3_status}" -le 192 ]; then
       # A signal death is not a compile failure. earlyoom(1) is userspace, so an
       # out-of-memory kill leaves nothing in dmesg and used to surface here as a
