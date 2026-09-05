@@ -285,3 +285,28 @@ UTF-8-aware `text` concatenation. Filed at
 [`doc/08_tracking/bug/wire_to_bytes_high_byte_utf8_roundtrip_corruption_2026-09-05.md`](../../../08_tracking/bug/wire_to_bytes_high_byte_utf8_roundtrip_corruption_2026-09-05.md)
 with the reproduction spec GREEN and the generalization spec left RED, per
 `.claude/rules/testing.md`.
+
+## Producer/consumer split for debug evidence bundles (2026-09-05)
+
+**Reader exists; writer does not — do not claim dump-based debugging works.**
+The consumer side (`src/app/cli_debug/evidence_inspect_v1.spl` field-by-field
+manifest validation, `src/app/cli_debug/evidence_replay_v1.spl` semantic
+replay) is real and strict. Nothing in the repo produces a
+`debug-evidence-bundle-v1` bundle — no coredump/minidump capture, no
+ELF-core parser. The exact contract a future writer must satisfy, derived
+from the reader with file:line citations, is pinned at
+`doc/07_guide/app/debug/debug_evidence_bundle_contract.md`, with a
+conformance spec at
+`test/01_unit/app/cli_debug/debug_evidence_bundle_contract_v1_spec.spl`
+(6/7 green; the 7th is correctly RED against a real, separately-filed reader
+defect — `outcome.receipt_id` reads a field `DebugReceiptV1` does not have,
+see `doc/08_tracking/bug/debug_evidence_inspect_receipt_id_field_missing_2026-09-05.md`).
+The contract doc also carries the imported parser-safety policy (dump
+artifacts are data, never executable; parsing is separately-allowlisted;
+parser output is derived evidence with `parser_uid`/`parser_version`/
+`derived_from`/`trust`; quarantine → hash → classify-by-content → scan →
+parse; large dumps to a vault, never Git). What becomes possible once a
+writer lands and the reader defect is fixed: R0 diagnose-from-dump (exact
+build/session/capture identity, then semantic replay) without rerunning the
+failing program — this is a target, not a landed capability, as of this
+writing.
