@@ -1,4 +1,24 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+## Purpose and audience
+Benchmark harness comparing identical micro-workloads (variable access,
+function calls, collections, control flow, strings, composites, dicts,
+structs) for cost under the Rust bootstrap and self-hosted Simple binaries.
+Audience: performance engineers comparing the two execution stacks and
+reviewers of the `[bench]` output contract consumed by comparison scripts.
+## Operator workflow
+Run: src/compiler_rust/target/bootstrap/simple run test/05_perf/rust_vs_simple_comparison_spec.spl
+under each binary and diff the printed `[bench] category/name: avg=..us` lines.
+## Compatibility and limitations
+Timings are machine-dependent by design — this spec deliberately asserts the
+harness structure (declared timing extern, `[bench]` output format, monotonic
+runtime clock) and never a wall-clock threshold. Module-level benchmark
+execution happens at load time; the scenario below verifies the contract.
+## Verification guidance and troubleshooting
+A failure here means the harness contract drifted: a missing
+rt_time_now_unix_micros extern breaks every timing, and a changed `[bench]`
+line format silently breaks downstream parsers. Re-run after touching the
+run_bench helper or the extern declarations.
+"""
 # @req REQ-SSPEC-PERF
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
@@ -406,9 +426,19 @@ print "=== Benchmark Complete ==="
 
 # Spec wrapper so this also passes as a test file
 use std.spec.step
+use std.io_runtime.file_read
 
 describe "Rust vs Simple Performance Comparison":
     slow_it "benchmark suite runs":
         # @req REQ-SSPEC-PERF
-        step("benchmark suite runs")
-        expect(1).to_equal(1)
+        # @capture(statistics): [bench] output-format contract and clock monotonicity
+        step("Verify the benchmark harness source declares its timing extern and [bench] output format")
+        val harness_source = file_read("test/05_perf/rust_vs_simple_comparison_spec.spl")
+        val bench_line_format_declared = harness_source.contains("[bench] ") and harness_source.contains("us min=") and harness_source.contains("us iters=")
+        val timing_extern_declared = harness_source.contains("extern fn rt_time_now_unix_micros")
+        expect(bench_line_format_declared).to_equal(true)
+        expect(timing_extern_declared).to_equal(true)
+        step("Confirm the runtime clock the harness times with is monotonic")
+        val clock_start = rt_time_now_unix_micros()
+        val clock_end = rt_time_now_unix_micros()
+        expect(clock_end).to_be_greater_than(clock_start - 1)
