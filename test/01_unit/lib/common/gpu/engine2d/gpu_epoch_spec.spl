@@ -36,7 +36,7 @@ fn epoch_token() -> RingToken:
     RingToken(ring_id: 1u64, slot: 0u64, generation: RingGeneration(value: 1u64))
 
 fn qualifying_evidence() -> Engine2dGpuDeviceEvidence:
-    Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 256, negative_control_passed: true)
+    Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: true, device_begin_ticks: 10, device_end_ticks: 20, transfer_bytes: 256, negative_control_passed: true)
 
 fn full_truth() -> Engine2dGpuTruthLabels:
     Engine2dGpuTruthLabels(semantic_residency: ENGINE2D_GPU_TRUTH_FULL, data_residency: ENGINE2D_GPU_TRUTH_FULL, submission_autonomy: ENGINE2D_GPU_TRUTH_PARTIAL, scheduling_assurance: ENGINE2D_GPU_TRUTH_PARTIAL)
@@ -69,6 +69,11 @@ describe "GPU epoch admission":
         val receipt = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_STATIC_POOL), epoch_token(), false, 0u32)
         expect(receipt.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
         expect(receipt.diagnostic).to_contain("forbidden")
+        step("A balanced profile is refused too: an epoch has no CPU lane; the route decision does")
+        val balanced = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), false, DRAW_IR_V3_CAP_COMPUTE_PASSES)
+        expect(balanced.phase).to_equal(ENGINE2D_GPU_PHASE_REJECTED)
+        expect(balanced.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+        expect(balanced.diagnostic).to_contain("CPU route")
 
     it "rejects a request whose generations or handles are zero":
         # @req REQ-GPU-SCHED-SAFE-001
@@ -109,6 +114,9 @@ describe "GPU epoch lifecycle":
         val queued = engine2d_gpu_epoch_admit(epoch_request(ENGINE2D_GPU_PROFILE_SCENE_BALANCED), epoch_token(), true, DRAW_IR_V3_CAP_COMPUTE_PASSES)
         val early = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_PRESENTED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
         expect(early.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        val early_display = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_DISPLAYED, qualifying_evidence(), full_truth())
+        expect(early_display.phase).to_equal(ENGINE2D_GPU_PHASE_QUEUED)
+        expect(early_display.device_execution_proven).to_be(false)
         step("Complete, retire, then try to move again")
         val completed = engine2d_gpu_epoch_advance(queued, ENGINE2D_GPU_PHASE_COMPLETED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
         val retired = engine2d_gpu_epoch_advance(completed, ENGINE2D_GPU_PHASE_RETIRED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
@@ -129,4 +137,9 @@ describe "GPU epoch lifecycle":
         expect(engine2d_gpu_device_evidence_qualifies(engine2d_gpu_device_evidence_none())).to_be(false)
         val reversed = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 300, host_complete_ns: 250, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 0, negative_control_passed: true)
         expect(engine2d_gpu_device_evidence_qualifies(reversed)).to_be(false)
+        step("Host-only facts never qualify: no device timestamps or no transfer bytes")
+        val host_only = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: false, device_begin_ticks: 0, device_end_ticks: 0, transfer_bytes: 256, negative_control_passed: true)
+        expect(engine2d_gpu_device_evidence_qualifies(host_only)).to_be(false)
+        val no_bytes = Engine2dGpuDeviceEvidence(binary_identity: "sha256:abc", device_name: "Test GPU", device_type: "discrete", driver_identity: "driver 1.0", host_submit_ns: 100, host_complete_ns: 250, device_timestamp_available: true, device_begin_ticks: 10, device_end_ticks: 20, transfer_bytes: 0, negative_control_passed: true)
+        expect(engine2d_gpu_device_evidence_qualifies(no_bytes)).to_be(false)
         expect(engine2d_gpu_device_evidence_qualifies(qualifying_evidence())).to_be(true)
