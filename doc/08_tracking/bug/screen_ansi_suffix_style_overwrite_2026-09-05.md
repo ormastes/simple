@@ -31,6 +31,12 @@ A/B in the same tree and binary (seed `src/compiler_rust/target/bootstrap/simple
 18/20, identical. The defect is in the pre-existing `_splice_row`/`put_text` path
 (styled-block partial overwrite and repeated overwrite on one row), not in `draw_hline`.
 
+## Legacy mirror
+
+`test/unit/app/ui/screen_ansi_spec.spl` differs from both the broken and the repaired
+`01_unit` file (pre-existing, baselined divergence). It was NOT repaired; `test/unit/`
+is the frozen legacy mirror excluded from directory discovery.
+
 ## Unblock
 
 Fix the splice logic in `src/app/ui.tui/screen.spl` (`_splice_row`, extracted verbatim
