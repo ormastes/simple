@@ -218,3 +218,35 @@ Options, in order of cost:
    would dodge pattern kills, but it is a workaround that hides the coupling.
 3. **Isolate properly** — a container or a second UID — which is what a shared
    build host actually wants, and the natural extension of the snapshot fix.
+
+## Caveat on fix 3: "build from committed content" assumes the tip is buildable
+
+`bootstrap-in-snapshot.shs` makes a build immune to concurrent edits by reading
+only committed content. That is the right trade for the bootstrap, whose inputs
+are committed. It is worth stating the assumption it rests on, because a
+parallel session measured a live counterexample the same day:
+
+**`spipe-docgen` does not run from committed content at all, on any spec.** The
+committed `generator.spl`, `parser.spl` and `analyzer.spl` all reference an
+unlanded half of a feature that exists only as uncommitted work in the main
+working copy — measured at 105 insertions across four files, three of them
+dirty. Resolving the first missing symbol (`spec_kw_line`) just moves the error
+to the next one (`scenario_at_is_unconditional_pending` at `parser.spl:1802`),
+so it reads as "one small fix away" for several rounds before the real shape
+shows. Credit: measured and reverted by the parser-sharing lane, which correctly
+declined to port someone else's in-progress feature under its own name.
+
+Consequences to keep straight:
+
+- A snapshot build is only as good as the tip. Where a tool is half-landed, the
+  snapshot faithfully reproduces the breakage instead of hiding it behind a
+  developer's working copy — which is the honest behaviour, and occasionally a
+  surprise to whoever expected `$PWD` semantics.
+- The failure mode is specifically deceptive: a *different* missing symbol each
+  round. Anyone chasing it symbol-by-symbol should stop and run
+  `git diff --stat` over the tool's directory first; if the diff is a coherent
+  feature rather than a stray helper, the fix is to land that lane, not to port
+  it.
+- This does not weaken the case for fix 3. The four contention modes above are
+  caused by reading a *moving* tree; a half-landed tip is a separate defect that
+  is equally present in `$PWD` builds the moment the working copy is clean.
