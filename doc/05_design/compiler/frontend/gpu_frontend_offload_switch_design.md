@@ -22,11 +22,11 @@ error under `RequireRequested` (mirrors `EnforceMode` in
 |---|---|---|
 | CLI | `--frontend-offload=<v>` | `off` \| `on` (alias `hybrid`) \| `resident` \| `auto` |
 | env | `SIMPLE_FRONTEND_OFFLOAD=<v>` | same |
-| project config | `simple.sdn` → `frontend: { offload: <v> }` | same |
+| project config | `simple.sdn` → `frontend: { offload: <v> }` | same — **Wave 1**: resolver slot exists and is tested; the driver forwards `""` until `ProjectContext` is threaded into the parse pipeline (GFO-005) |
 | default | — | `off` |
 | CLI | `--frontend-offload-fallback=<p>` | `allow-cpu` (default) \| `require-requested` |
 | env | `SIMPLE_FRONTEND_OFFLOAD_FALLBACK=<p>` | same |
-| config | `frontend: { offload_fallback: <p> }` | same |
+| config | `frontend: { offload_fallback: <p> }` | same — **Wave 1** (GFO-005) |
 
 Precedence: CLI > env > config > default. The CLI layer only **sets the env
 var** (same pattern as `SIMPLE_FRONTEND_CACHE` in `src/app/cli/native_build_main.spl:455`),
@@ -78,15 +78,26 @@ it becomes `parse_run` admission once `parser_framework` lands its contracts v2.
 `src/compiler/80.driver/driver_source_pipeline_parsing.spl` (clean file):
 
 - `driver_frontend_offload_switch() -> Result<FrontendOffloadSwitch, text>` reads
-  the two env keys through the existing `_sffi_env_get` facade (config value is
-  read by the existing project-config loader and forwarded as text; no new
-  parser).
+  the two env keys through the existing `_sffi_env_get` facade and forwards
+  `config: ""`: the parse pipeline holds no `ProjectContext`
+  (`80.driver/project.spl` loads `simple.sdn` only for the top-level driver),
+  so reading `frontend.offload*` is Wave 1 (GFO-005) — thread the loaded
+  config's text through, no new parser.
 - `driver_frontend_offload_decision() -> Result<OffloadDecision, text>` calls
-  `frontend_offload_decision(switch, false)` once per driver session and caches.
+  `frontend_offload_decision(switch, FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE)` on
+  every call (the decision is recomputed; only the receipt line is memoized
+  process-wide so `dtrace` prints it once per process, parse-shard children
+  included).
 - On `Err`, the driver fails the compile with the message (fail-closed).
 - On `Ok`, the receipt line goes through `dtrace(...)` (env-gated
-  `SIMPLE_INTERP_TRACE=1`) and is also appended to the native-build warm receipt
-  (`src/app/cli/native_build_warm_receipt.spl` already emits `frontend_*=` rows).
+  `SIMPLE_INTERP_TRACE=1`). The native-build warm receipt
+  (`src/app/cli/native_build_warm_receipt.spl`) folds the same decision into its
+  warm-cache identity digest through the shared `frontend_offload_rows(env,
+  fallback)` helper (four canonical rows, or one `frontend_offload_error=` row)
+  — one derivation, two consumers.
+- `frontend_offload_profile` builds the `CompilerOffloadProfile` for the Wave-1
+  per-stage dispatcher; in Wave 0 the only production consumer is the decision,
+  so the profile helper has no driver caller yet (tested, not wired).
 - **No GPU/runtime initialization on any path in Wave 0.** When `selected ==
   CpuReference` the driver continues into the legacy `core_frontend_parse`.
 

@@ -11,7 +11,7 @@ use compiler.common.structural_contracts.{
     FrontendOffloadInputs, FrontendOffloadSwitch,
     parse_frontend_offload_value, resolve_frontend_offload,
     frontend_offload_profile, frontend_offload_decision,
-    frontend_offload_parse_mode_text, frontend_offload_receipt_line
+    frontend_offload_parse_mode_text, frontend_offload_receipt_line, frontend_offload_rows
 }
 
 fn inputs(cli: text, env: text, config: text) -> FrontendOffloadInputs:
@@ -140,6 +140,24 @@ describe "Frontend offload decision":
         val d = frontend_offload_decision(switch, false)
         expect(d.is_err()).to_equal(true)
         expect(d.unwrap_err()).to_equal("frontend_offload_required_mode_unavailable: auto")
+
+    it "refuses resident under require-requested":
+        # @req AC-3
+        step("Refuse to demote under require-requested")
+        val switch = resolve_frontend_offload(inputs_with_fallback("resident", "require-requested")).unwrap()
+        val d = frontend_offload_decision(switch, false)
+        expect(d.is_err()).to_equal(true)
+        expect(d.unwrap_err()).to_equal("frontend_offload_required_mode_unavailable: resident_gpu")
+
+    it "emits canonical warm-receipt rows from one env reading":
+        # @req AC-5
+        step("Record the offload decision receipt")
+        expect(frontend_offload_rows("on", "").join("|")).to_equal(
+            "frontend_offload_requested=hybrid_vector_gpu|frontend_offload_selected=cpu_reference|frontend_offload_reason=parse_mode_unimplemented|frontend_offload_source=env")
+        expect(frontend_offload_rows("", "").join("|")).to_equal(
+            "frontend_offload_requested=cpu_reference|frontend_offload_selected=cpu_reference|frontend_offload_reason=|frontend_offload_source=default")
+        expect(frontend_offload_rows("on", "require-requested").join("|")).to_equal(
+            "frontend_offload_error=frontend_offload_required_mode_unavailable: hybrid_vector_gpu")
 
     it "demotes on to CPU reference with parse_mode_unimplemented under allow-cpu":
         # @req AC-3

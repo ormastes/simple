@@ -12,10 +12,10 @@ under `require-requested` it fails the compile.
 |---|---|---|
 | CLI | `--frontend-offload=<v>` | `off` · `on` (alias `hybrid`) · `resident` · `auto` |
 | env | `SIMPLE_FRONTEND_OFFLOAD=<v>` | same |
-| `simple.sdn` | `frontend: { offload: <v> }` | same |
+| `simple.sdn` | `frontend: { offload: <v> }` | same — not read yet (Wave 1, GFO-005); the resolver slot is tested with injected text |
 | CLI | `--frontend-offload-fallback=<p>` | `allow-cpu` (default) · `require-requested` |
 | env | `SIMPLE_FRONTEND_OFFLOAD_FALLBACK=<p>` | same |
-| `simple.sdn` | `frontend: { offload_fallback: <p> }` | same |
+| `simple.sdn` | `frontend: { offload_fallback: <p> }` | same — not read yet (Wave 1, GFO-005) |
 
 Precedence: CLI > env > config > default (`off`, `allow-cpu`). The CLI flag only
 sets the env var, so the driver has one read path. An unknown value is an error.
@@ -39,9 +39,13 @@ With `SIMPLE_INTERP_TRACE=1` the driver prints one line:
 [frontend-offload] requested=hybrid_vector_gpu selected=cpu_reference reason=parse_mode_unimplemented source=env
 ```
 
-Native-build warm receipts carry the same fields as
+Native-build warm caching folds the same decision into its identity digest as
 `frontend_offload_requested=`, `frontend_offload_selected=`,
-`frontend_offload_reason=`, `frontend_offload_source=` rows.
+`frontend_offload_reason=`, `frontend_offload_source=` rows (or one
+`frontend_offload_error=` row), derived by the shared `frontend_offload_rows`
+helper so it cannot drift from the driver's receipt. A switch change therefore
+never reuses a warm artifact built under another decision; adding the rows
+invalidated every pre-existing warm identity once.
 
 ## Where it lives
 

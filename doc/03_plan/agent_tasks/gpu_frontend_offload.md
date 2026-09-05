@@ -13,7 +13,7 @@ Types/fns: `FrontendOffloadInputs`, `FrontendOffloadSwitch`,
 `driver_frontend_offload_switch`, `driver_frontend_offload_decision`.
 Keys: `--frontend-offload`, `--frontend-offload-fallback`,
 `SIMPLE_FRONTEND_OFFLOAD`, `SIMPLE_FRONTEND_OFFLOAD_FALLBACK`,
-`frontend.offload`, `frontend.offload_fallback`.
+`frontend.offload`, `frontend.offload_fallback` (config keys: resolver slot only in Wave 0; reader is GFO-005).
 Reasons: `""`, `parse_mode_unimplemented`,
 `frontend_offload_required_mode_unavailable`.
 Spec steps: `Resolve the frontend offload switch from CLI, env, and config`;
@@ -26,7 +26,7 @@ Spec steps: `Resolve the frontend offload switch from CLI, env, and config`;
 |---|---|---|---|
 | A — resolver | `src/compiler/00.common/structural_contracts/{frontend_offload_switch,__init__}.spl`, `test/01_unit/compiler/structural/frontend_offload_switch_spec.spl` | none | GFO-001 + unit spec green |
 | B — driver/CLI | `src/compiler/80.driver/driver_source_pipeline_parsing.spl`, `src/app/cli/native_build_warm_receipt.spl`, CLI arg file (clean only), `test/02_integration/compiler/frontend_offload_driver_spec.spl` | A's signatures (frozen) | GFO-002/003 + integration probe |
-| C — docs | `doc/06_spec/...` mirror, `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`, `doc/07_guide/compiler/frontend_offload_switch.md` (+tldr) | A/B file names | GFO-004, docgen `0 stubs` |
+| C — docs | `doc/06_spec/...` mirror, `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`, `doc/07_guide/compiler/frontend/frontend_offload_switch.md` (+tldr) | A/B file names | GFO-004, docgen `0 stubs` |
 
 Placeholders fail with `assert(false)` / `fail(...)`. Merge order A → B → C;
 root session reviews and commits in the worktree, no push while the peer lands.

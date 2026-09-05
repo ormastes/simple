@@ -28,7 +28,8 @@ frontend waves that follow the parser_framework landing.
   `src/compiler/80.driver/driver_source_pipeline_parsing.spl`
 - Specs: `test/01_unit/compiler/structural/frontend_offload_switch_spec.spl`,
   `test/01_unit/compiler/driver/frontend_offload_driver_unit_spec.spl`,
-  `test/02_integration/compiler/frontend_offload_driver_spec.spl`
+  `test/02_integration/compiler/frontend_offload_driver_spec.spl`,
+  `test/01_unit/compiler/parser_auto_contextual_keyword_spec.spl` (seed `auto` named-arg fix)
 - Related experts: `gpu_offload_check`, `gpu_dynamic_backend_full_offload`, `sosix_gpu`
 
 ## Constraints and handoff notes
@@ -36,6 +37,8 @@ frontend waves that follow the parser_framework landing.
 - Mode vocabulary is the repo's `OffloadMode` (`cpu_reference | hybrid_vector_gpu | resident_gpu`); scalar/SIMD is a backend axis inside hybrid. Do not reintroduce `cpu-simd`/`gpu-verify` mode names.
 - The handwritten parser is `cpu_reference` (never deleted); `gpu_parse_available` is `false` until `parser_framework` lands contracts v2 — Waves 1+ are blocked on that landing.
 - Sosix host-proxy access for CUDA/Vulkan/Metal is owned by the sosix lane; Wave 4 consumes it.
+- `simple.sdn frontend.offload*` is documented but unread until GFO-005 threads `ProjectContext` into the parse pipeline; the driver forwards `config: ""`.
+- Warm-receipt rows and the driver receipt both derive from `frontend_offload_rows` — never re-derive the decision elsewhere.
 - `auto` is a seed keyword: `FrontendOffloadSwitch` must be constructed positionally until `doc/08_tracking/bug/auto_keyword_rejected_as_named_argument_label_2026-09-05.md` is fixed.
 - The deployed `bin/simple` is the Rust seed; driver-level behavior is only observable on a self-hosted binary. Unit specs prove the resolver/decision without a deploy.
 - Verify one spec at a time: `SIMPLE_TIMEOUT_SECONDS=900 bin/simple test <spec> --no-session-daemon`, read the `Results:` line; `sh scripts/audit/direct-env-runtime-guard.shs --working` must stay clean.
