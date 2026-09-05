@@ -751,7 +751,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             eprint "error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure."
             eprint "  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:"
             eprint "    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings"
-            eprint "    apport-unpack /var/crash/<report>.crash /tmp/u && gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt"
+            eprint "    apport-unpack /var/crash/<report>.crash /tmp/u"
+            # `bt` alone is not enough: measured 2026-09-05 on a real compiler
+            # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
+            # with no symbol and an unwindable-to-garbage stack. The registers
+            # and the PC's mapping are what identify the fault.
+            eprint "    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'"
+            eprint "    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address"
         elif code < -128:
             # -(128+signo) from rt_process_wait: the wrapper really was killed,
             # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL

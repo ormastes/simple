@@ -354,3 +354,58 @@ Invoking the worker directly (not `native-build`) is what makes the driver's
 stderr visible: the orchestrator relays it only on failure. The link step of
 this direct form fails in this shell environment (`collect2`), which is after
 phase 4 and irrelevant to the window.
+
+## UPDATE 3 (2026-09-05): `gdb bt` will NOT symbolize this class of crash
+
+The apport route was dry-run against a real, unrelated compiler SIGSEGV that
+landed while waiting for the box: `bin/simple fmt <file>` (another session,
+11:41:33). apport-unpack and gdb both work end to end — a 1.16 GB core came out
+cleanly — but the backtrace is worthless:
+
+```
+#0  0x000004b4e03dbb24 in ?? ()
+#1  0x000004b4c3fbc1e1 in ?? ()
+Backtrace stopped: previous frame inner to this frame (corrupt stack?)
+```
+
+Both addresses resolve, via the report's own `ProcMaps`, into
+`rw-p ... [anon:mimalloc]` — the **heap**, with no execute permission, and the
+core has **zero** anonymous executable mappings, so this is not unsymbolized JIT
+code. The process branched to a data address:
+
+```
+pc  0x4b4e03dbb24   memory at pc: 0000000000000000 0000000000000000
+lr  0x4b4d85062a4   (also inside the mimalloc heap)
+x0  0x4b4d7ff7781   x8 same — note the low bit set
+```
+
+An indirect call went through a value that was not a code pointer, and landed in
+zeroed heap. `x0`/`x8` being odd is the signature of a **tagged** Simple value
+used as a raw pointer.
+
+### What this changes
+
+1. **Do not plan on `gdb -batch -ex bt`.** The stack is unwindable only until the
+   first bogus frame, and the PC has no symbol because it is not in any text
+   segment. The recipe printed by `native_build_main.spl` has been updated
+   accordingly.
+2. **The core is still worth taking** — just read different things from it:
+
+   ```sh
+   apport-unpack /var/crash/<report>.crash /tmp/u
+   gdb <binary> /tmp/u/CoreDump -batch \
+       -ex 'info registers pc lr sp x0 x1 x8 x29 x30' -ex 'x/4xg $pc'
+   awk '{split($1,a,"-"); lo=strtonum("0x" a[1]); hi=strtonum("0x" a[2]);
+         if (PC>=lo && PC<hi) print}' PC=<pc> /tmp/u/ProcMaps
+   ```
+
+   If the Stage-3 crash shows the same signature — PC inside a `rw-p` mimalloc
+   mapping, memory at PC all zeroes, `x0` an odd tagged value — it is the same
+   root cause as this one, and no symbolized trace is needed to say so.
+3. **Lead, and it is a strong one:** that signature is exactly what
+   `f0963796462 docs(bug): five silent wrong-value defects in Stage-2 aarch64
+   codegen` describes — a value arriving with the wrong representation. A
+   miscompiled tagged value used as a call target produces precisely this crash.
+   The `phase3:hir_typecheck` SIGSEGV and that codegen bug may be one defect.
+   Confirm by comparing signatures once the Stage-3 core exists; do not merge the
+   two records before that.
