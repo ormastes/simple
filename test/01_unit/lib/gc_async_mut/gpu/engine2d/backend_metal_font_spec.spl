@@ -1,6 +1,32 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl 80%
+"""
+## Purpose and audience
+Executable contract for the Metal font-atlas companion of the engine2d
+Metal backend: the frozen 13-word (52-byte) atlas-composite ABI, the
+invalidated initial atlas state, the generation-plus-owner cache-hit
+identity, and the draw_font_batch guard rails that keep an invalid or
+unsupported font batch from mutating Metal atlas state. Written for the
+renderer engineers who own backend_metal_font.spl and the Metal backend.
+## Operator workflow
+Run the file with the pure-Simple CLI:
+./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_font_spec.spl
+## Compatibility and limitations
+Runs on the interpreter and native lanes alike; the two source-contract
+scenarios read shipped source from src/lib and therefore require the
+repository checkout (not a stripped install). No GPU device is needed.
+## Verification guidance and troubleshooting
+An ABI failure means the frozen 13-word layout drifted from the Metal
+shader expectation; a cache-identity failure means atlas reuse could
+serve stale glyphs across renderers or device-feature changes. Rerun the
+single file above after any backend_metal_font.spl or engine.spl edit.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md ;
+# doc/04_architecture/gpu_renderer_processing_backends_metal.md ;
+# doc/05_design/simple_2d_vector_fonts.md
+# @manual_section: metal-font-atlas
 
-use spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use std.io_runtime.{file_read}
 use std.gc_async_mut.gpu.engine2d.backend_metal.{MetalBackend}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderer, FontRenderBatch, FontRenderQuad}
@@ -10,45 +36,61 @@ use std.gpu.engine2d.backend_metal_font.{METAL_FONT_PARAMS_BYTES, MetalFontBacke
 
 describe "Metal font atlas companion":
     it "packs the frozen 13-word ABI into 52 bytes":
-        expect(METAL_FONT_PARAMS_BYTES).to_equal(52)
+        # @req REQ-GPU-FONT-001
+        # @capture(bit_table): the packed 52-byte atlas-composite ABI word layout retained for review
+        step("Pack a 13-word parameter set through metal_font_atlas_composite_params")
+        expect(METAL_FONT_PARAMS_BYTES).to_equal(52)  # oracle: the frozen ABI is 13 u32 words = 52 bytes
         val p = metal_font_atlas_composite_params(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, -11, -12, 0xAABBCCDDu32)
-        expect(p.len()).to_equal(52)
-        expect(p[0]).to_equal(1)
-        expect(p[40]).to_equal(0xF5)
-        expect(p[43]).to_equal(0xFF)
-        expect(p[48]).to_equal(0xDD)
-        expect(p[51]).to_equal(0xAA)
+        expect(p.len()).to_equal(52)  # oracle: byte length of the frozen ABI buffer
+        expect(p[0]).to_equal(1)  # oracle: the first word passes through unchanged
+        expect(p[40]).to_equal(0xF5)  # oracle: low byte of word 10 (-11 = 0xFFFFFFF5)
+        expect(p[43]).to_equal(0xFF)  # oracle: top byte of word 10 (0xFFFFFFF5)
+        expect(p[48]).to_equal(0xDD)  # oracle: low byte of word 12 (0xAABBCCDD)
+        expect(p[51]).to_equal(0xAA)  # oracle: high byte of word 12 (0xAABBCCDD)
 
     it "starts atlas state invalidated":
+        # @req REQ-GPU-FONT-002
+        # @capture(statistics): initial atlas_generation, owner identity, buffer and artifact fields
+        step("Create a fresh MetalFontBackendState and read its atlas fields")
         val state = MetalFontBackendState.create()
-        expect(state.atlas_generation).to_equal(-1)
+        expect(state.atlas_generation).to_equal(-1)  # oracle: -1 is the sentinel for "no atlas generation yet"
         expect(state.atlas_owner_identity).to_equal("")
-        expect(state.atlas_buffer).to_equal(0)
+        expect(state.atlas_buffer).to_equal(0)  # oracle: zero means no Metal buffer is bound yet
         expect(state.font_artifact_sha256).to_equal("")
 
     it "invalidates the Metal atlas owner with its generation":
+        # @req REQ-GPU-FONT-003
+        # @capture(statistics): atlas_generation and owner identity observed after invalidate()
+        step("Populate atlas identity, invalidate, and re-read the fields")
         var state = MetalFontBackendState.create()
         state.atlas_generation = 7
         state.atlas_owner_identity = "owner"
         state.invalidate()
-        expect(state.atlas_generation).to_equal(-1)
+        expect(state.atlas_generation).to_equal(-1)  # oracle: invalidate must restore the no-generation sentinel
         expect(state.atlas_owner_identity).to_equal("")
 
     it "requires generation and owner identity for a Metal atlas cache hit":
+        # @req REQ-GPU-FONT-004
+        # @capture(protocol_json): the shipped cache-identity and guard fragments retained for review
+        step("Read the shipped backend_metal_font.spl and verify the cache-identity contract")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_metal_font.spl")
         expect(source).to_contain("font_atlas_composite_cache_identity(")
         expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"metal\", device_features")
         expect(source).to_contain("if (self.font_artifact_sha256 == \"\" and session.font_shader_lib > 0")
         expect(source.index_of("if (self.font_artifact_sha256 == \"\"") < source.index_of("sha256_text(font_atlas_composite_metal_source())")).to_equal(true)
-        expect(source.split("sha256_text(font_atlas_composite_metal_source())").len()).to_equal(2)
+        expect(source.split("sha256_text(font_atlas_composite_metal_source())").len()).to_equal(2)  # oracle: the artifact sha helper must appear exactly once, in the identity
         expect(source).to_contain("\"source-sha256=\" + self.font_artifact_sha256")
         expect(source).to_contain("artifact_identity, dependency_identity")
         expect(source).to_contain("self.font_artifact_sha256 = \"\"")
-        expect(source.contains("val artifact_identity = if session.font_shader_lib > 0 and session.pipe_font_atlas_composite > 0:\n            \"library=\"")).to_equal(false)
+        val keeps_single_variant_identity = source.contains("val artifact_identity = if session.font_shader_lib > 0 and session.pipe_font_atlas_composite > 0:\n            \"library=\"")
+        expect(keeps_single_variant_identity).to_equal(false)
         expect(source).to_contain("self.atlas_generation == batch.atlas_generation and self.atlas_owner_identity == owner_identity")
         expect(source).to_contain("self.atlas_owner_identity = owner_identity")
 
     it "keeps sequential distinct-renderer tokens from aliasing Metal cache state":
+        # @req REQ-GPU-FONT-005
+        # @capture(statistics): atlas generations of two renderers versus one backend state
+        step("Prepare text on two renderers and compare generations against one state")
         var first_renderer = FontRenderer.new()
         var second_renderer = FontRenderer.new()
         val first = first_renderer.prepare_text("A", 0xffffffffu32, 16)
@@ -63,23 +105,32 @@ describe "Metal font atlas companion":
         assert_not_equal(state.atlas_generation, second.atlas_generation)
 
     it "rejects destination coordinate overflow before ABI packing":
-        expect(font_destination_origin(10, -3, 1).?).to_equal(7)
-        expect(font_destination_origin(2147483647, 0, 1).?).to_equal(2147483647)
-        expect(font_destination_origin(-2147483648, 0, 2).?).to_equal(-2147483648)
+        # @req REQ-GPU-FONT-006
+        # @capture(statistics): clamped and rejected destination origins at the i32 boundary
+        step("Drive font_destination_origin through valid, clamped, and overflow inputs")
+        expect(font_destination_origin(10, -3, 1).?).to_equal(7)  # oracle: 10 + (-3) scaled by 1 lands at 7
+        expect(font_destination_origin(2147483647, 0, 1).?).to_equal(2147483647)  # oracle: i32 max is the clamped ceiling
+        expect(font_destination_origin(-2147483648, 0, 2).?).to_equal(-2147483648)  # oracle: i32 min is the clamped floor
         expect(font_destination_origin(2147483647, 0, 2)).to_be_nil()
         expect(font_destination_origin(2147483647, 1, 1)).to_be_nil()
         expect(font_destination_origin(-2147483648, -1, 1)).to_be_nil()
 
     it "preserves device framebuffer truth when no font quad is submitted":
+        # @req REQ-GPU-FONT-007
+        # @capture(statistics): draw_font_batch verdict and gpu_frame_complete flag for an invalid batch
+        step("Submit an invalid FontRenderBatch and check the framebuffer is untouched")
         var backend = MetalBackend.create()
         backend.initialized = true
         backend.gpu_frame_complete = true
         backend.d_framebuffer = 1
         val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
-        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)  # oracle: zero quads drawn is the reject verdict
         expect(backend.gpu_frame_complete).to_equal(true)
 
     it "rejects unsupported font programs before Metal atlas mutation":
+        # @req REQ-GPU-FONT-008
+        # @capture(statistics): draw verdicts and atlas generation across unsupported program versions
+        step("Submit batches with unsupported program versions and re-read atlas state")
         var backend = MetalBackend.create()
         backend.initialized = true
         backend.gpu_frame_complete = true
@@ -88,11 +139,21 @@ describe "Metal font atlas companion":
         for version in [0, -1, 2]:
             val batch = FontRenderBatch(program_version: version, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 1, atlas_height: 1,
                 atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
-            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
-            expect(backend.font.atlas_generation).to_equal(7)
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)  # oracle: zero quads drawn is the reject verdict
+            expect(backend.font.atlas_generation).to_equal(7)  # oracle: the seeded generation 7 must survive every rejected draw
             expect(backend.gpu_frame_complete).to_equal(true)
 
     it "wires the typed Metal font backend only into native Metal constructors":
+        # @req REQ-GPU-FONT-009
+        # @capture(protocol_json): the shipped engine.spl constructor wiring fragments retained for review
+        step("Read the shipped engine.spl and verify the Metal constructor wiring")
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
-        expect(source).to_contain("metal_backend: metal, w: width")
+        # oracle: MetalBackend.create() sets its own typed `font` field
+        # (backend_metal.spl:364/408), so every construction site that wires
+        # `metal_backend: Some(metal)` reaches the typed font backend. This
+        # exact fragment appears at the three native constructors
+        # (create_with_backend_fast, create_requested_backend,
+        # create_shared_metal_surface); the compatibility "metal-on-vulkan"
+        # lane below never sets metal_backend and stays on VulkanBackend.
+        expect(source).to_contain("metal_backend: Some(metal), opencl_backend: nil,")
         expect(source).to_contain("w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: \"metal-on-vulkan\"")

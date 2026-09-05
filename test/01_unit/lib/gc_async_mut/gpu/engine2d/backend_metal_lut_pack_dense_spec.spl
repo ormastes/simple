@@ -1,0 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/08_tracking/todo/web_gpu_offload_buffer_residency_audit_2026-09-05.md item 4
+
+# gpu_lut_pack_dense — bulk-write byte-layout parity spec
+#
+# gpu_lut_pack_dense used to write its palette payload with one
+# rt_ptr_write_i32 FFI call per u32 element. It now writes the header words
+# individually and the palette payload in one bulk metal_write_u32s_to_ptr
+# call. This spec proves the two approaches produce byte-identical host
+# buffers, so the call-count reduction is not a behavior change.
+#
+# Runs in interpreter mode — gpu_lut_pack_dense only touches host memory via
+# rt_alloc, no Metal device required.
+#
+# Run: SIMPLE_LIB=src src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_lut_pack_dense_spec.spl
+
+use std.spec.step
+use std.spec.{describe, it, expect, assert_true, assert_equal}
+use std.gpu.engine2d.backend_metal_runtime_ops.{gpu_lut_pack_dense, gpu_lut_dense_byte_len, gpu_lut_free}
+
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+
+describe "gpu_lut_pack_dense — bulk-write byte layout":
+
+    it "writes the dense header words (kind, count, mask, stride)":
+        # @req REQ-SSPEC-UNIT
+        step("pack a small palette and check the 4 header words")
+        val palette: [u32] = [0xFF000000u32, 0xFF112233u32, 0x00ABCDEFu32]
+        val host = gpu_lut_pack_dense(palette)
+        assert_true(host != 0)
+        assert_equal(rt_ptr_read_i32(host, 0), 0)   # kind = dense
+        assert_equal(rt_ptr_read_i32(host, 4), 3)   # count
+        assert_equal(rt_ptr_read_i32(host, 8), 0)   # mask (unused)
+        assert_equal(rt_ptr_read_i32(host, 12), 1)  # value_stride
+        gpu_lut_free(host)
+
+    it "writes each palette entry at its per-element rt_ptr_write_i32 offset, bit-identical":
+        # @req REQ-SSPEC-UNIT
+        step("bulk-written payload matches the bit pattern the per-element loop wrote")
+        val palette: [u32] = [0xFF000000u32, 0xFF112233u32, 0x00ABCDEFu32, 0xFFFFFFFFu32]
+        val host = gpu_lut_pack_dense(palette)
+        assert_true(host != 0)
+        var i = 0
+        while i < palette.len():
+            val offset = (4 + i).to_i64() * 4
+            val expected = palette[i].to_i64() & 0xFFFFFFFF
+            val got = rt_ptr_read_i32(host, offset).to_i64() & 0xFFFFFFFF
+            assert_equal(got, expected)
+            i = i + 1
+        gpu_lut_free(host)
+
+    it "byte length matches gpu_lut_dense_byte_len for the packed buffer":
+        # @req REQ-SSPEC-UNIT
+        step("packed buffer size equals the documented header+payload length")
+        val palette: [u32] = [0x11223344u32, 0x55667788u32]
+        val expected_len = gpu_lut_dense_byte_len(palette.len().to_i32())
+        assert_equal(expected_len, 24)
+        val host = gpu_lut_pack_dense(palette)
+        assert_true(host != 0)
+        # last payload word must be readable within the documented length —
+        # a wrong bulk-write offset would either overwrite the header or miss
+        # the last element.
+        assert_equal(rt_ptr_read_i32(host, expected_len - 4).to_i64() & 0xFFFFFFFF, 0x55667788)
+        gpu_lut_free(host)
