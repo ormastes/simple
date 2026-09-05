@@ -87,3 +87,13 @@ self-identifies in its `--version` banner; the admission gate rejects it.
   site could never have resolved. Route audit concluded the `.initialized` guard
   needs no sibling changes. Lane state:
   `.spipe/restart12_engine2d_font_seed_review/state.md`.
+
+**Instantiation from `engine.spl` is unverified.** `backend_metal_font_spec`'s
+"wires the typed Metal font backend only into native Metal constructors"
+scenario expects the string `metal_backend: metal, w: width` in
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`, and that string is absent —
+checked at `a2e4097b175` too, so this is not new. Either the spec is stale or
+the Metal font backend is never constructed from `engine.spl`. The parity spec
+proves the packer and the frame contract, **not** that anything instantiates
+the backend, so do not read a green parity run as proof the path is reachable.
+Resolve which it is before quoting Metal font coverage.

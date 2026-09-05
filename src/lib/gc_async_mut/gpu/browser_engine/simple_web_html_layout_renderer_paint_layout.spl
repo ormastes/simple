@@ -5,6 +5,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use common.string_builder.{StringBuilder}
 # For the level-gated SIMPLE_TRACE_FONT_STYLE consumption trace below;
 # same import the sibling SIMPLE_TRACE_FONT_STYLE traces use in
 # simple_web_html_layout_renderer_core.spl:3.
@@ -12,7 +13,7 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
     TILE_MARGIN_PX, TileOp, tile_bin_ops, tile_count, tile_grid_make,
     tile_live_set, tile_occluder_slot, tile_op, tile_stats_record,
-    tile_survivors
+    tile_survivors, tile_op_buffer_finish
 }
 use common.ui.draw_ir.{
     DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
@@ -89,12 +90,26 @@ fn content_hidden_by_ancestor(nodes: [HNode], styles: [Style], i: i32) -> bool:
 fn content_paint_hidden_by_ancestor(
     nodes: [HNode], styles: [Style], i: i32
 ) -> bool:
-    if content_hidden_by_ancestor(nodes, styles, i) or styles[i].opacity_pct <= 0:
+    if styles[i].opacity_pct <= 0:
         return true
     var cur = nodes[i].parent as i32
-    # cpu-lane-loop-ok: second depth-bounded ancestor walk, opacity_pct <= 0 only; bound is DOM depth, not an element count, so this is a detector false positive under the bound-based rule
+    # cpu-lane-loop-ok: ONE depth-bounded ancestor walk testing both hiding
+    # conditions. This used to be TWO walks of the same chain — a
+    # content_hidden_by_ancestor call followed by an opacity-only walk — which
+    # doubled the traversals of the hottest predicate in paint() (11 call
+    # sites, most of them once per node per frame). Bound is DOM depth, not an
+    # element count, so this is a detector false positive under the
+    # bound-based rule.
     while cur >= 0:
-        if styles[cur].opacity_pct <= 0:
+        # An <iframe> is a replaced element: its DOM subtree is NOT laid out or
+        # painted in the parent document — see content_hidden_by_ancestor above
+        # for the full note.
+        if (
+            styles[cur].display == "none" or
+            styles[cur].content_visibility_hidden or
+            nodes[cur].tag == "iframe" or
+            styles[cur].opacity_pct <= 0
+        ):
             return true
         cur = nodes[cur].parent as i32
     false
@@ -1244,19 +1259,28 @@ fn _tile_paint_ops(
     clip_cache: PaintClipCache, fbh: i32, has_widget_panel: bool
 ) -> [TileOp]:
     val node_count = nodes.len()
-    var ops: [TileOp] = []
+    if node_count <= 0:
+        return []
+    # Exactly one box and one text slot per node, plus at most one scrollbar.
+    # Indexed stores give this hot path a bounded allocation profile regardless
+    # of the runtime's bare-push growth strategy; tile_op_buffer_finish performs
+    # one final linear trim.
+    var ops: [TileOp] = [_tile_hidden_op(0); node_count * 3]
+    var op_count = 0
     var i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 1 of 6: emits box culling ops for normal-flow nodes, mirroring fn paint pass 1's node set so tile bin order equals real paint order. Bound is node_count
     while i < node_count:
         val st = styles[i]
         if not st.position_absolute and not has_relative_paint_root(nodes, styles, i):
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 2 of 6: box ops for relative-paint-root nodes, mirroring fn paint pass 2. Disjoint from pass 1 and must stay a separate later pass so the bins record the true occlusion order
     while i < node_count:
         if has_relative_paint_root(nodes, styles, i) and not styles[i].position_absolute:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     var positive_z_indices: [i32] = [0; node_count]
@@ -1265,7 +1289,8 @@ fn _tile_paint_ops(
     while i < node_count:
         val st = styles[i]
         if st.position_absolute and st.z_index <= 0:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel)
+            op_count = op_count + 1
         elif st.position_absolute:
             positive_z_indices[positive_z_count] = i
             positive_z_count = positive_z_count + 1
@@ -1275,7 +1300,8 @@ fn _tile_paint_ops(
         var zp = 0
         # cpu-lane-loop-ok: _tile_paint_ops pass 4 of 6: box ops for the z-sorted positive-z absolute nodes; bound is positive_z_count, not node_count
         while zp < positive_z_count:
-            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, sorted_z[zp], has_widget_panel))
+            ops[op_count] = _tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, sorted_z[zp], has_widget_panel)
+            op_count = op_count + 1
             zp = zp + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 5 of 6: scrollbar culling ops for overflow-auto-y scrollports, mirroring fn paint pass 5. Bound is node_count
@@ -1301,14 +1327,16 @@ fn _tile_paint_ops(
                 sx1 = clip.x1
             if sy1 > clip.y1:
                 sy1 = clip.y1
-            ops.push(tile_op(2, i, sx0, sy0, sx1 - sx0, sy1 - sy0, false, false, _tile_style_hash(st), -1))
+            ops[op_count] = tile_op(2, i, sx0, sy0, sx1 - sx0, sy1 - sy0, false, false, _tile_style_hash(st), -1)
+            op_count = op_count + 1
         i = i + 1
     i = 0
     # cpu-lane-loop-ok: _tile_paint_ops pass 6 of 6: one text-phase culling op per node (hidden ops included so op indices stay dense and text is never occlusion-culled). Bound is node_count
     while i < node_count:
-        ops.push(_tile_text_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i))
+        ops[op_count] = _tile_text_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i)
+        op_count = op_count + 1
         i = i + 1
-    ops
+    tile_op_buffer_finish(ops, op_count)
 
 fn paint_tiled(
     nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
@@ -1680,18 +1708,22 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     # (decl_apply), so the legacy 2-color "background-image" prop below
     # renders it as "none" and the element painted no pixels at all.
     val gradient_stop_count = st.background_gradient_stop_colors.len()
-    var gradient_stops_raw = ""
+    # Accumulate through StringBuilder rather than `raw = raw + piece`: this
+    # runs once per gradient-bearing node per frame, and repeated `+` on text
+    # recopies the whole accumulated prefix on every stop.
+    var gradient_stops_builder = StringBuilder.new()
     var gsi = 0
     while gsi < gradient_stop_count:
         if gsi > 0:
-            gradient_stops_raw = gradient_stops_raw + ","
-        gradient_stops_raw = gradient_stops_raw + "{st.background_gradient_stop_colors[gsi]}"
+            gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_colors[gsi]}")
         gsi = gsi + 1
     gsi = 0
     while gsi < st.background_gradient_stop_positions.len():
-        gradient_stops_raw = gradient_stops_raw + ","
-        gradient_stops_raw = gradient_stops_raw + "{st.background_gradient_stop_positions[gsi]}"
+        gradient_stops_builder.push(",")
+        gradient_stops_builder.push("{st.background_gradient_stop_positions[gsi]}")
         gsi = gsi + 1
+    val gradient_stops_raw = gradient_stops_builder.build()
     val shadow_parse = parse_box_shadow_layers(
         st.box_shadow_raw, st.fg
     )

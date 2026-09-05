@@ -619,6 +619,12 @@ impl RenderBackend for MetalBackend:
         self.gpu_frame_complete = false
 
     me clear(color: u32):
+        # Frame boundary. Submit the previous frame's deferred text before the
+        # counters are reset, so the reset never discards a submission the
+        # frame contract still has to account for. _dispatch_metal_clear also
+        # flushes, but by then there is nothing left pending.
+        self.font.flush()
+        self.font.begin_frame()
         if not self.gpu_only:
             self.mirror.clear(color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
@@ -798,10 +804,12 @@ impl RenderBackend for MetalBackend:
             self.mirror.clear_mask()
         self.gpu_frame_complete = false
     me submit_batch() -> bool:
-        # Immediate-mode backend: nothing buffered to flush.
-        true
+        # Font work is the one thing this backend defers: a frame's text rides
+        # in a single command buffer that is committed here.
+        self.font.flush() >= 0
 
     me present():
+        self.font.flush()
         if not self.gpu_only:
             self.mirror.present()
     fn read_pixels() -> [u32]:
@@ -1073,6 +1081,9 @@ impl MetalBackend:
         ok
 
     me read_pixels_gpu_only() -> [u32]:
+        if self.font.flush() < 0:
+            self.last_error = "Metal deferred font batch failed to submit before readback"
+            return []
         if not self.initialized or self.d_framebuffer == 0:
             self.last_error = "Metal GPU-only readback unavailable: backend not initialized or framebuffer missing"
             return []
@@ -1203,6 +1214,15 @@ impl MetalBackend:
         metal_host_write_i32(glass_params, 52, self.w.to_i64())
         metal_host_write_i32(glass_params, 56, self.h.to_i64())
 
+        # Deferred font work targets the same framebuffer from its own command
+        # buffer. Submit it before this one is recorded or the frame paints out
+        # of order.
+        if self.font.flush() < 0:
+            metal_host_free(snapshot_params)
+            metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            self.last_error = "Metal deferred font batch failed to submit before glass composite"
+            return false
         val cmd = metal_sffi_create_command_buffer(self.command_queue)
         if cmd == 0:
             metal_host_free(snapshot_params)
@@ -1370,6 +1390,11 @@ impl MetalBackend:
     # device buffer + one dispatch: the pixels land in d_framebuffer so the
     # GPU-only readback shows them (no CPU-mirror dependence).
     me _dispatch_metal_blit(x: i32, y: i32, block_w: i32, block_h: i32, host_ptr: i64, byte_size: i64) -> bool:
+        # Deferred font work targets the same framebuffer from its own
+        # command buffer. Submit it before this one is recorded or the
+        # frame paints out of order.
+        if self.font.flush() < 0:
+            return false
         if block_w <= 0 or block_h <= 0:
             return true
         if self.pending_composite_command != 0:
@@ -1448,6 +1473,11 @@ impl MetalBackend:
         true
 
     me _dispatch_metal_image_composite(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        # Deferred font work targets the same framebuffer from its own
+        # command buffer. Submit it before this one is recorded or the
+        # frame paints out of order.
+        if self.font.flush() < 0:
+            return false
         val total_pixels = w.to_i64() * h.to_i64()
         val byte_size = total_pixels * 4
         val host = metal_host_alloc(byte_size)
@@ -1940,6 +1970,11 @@ impl MetalBackend:
         ok
 
     me _dispatch_metal_aux_image_checked(pipeline: i64, source: i64, auxiliary: i64, params: i64, params_len: i64, w: i32, h: i32) -> bool:
+        # Deferred font work targets the same framebuffer from its own
+        # command buffer. Submit it before this one is recorded or the
+        # frame paints out of order.
+        if self.font.flush() < 0:
+            return false
         if self.pending_composite_command != 0:
             metal_sffi_free_buffer(source)
             return false
@@ -2010,6 +2045,11 @@ impl MetalBackend:
         bound
 
     me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
+        # Deferred font work targets the same framebuffer from its own
+        # command buffer. Submit it before this one is recorded or the
+        # frame paints out of order.
+        if self.font.flush() < 0:
+            return false
         # Snapshot queue and framebuffer handles before allocating command
         # objects so all failure paths operate on one submission state.
         if self.pending_composite_command != 0:
@@ -2058,6 +2098,11 @@ impl MetalBackend:
         true
 
     me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: i64, params_len: i64) -> bool:
+        # Deferred font work targets the same framebuffer from its own
+        # command buffer. Submit it before this one is recorded or the
+        # frame paints out of order.
+        if self.font.flush() < 0:
+            return false
         if self.pending_composite_command != 0:
             return false
         val q = self.command_queue
