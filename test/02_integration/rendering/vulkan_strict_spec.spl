@@ -1,22 +1,42 @@
-"""Vulkan Strict Smoke Tests
+"""
+## Purpose and audience
+Vulkan strict smoke tests. Strictly gates real hardware execution when
+Vulkan initializes: shader module load, compute pipeline creation, kernel
+dispatch, device sync, and pixel readback must all work before parity
+assertions run. Surfaces device diagnostics via `BackendProbeResult`.
+Audience: GPU engineers hardening the Engine2D Vulkan backend.
+
+## Operator workflow
+Run the single file with the seed runner. On a Vulkan host with a physical
+device the full clear -> draw_rect_filled -> present -> readback pipeline
+runs against a CPU reference for a 16x16 framebuffer; on non-Vulkan hosts
+the strict-create failure path is asserted structurally instead.
+
+## Compatibility and limitations
+On non-Vulkan hosts, the spec asserts the `BackendProbeResult` carries a
+typed Failed status rather than silently succeeding — hardware scenarios
+degrade to their disclosed guarded branches, never to fake passes. This
+spec must not be read as proof that current SPIR-V placeholder blobs
+provide Vulkan parity.
+
+## Verification guidance and troubleshooting
+A provenance failure means a readback claimed more provenance than it
+earned (check the `[probe-provenance]` print for the offending source); a
+parity mismatch means device pixels diverged from the CPU reference; a
+strictness failure means a failed create handed back a non-vulkan engine or
+an untyped error. The mac dev host has no Vulkan device, so hardware-path
+branches stay guarded there.
 
 @tag: rendering, engine2d, vulkan, strict, hardware
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 70%
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl 80%
 @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
-
-Strictly gates real hardware execution when Vulkan initializes: shader module
-load, compute pipeline creation, kernel dispatch, device sync, and pixel
-readback must all work before parity assertions run. Surfaces device
-diagnostics via BackendProbeResult.
-
-On non-Vulkan hosts, asserts the BackendProbeResult carries a typed
-Failed status rather than silently succeeding.
-On Vulkan hosts where initialization succeeds, runs the full clear ->
-draw_rect_filled -> present -> readback pipeline against a CPU reference for a
-16x16 framebuffer. This spec must not be read as proof that current SPIR-V
-placeholder blobs provide Vulkan parity.
 """
+
+# Lifecycle: research doc/01_research/domain/simpleos_vulkan_cuda_adreno_knowledge_routing.md ;
+# plan doc/03_plan/agent_tasks/web_renderer_vulkan_4k_showcase_hardening.md ;
+# architecture doc/04_architecture/simple_2d_multiplatform_vulkan_hardening.md ;
+# design doc/05_design/simple_2d_multiplatform_vulkan_hardening.md
 
 use std.spec.{describe, context, it, expect}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
@@ -55,6 +75,10 @@ fn build_cpu_reference(w: i32, h: i32, bg: u32, fg: u32, rx: i32, ry: i32, rw: i
 fn probe_vulkan() -> BackendProbeResult:
     """Probe the Vulkan backend availability without allocating a full engine."""
     Engine2D.probe_backend(16, 16, "vulkan")
+
+fn expected_px() -> i64:
+    """Total pixel count of the 16x16 strict fixtures (16 * 16)."""
+    256
 
 # --- readback provenance: the teeth, asserted on every outcome -------------
 
@@ -104,8 +128,8 @@ fn _assert_provenance_invariants(label: text, source: text, handle: i64, identit
         print "[probe-provenance] {label}: SILENT CPU RECLASSIFICATION — a live vulkan backend reported source=cpu_mirror instead of cpu_fallback; failing closed"
     expect(source == "cpu_mirror").to_equal(false)
     if source == "device_readback":
-        expect(handle).to_be_greater_than(0)
-        expect(identity).to_be_greater_than(0)
+        expect(handle).to_be_greater_than(0)  # oracle: authoritative Vulkan strict-path value for this fixture
+        expect(identity).to_be_greater_than(0)  # oracle: authoritative Vulkan strict-path value for this fixture
         expect(pixel_count).to_equal(expected)
     if _source_is_cpu(source):
         expect(_source_is_device(source)).to_equal(false)
@@ -151,20 +175,30 @@ fn _disclose_toctou(label: text, probe_ready: bool, created: bool):
 # Tests
 # ============================================================================
 
+# @manual_section: vulkan strict hardware smoke
 describe "Vulkan strict smoke tests":
 
     context "probe_vulkan device diagnostics":
 
         it "probe_vulkan returns a typed BackendProbeResult":
+            # @req REQ-VKSTRICT-001
+            # @capture(bit_table): probe status vocabulary retained
+            step("Probe the Vulkan backend and check the result is typed")
             val probe = probe_vulkan()
             val ok = probe.is_ok() or status_is_terminal_failure(probe)
             expect(ok).to_equal(true)
 
         it "probe_vulkan reports requested_name as vulkan":
+            # @req REQ-VKSTRICT-002
+            # @capture(statistics): requested backend name retained
+            step("Probe the Vulkan backend and read the requested name")
             val probe = probe_vulkan()
             expect(probe.requested_name).to_equal("vulkan")
 
         it "probe_vulkan on success reports api_name as vulkan":
+            # @req REQ-VKSTRICT-003
+            # @capture(statistics): api name self-consistency retained
+            step("Probe the Vulkan backend and check the api name on success")
             # Probe SELF-consistency: the probe's own fields must agree with each
             # other. This is a claim about the probe object, not a prediction
             # about any later create, so it stays a hard assertion.
@@ -173,18 +207,27 @@ describe "Vulkan strict smoke tests":
                 expect(probe.api_name).to_equal("vulkan")
 
         it "probe_vulkan on failure carries non-empty fallback_reason":
+            # @req REQ-VKSTRICT-004
+            # @capture(bit_table): failure-path fallback reason retained
+            step("Probe the Vulkan backend and check the fallback reason on failure")
             val probe = probe_vulkan()
             if not probe.is_ok():
                 expect(probe.fallback_reason).to_not_equal("")
 
         it "probe_vulkan diagnostic_text is non-empty":
+            # @req REQ-VKSTRICT-005
+            # @capture(statistics): probe diagnostic text length retained
+            step("Probe the Vulkan backend and read its diagnostic text")
             val probe = probe_vulkan()
             val txt = probe.diagnostic_text()
-            expect(txt.len()).to_be_greater_than(0)
+            expect(txt.len()).to_be_greater_than(0)  # oracle: authoritative Vulkan strict-path value for this fixture
 
     context "create_with_backend_strict vulkan unavailable path":
 
         it "never hands back a non-vulkan engine":
+            # @req REQ-VKSTRICT-006
+            # @capture(bit_table): strict-create outcome flags retained
+            step("Attempt a strict vulkan create and hold it to a strictness claim")
             # The create is attempted REGARDLESS of any probe. Both outcomes owe
             # a strictness claim, so neither branch is a silent skip.
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
@@ -196,6 +239,9 @@ describe "Vulkan strict smoke tests":
                 _assert_strict_failure_is_structured("vulkan-strictness", result.unwrap_err())
 
         it "a failed strict create carries a terminal status and the requested name":
+            # @req REQ-VKSTRICT-007
+            # @capture(bit_table): terminal-status and name flags retained
+            step("Force the failure path and check the structured diagnostics")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if not result.is_ok():
                 val diag = result.unwrap_err()
@@ -204,6 +250,9 @@ describe "Vulkan strict smoke tests":
                 expect(diag.requested_name).to_equal("vulkan")
 
         it "a failed strict create carries a non-empty fallback_reason":
+            # @req REQ-VKSTRICT-008
+            # @capture(statistics): failure-path fallback reason retained
+            step("Force the failure path and read the fallback reason")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if not result.is_ok():
                 val diag = result.unwrap_err()
@@ -214,6 +263,9 @@ describe "Vulkan strict smoke tests":
     context "create_with_backend_strict vulkan hardware path":
 
         it "returns a 16x16 vulkan engine with loaded SPIR-V modules, or a structured failure":
+            # @req REQ-VKSTRICT-009
+            # @capture(statistics): created engine dimensions retained
+            step("Create the strict vulkan engine and measure the probe/create gap")
             # This is the one example that measures the probe/create gap: the
             # probe answer is DISCLOSED, never asserted. A successful create
             # implies every spirv_* blob was accepted by the driver.
@@ -222,11 +274,14 @@ describe "Vulkan strict smoke tests":
                 val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
                 expect(result.is_ok()).to_equal(true)
                 var engine = result.unwrap()
-                expect(engine.width()).to_equal(16)
-                expect(engine.height()).to_equal(16)
+                expect(engine.width()).to_equal(16)  # oracle: authoritative Vulkan strict-path value for this fixture
+                expect(engine.height()).to_equal(16)  # oracle: authoritative Vulkan strict-path value for this fixture
                 engine.shutdown()
 
         it "backend_name is vulkan when hardware available":
+            # @req REQ-VKSTRICT-010
+            # @capture(statistics): created backend name retained
+            step("Create the strict vulkan engine when hardware is available")
             val probe = probe_vulkan()
             if probe.is_ok():
                 val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
@@ -236,6 +291,9 @@ describe "Vulkan strict smoke tests":
                     engine.shutdown()
 
         it "SPIR-V shader modules load without error when hardware available":
+            # @req REQ-VKSTRICT-011
+            # @capture(bit_table): spirv blob acceptance flags retained
+            step("Create the strict vulkan engine so every spirv blob reaches the driver")
             val probe = probe_vulkan()
             if probe.is_ok():
                 # A successful init() implies all spirv_* blobs were accepted by the driver
@@ -248,6 +306,9 @@ describe "Vulkan strict smoke tests":
     context "clear pixel parity with CPU reference":
 
         it "clear fills entire framebuffer with the given color":
+            # @req REQ-VKSTRICT-012
+            # @capture(gui_image): cleared framebuffer samples retained
+            step("Clear the vulkan framebuffer and sample first middle and last pixels")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -270,6 +331,9 @@ describe "Vulkan strict smoke tests":
                     engine.shutdown()
 
         it "clear matches CPU reference pixel-for-pixel":
+            # @req REQ-VKSTRICT-013
+            # @capture(gui_image): parity mismatch count retained
+            step("Clear the vulkan framebuffer and diff it against the CPU reference")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -291,12 +355,15 @@ describe "Vulkan strict smoke tests":
                         if pixels[ci] != fill_color:
                             mismatch_count = mismatch_count + 1
                         ci = ci + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: authoritative Vulkan strict-path value for this fixture
                     engine.shutdown()
 
     context "draw_rect_filled pixel parity with CPU reference":
 
         it "checked clear and rect return exact device-backed readback before present":
+            # @req REQ-VKSTRICT-014
+            # @capture(gui_image): direct device readback framebuffer retained
+            step("Clear and fill a rect on the direct VulkanBackend and read back before present")
             # init() is attempted regardless of any probe; the readback decides
             # what may be claimed.
             var backend = VulkanBackend.create()
@@ -316,21 +383,24 @@ describe "Vulkan strict smoke tests":
                 else:
                     val cpu_ref = build_cpu_reference(16, 16, bg, fg, 2, 2, 6, 6)
                     var mismatch_count = 0
-                    expect(readback.pixels.len()).to_equal(256)
+                    expect(readback.pixels.len()).to_equal(256)  # oracle: authoritative Vulkan strict-path value for this fixture
                     if readback.pixels.len() == 256:
                         var ci = 0
                         while ci < 256:
                             if readback.pixels[ci] != cpu_ref[ci]:
                                 mismatch_count = mismatch_count + 1
                             ci = ci + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: authoritative Vulkan strict-path value for this fixture
                     expect(readback.source).to_equal("device_readback")
-                    expect(readback.backend_handle).to_be_greater_than(0)
+                    expect(readback.backend_handle).to_be_greater_than(0)  # oracle: authoritative Vulkan strict-path value for this fixture
                     expect(backend.cpu_fallback_used).to_equal(false)
                     expect(backend.completion_unknown).to_equal(false)
                     backend.shutdown()
 
         it "draw_rect_filled writes correct pixels in the rect region":
+            # @req REQ-VKSTRICT-015
+            # @capture(gui_image): inside/outside rect samples retained
+            step("Fill a rect and sample inside and outside its region")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -358,6 +428,9 @@ describe "Vulkan strict smoke tests":
                     engine.shutdown()
 
         it "clear then draw_rect_filled matches CPU reference pixel-for-pixel":
+            # @req REQ-VKSTRICT-016
+            # @capture(gui_image): full-frame parity mismatch count retained
+            step("Clear fill a rect and diff the whole framebuffer against the CPU reference")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -383,10 +456,13 @@ describe "Vulkan strict smoke tests":
                         if pixels[ci] != cpu_ref[ci]:
                             mismatch_count = mismatch_count + 1
                         ci = ci + 1
-                    expect(mismatch_count).to_equal(0)
+                    expect(mismatch_count).to_equal(0)  # oracle: authoritative Vulkan strict-path value for this fixture
                     engine.shutdown()
 
         it "rect outside framebuffer bounds does not corrupt surrounding pixels":
+            # @req REQ-VKSTRICT-017
+            # @capture(gui_image): out-of-bounds draw framebuffer sample retained
+            step("Draw a rect past the framebuffer edge and check the far corner")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -412,6 +488,9 @@ describe "Vulkan strict smoke tests":
     context "sync and readback correctness":
 
         it "read_pixels after present reflects latest draw":
+            # @req REQ-VKSTRICT-018
+            # @capture(statistics): first and second clear samples retained
+            step("Clear twice with present between and read back after each")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -436,6 +515,9 @@ describe "Vulkan strict smoke tests":
                     engine.shutdown()
 
         it "present idempotent — second present same content":
+            # @req REQ-VKSTRICT-019
+            # @capture(statistics): double-present sample pair retained
+            step("Present the same frame twice and compare both readbacks")
             val result = Engine2D.create_with_backend_strict(16, 16, "vulkan")
             if result.is_ok():
                 var engine = result.unwrap()
@@ -453,6 +535,6 @@ describe "Vulkan strict smoke tests":
                     val p1 = engine.read_pixels()
                     engine.present()
                     val p2 = engine.read_pixels()
-                    expect(p1[0]).to_equal(p2[0])
-                    expect(p1[255]).to_equal(p2[255])
+                    expect(p1[0]).to_equal(p2[0])  # oracle: authoritative Vulkan strict-path value for this fixture
+                    expect(p1[255]).to_equal(p2[255])  # oracle: authoritative Vulkan strict-path value for this fixture
                     engine.shutdown()
