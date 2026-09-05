@@ -1,6 +1,6 @@
 # Parser Sharing — Measured Audit and Next Shared Seam (contract v1)
 
-**Date:** 2026-09-05 · **Status:** audit complete, seam proposed, no code landed
+**Date:** 2026-09-05 · **Status:** audit complete; Seam 1 and Seam 3 landed in this worktree, Seam 2 proposed
 **Worktree:** `/home/yoon/dev/simple-parser-sharing` (detached `67859c96792`)
 **Audited state:** the `main` working copy at `/home/yoon/dev/simple` on
 2026-09-05, *including* Codex's 38 uncommitted modified files and its untracked
@@ -10,9 +10,9 @@ it exists so this lane can add files without touching Codex's dirty set.
 
 **Lane etiquette.** `doc/03_plan/agent_tasks/parser_framework.md` freezes the
 merge contract and forbids editing another lane's dirty files. Every parser file
-this audit names is in Codex's dirty set. This document therefore proposes; it
-does not edit. The merge owner (Codex) and final reviewer (Astra) decide
-adoption.
+named in Part 1 is in Codex's dirty set and none was edited. The work in Part 2
+therefore lands only in files that are clean at HEAD or newly created. The merge
+owner (Codex) and final reviewer (Astra) decide adoption.
 
 ---
 
@@ -204,6 +204,29 @@ Sabotage (`simple_code_lines` replaced by a no-op passthrough):
 **14/14 green → 8/14 sabotaged → 14/14 reverted**, before the two later
 regression examples were added.
 
+### Incidental finding — `spipe-docgen` does not run at the committed tip
+
+The generated-manual mirror this lane owes (`bin/simple spipe-docgen <spec>
+--output doc/06_spec --no-index`, `0 stubs`) **could not be produced**, and not
+because of anything in this lane's spec. At `67859c96792`:
+
+```
+src/app/spipe_docgen/spipe_docgen/generator.spl:7
+    use app.spipe_docgen.common.{..., spec_kw_line}
+    -> error[E1002]: function `spec_kw_line` not found
+```
+
+`spec_kw_line` is defined at `common.spl:55` **only in Codex's uncommitted
+working copy**; the committed `common.spl` does not contain it while the
+committed `generator.spl` already imports it. Docgen fails identically on an
+untouched pre-existing spec (`sspec_maintain/cache_spec.spl`), so this is not
+specific to the new spec — it is an unlanded half sitting in the dirty set.
+
+Consequence for anyone reading a docgen result today: on a fresh clone the
+command prints `OK <spec> (N lines)` and *then* errors, so a caller that reads
+only the first line will record a success that produced no manual. The mirror
+is owed once Codex lands `common.spl`; it is not waived.
+
 ## Explicit non-claims
 
 - No claim of shared Simple **grammar**. The plan forbids it and this audit
@@ -213,3 +236,7 @@ regression examples were added.
 - Seam 3's byte-identical gate is a proposal; it has not been run.
 - The audit greps production `src/` only. A boundary shared exclusively through
   test code is reported as test-only by design.
+- The generated `doc/06_spec` manual for the new spec does not exist yet — see
+  the docgen finding above. Its absence is recorded, not papered over.
+- All evidence is from the aarch64 **Rust seed**, the binary `main` currently
+  deploys. Nothing here is self-hosted-compiler evidence.
