@@ -215,6 +215,36 @@ describe "Shared Simple source lexical facts":
         expect(source_facts_line_count("a\n")).to_equal(2)
         expect(source_facts_line_count("a\nb\n")).to_equal(3)
 
+    it "never inserts a separator between tokens that touch in the source":
+        """Regression, found by wiring a real consumer: a token starting at the
+        exact column already reached is an EXACT FIT and must be appended with
+        nothing between. An off-by-one here rewrites `skip(` as `skip (`, which
+        every consumer scanning for the call form silently stops matching."""
+        step("Extract code lines from calls whose tokens have no whitespace")
+        val code = code_of("adjacent_tokens.spl")
+
+        step("The call form survives byte-for-byte")
+        expect(code[0]).to_contain("skip(")
+        expect(code[0].contains("skip (")).to_equal(false)
+
+        step("Nested calls and comma-adjacent arguments keep their shape")
+        expect(code[1]).to_contain("foo(")
+        expect(code[1]).to_contain("bar(")
+        expect(code[1].contains("foo (")).to_equal(false)
+
+        step("Method chains do not gain spaces around the dots")
+        expect(code[2]).to_contain("x.y()")
+        expect(code[2].contains("x . y")).to_equal(false)
+
+    it "keeps a pending-marker call form that a consumer scans for":
+        """Generalization of the same defect across the marker vocabulary the
+        sspec_maintain consumer actually greps for."""
+        step("Each marker call form is preserved with no inserted separator")
+        val forms = ["skip(", "pass_todo(", "pending(", "fail("]
+        for form in forms:
+            val code = simple_code_lines("val x = " + form + "\"r\")\n")
+            expect(code[0]).to_contain(form)
+
 describe "Shared lexical facts versus the hand-rolled scanners they replace":
 
     it "decides a docstring mention that the per-line masker gets wrong":

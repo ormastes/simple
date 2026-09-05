@@ -1,6 +1,9 @@
 # One-pass structural fact extraction. O(source bytes + scenarios).
 use app.sspec_maintain.model.*
 use std.crypto.sha256.{sha256_text}
+# The code-vs-text question is CoreLexer's to answer, not this file's. See
+# doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
+use compiler.frontend.core.source_facts.{simple_code_lines}
 
 fn _quoted_name(line: text) -> text:
     val parts = line.split("\"")
@@ -72,35 +75,6 @@ fn _count_sub(haystack: text, needle: text) -> i64:
         rest = rest.substring(index + needle_len)
     count
 
-fn _mask_strings_and_comment(lower: text) -> text:
-    # Blank out double-quoted string CONTENTS (honoring \" escapes) and cut
-    # the line at the first `#` outside any string, so the skip( scan cannot
-    # fire on a mention inside a string literal ("... skip(..) ...") or a
-    # trailing comment (`val n = 1  # never skip() here`) — the same
-    # mention-vs-statement class ORA-001 already fixed for pass_todo/pending
-    # (2026-09-01). Quotes are kept so removal cannot splice new tokens.
-    var out = ""
-    var in_string = false
-    var escaped = false
-    for ch in lower:
-        if in_string:
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                in_string = false
-                out = out + "\""
-        else:
-            if ch == "\"":
-                in_string = true
-                out = out + "\""
-            elif ch == "#":
-                return out
-            else:
-                out = out + ch
-    out
-
 fn _calls_skip(trimmed_lower: text) -> bool:
     # A pending scaffold is a CALL to skip(...) — `test_env_gate_skip(` and
     # other *_skip(name) helpers are real oracles, not skips (2026-08-22).
@@ -117,7 +91,7 @@ fn _calls_skip(trimmed_lower: text) -> bool:
         rest = rest.substring(index + 4)
     false
 
-fn _is_pending(line: text) -> bool:
+fn _is_pending(line: text, code_line: text) -> bool:
     # ORA-001 pending detection must fire only on a pending STATEMENT, not on
     # any line that mentions the keyword: specs that TEST pass_todo behavior,
     # embed it in fixture strings, or reference it in comments were all being
@@ -158,7 +132,11 @@ fn _is_pending(line: text) -> bool:
     # `# never skip()` comments cannot fire it; genuine `skip("reason", ...)`
     # and `val gate = skip(...)` still match because the call itself sits
     # outside any string literal.
-    lower.starts_with("fail(\"todo:") or _calls_skip(_mask_strings_and_comment(lower))
+    # `code_line` is CoreLexer's code-only view of this same line: string
+    # CONTENT blanked, comment removed. It replaces a hand-rolled per-line
+    # in_string/escaped character walk that could not see a docstring spanning
+    # lines, because the question is not answerable one line at a time.
+    lower.starts_with("fail(\"todo:") or _calls_skip(code_line.trim().lower())
 
 fn _contains_requirement(line: text) -> bool:
     line.contains("REQ-") or line.contains("@req")
@@ -281,6 +259,8 @@ fn _calls_asserting_helper(line: text, helper_names: [text]) -> bool:
 
 fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     val lines = source.split("\n")
+    # One lexical pass over the whole file. Element i pairs with lines[i].
+    val code_lines = simple_code_lines(source)
     val lower = source.lower()
     val asserting_helper_names = _asserting_helper_names(lines)
     var scenarios: [SspecScenarioFacts] = []
@@ -439,7 +419,8 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
                     planned_requirement_ids.push(requirement_id)
             requirements = all_requirement_ids.len()
             scenario_requirements = scenario_requirement_ids.len()
-        if current_line > 0 and _is_pending(line): scenario_pending = true
+        if current_line > 0 and _is_pending(line, code_lines[line_number - 1]):
+            scenario_pending = true
         # Source-text inspection is not system evidence, but reading a
         # GENERATED artifact (build output, tmp root) IS runtime observation
         # (2026-08-22): only flag when the read/assert targets src/ source or
