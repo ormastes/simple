@@ -52,6 +52,95 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
 
+# ---- unresolved-import-edge detection ----
+# find_unresolved_imports BASE_ROOT ENTRY CLOSURE_PATHS
+# Parses ENTRY's own top-level `use A.B.C...` lines (ignoring lines inside a
+# """ docstring and anything after a `#` comment), strips `.{...}` / `.*` /
+# `as X` / `(...)` suffixes to get the dotted module path, computes the
+# on-disk candidate file(s) for it (mapping `std.X` -> src/lib/X, `lib.X` ->
+# src/lib/X, and any other bare-rooted path to both src/<path> and
+# src/lib/<path>, each as `.spl` or `/__init__.spl`), and reports (comma
+# separated) every module that has an on-disk candidate under BASE_ROOT but
+# does NOT appear anywhere in CLOSURE_PATHS. Honors $IMPORT_ENTRY_OVERRIDE
+# (selftest only) to read imports from a path other than ENTRY itself, since
+# selftest entries are fake closure-token labels, not real files.
+find_unresolved_imports() {
+    fu_base="$1"
+    fu_entry="$2"
+    fu_paths="$3"
+
+    if [ -n "${IMPORT_ENTRY_OVERRIDE:-}" ]; then
+        fu_entry_path="$IMPORT_ENTRY_OVERRIDE"
+    else
+        fu_entry_path="$fu_entry"
+    fi
+
+    [ -f "$fu_entry_path" ] || { printf '%s' ""; return; }
+
+    fu_modules=$(awk '
+        BEGIN { indoc = 0 }
+        {
+            raw = $0
+            cnt = gsub(/"""/, "\"\"\"", raw)
+            if (indoc) {
+                if (cnt % 2 == 1) indoc = 0
+                next
+            }
+            if (cnt % 2 == 1) { indoc = 1; next }
+            line = $0
+            hashpos = index(line, "#")
+            if (hashpos > 0) line = substr(line, 1, hashpos - 1)
+            gsub(/^[[:space:]]+/, "", line)
+            gsub(/[[:space:]]+$/, "", line)
+            if (substr(line, 1, 4) == "use ") print line
+        }
+    ' "$fu_entry_path" | sed \
+        -e 's/^use //' \
+        -e 's/\.{.*//' \
+        -e 's/\.\*.*//' \
+        -e 's/ as .*//' \
+        -e 's/ (.*//' \
+        -e 's/[[:space:]]*$//')
+
+    fu_unresolved=""
+    for mod in $fu_modules; do
+        [ -n "$mod" ] || continue
+        fu_slash=$(printf '%s' "$mod" | sed 's/\./\//g')
+        case "$mod" in
+            std.*|lib.*)
+                fu_rest=$(printf '%s' "$mod" | sed -e 's/^std\.//' -e 's/^lib\.//' -e 's/\./\//g')
+                fu_cands="src/lib/$fu_rest.spl src/lib/$fu_rest/__init__.spl"
+                ;;
+            *)
+                fu_cands="src/$fu_slash.spl src/$fu_slash/__init__.spl src/lib/$fu_slash.spl src/lib/$fu_slash/__init__.spl"
+                ;;
+        esac
+
+        fu_any_exists=0
+        fu_any_in_closure=0
+        for c in $fu_cands; do
+            if [ -e "$fu_base/$c" ]; then
+                fu_any_exists=1
+                for p in $fu_paths; do
+                    if [ "$p" = "$c" ]; then
+                        fu_any_in_closure=1
+                    fi
+                done
+            fi
+        done
+
+        if [ "$fu_any_exists" -eq 1 ] && [ "$fu_any_in_closure" -eq 0 ]; then
+            if [ -z "$fu_unresolved" ]; then
+                fu_unresolved="$mod"
+            else
+                fu_unresolved="$fu_unresolved, $mod"
+            fi
+        fi
+    done
+
+    printf '%s' "$fu_unresolved"
+}
+
 # ---- core scan logic, reusable by --selftest and the real run ----
 # run_closure_scan SEED_PATH ENTRY FORBIDDEN...
 # Prints the verdict line to stdout and returns 0 (PASS), 1 (FAIL), 2 (ERROR).
@@ -108,6 +197,13 @@ run_closure_scan() {
         return 2
     fi
 
+    scan_import_base="${IMPORT_BASE_ROOT:-$ROOT}"
+    scan_unresolved=$(find_unresolved_imports "$scan_import_base" "$scan_entry" "$scan_paths")
+    if [ -n "$scan_unresolved" ]; then
+        echo "ERROR — nothing was checked (unresolved import edge(s) in $scan_entry: $scan_unresolved)"
+        return 2
+    fi
+
     scan_forbidden_list=""
     scan_k=0
     for p in $scan_paths; do
@@ -144,7 +240,7 @@ if [ "$SELFTEST" -eq 1 ]; then
     trap 'rm -rf "$ST_DIR"' EXIT
 
     st_pass=0
-    st_total=5
+    st_total=7
 
     # Fixture 1: clean closure (entry present, no forbidden path) -> PASS
     ST_SEED_CLEAN="$ST_DIR/seed_clean.sh"
@@ -234,6 +330,80 @@ EOF
         "ERROR — "*) [ "$st_rc5" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
     esac
     [ "$st_rc5" -eq 2 ] || echo "selftest fixture 5 (missing seed -> ERROR) FAILED: rc=$st_rc5 out=$st_out5"
+
+    # Fixture 6: entry's bare-rooted import has an on-disk candidate that the
+    # fake seed's closure omits entirely -> ERROR naming the module. This
+    # replays doc/08_tracking/bug/deps_fast_ignores_bare_tier_rooted_imports_2026-09-05.md.
+    ST_F6="$ST_DIR/f6"
+    mkdir -p "$ST_F6/src/lib/common/ui"
+    : > "$ST_F6/src/lib/common/ui/key_code.spl"
+    cat > "$ST_F6/entry.spl" <<'EOF'
+use common.ui.key_code.{KeyCode}
+
+fn main():
+    pass
+EOF
+    ST_SEED_BLIND="$ST_DIR/seed_blind.sh"
+    cat > "$ST_SEED_BLIND" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 0
+
+  src/entry.spl
+
+=== CYCLES ===
+  none
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_BLIND"
+    IMPORT_BASE_ROOT="$ST_F6"
+    IMPORT_ENTRY_OVERRIDE="$ST_F6/entry.spl"
+    export IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    st_out6=$(run_closure_scan "$ST_SEED_BLIND" "src/entry.spl" "src/forbidden")
+    st_rc6=$?
+    unset IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    case "$st_out6" in
+        "ERROR — "*"unresolved import edge"*"common.ui.key_code"*) [ "$st_rc6" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc6" -eq 2 ] || echo "selftest fixture 6 (unresolved bare import -> ERROR) FAILED: rc=$st_rc6 out=$st_out6"
+
+    # Fixture 7: entry's bare-rooted import IS present in the fake closure ->
+    # PASS (proves the new check doesn't false-positive on a resolved edge).
+    ST_F7="$ST_DIR/f7"
+    mkdir -p "$ST_F7/src/lib/common/ui"
+    : > "$ST_F7/src/lib/common/ui/key_code.spl"
+    cat > "$ST_F7/entry.spl" <<'EOF'
+use common.ui.key_code.{KeyCode}
+
+fn main():
+    pass
+EOF
+    ST_SEED_COMPLETE="$ST_DIR/seed_complete.sh"
+    cat > "$ST_SEED_COMPLETE" <<'EOF'
+#!/bin/sh
+cat <<'OUT'
+=== deps fast: src/entry.spl ===
+Direct imports: 1
+
+  src/lib/common/ui/key_code.spl  (1 transitive files)
+    src/lib/common/ui/key_code.spl
+  src/entry.spl
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED_COMPLETE"
+    IMPORT_BASE_ROOT="$ST_F7"
+    IMPORT_ENTRY_OVERRIDE="$ST_F7/entry.spl"
+    export IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    st_out7=$(run_closure_scan "$ST_SEED_COMPLETE" "src/entry.spl" "src/forbidden")
+    st_rc7=$?
+    unset IMPORT_BASE_ROOT IMPORT_ENTRY_OVERRIDE
+    case "$st_out7" in
+        "PASS — "*) [ "$st_rc7" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc7" -eq 0 ] || echo "selftest fixture 7 (resolved bare import -> PASS) FAILED: rc=$st_rc7 out=$st_out7"
 
     rm -rf "$ST_DIR"
     trap - EXIT
