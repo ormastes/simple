@@ -102,6 +102,38 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 
 err() { echo "$SELF: ERROR — nothing was checked ($1)"; exit 2; }
 
+# WINDOWS ONLY — no effect whatsoever on Linux/macOS/FreeBSD, which return 0 on
+# the first line below without touching the tree.
+#
+# `git worktree add` honours core.symlinks. On a Windows checkout without
+# Developer Mode / SeCreateSymbolicLinkPrivilege that is necessarily `false`, so
+# every tracked symlink (mode 120000) is written as a REGULAR FILE whose entire
+# content is the literal target path. For the 35 such paths under `src/` — 12 of
+# them `.spl` — the compiler then parses `../../lib/...` as Simple source and
+# reports `expected expression, found Slash`, which made this guard's own C1
+# selftest fail on a clean tree and blocked the guard entirely.
+# See doc/08_tracking/bug/windows_git_symlinks_materialize_as_path_text_2026-09-02.md.
+#
+# The materialiser rewrites those placeholders as NTFS junctions (directory
+# targets) and hard links (file targets) — neither needs the symlink privilege.
+# --strict-missing so a dangling tracked symlink FAILS LOUDLY rather than being
+# left as path text; the repo root is passed EXPLICITLY because the script's
+# default root is derived from its own location and would otherwise materialise
+# the main checkout instead of the worktree under test.
+materialise_symlinks_if_windows() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*) : ;;
+        *) return 0 ;;
+    esac
+    _mw_tree=$1
+    _mw_script="$REPO_ROOT/scripts/setup/materialize-symlinks-windows.shs"
+    [ -f "$_mw_script" ] || { echo "$SELF: WARN — $_mw_script missing; worktree symlinks left unmaterialised" >&2; return 0; }
+    sh "$_mw_script" --strict-missing "$_mw_tree" >&2
+    _mw_rc=$?
+    [ "$_mw_rc" -eq 0 ] || echo "$SELF: WARN — symlink materialisation reported failures (rc=$_mw_rc) in $_mw_tree" >&2
+    return 0
+}
+
 marker_path() { echo "$MARKER_DIR/$1"; }
 
 record_green() {
@@ -201,6 +233,7 @@ selftest() {
         echo "SELFTEST FAIL: C — src/app/io/env_access_host.spl exists in no known revision; the incident cannot be replayed" >&2
         _st_fail=1
     elif git -C "$REPO_ROOT" worktree add --detach "$_c" "$_c_rev" >/dev/null 2>&1; then
+        materialise_symlinks_if_windows "$_c"
         _victim="$_c/src/app/io/env_access_host.spl"
         if [ -f "$_victim" ]; then
             # C1 -- record how the SAME freshly materialised worktree behaves BEFORE injection.
@@ -266,6 +299,7 @@ selftest() {
     # there; it does NOT assert a particular binary, only that resolution does not come up empty.
     _f=$_st_root/f
     if git -C "$REPO_ROOT" worktree add --detach "$_f" HEAD >/dev/null 2>&1; then
+        materialise_symlinks_if_windows "$_f"
         rm -rf "$_f/bin"
         # Resolution is checked IN PROCESS. Re-invoking this script would recurse (its selftest
         # runs this fixture, which would invoke it again); a recursive pre-push probe has hung
@@ -360,6 +394,7 @@ cleanup() { git -C "$REPO_ROOT" worktree remove --force "$WT/tree" >/dev/null 2>
 trap cleanup EXIT
 git -C "$REPO_ROOT" worktree add --detach "$WT/tree" "$TIP" >/dev/null 2>&1 \
     || err "could not materialise $TIP into an isolated worktree"
+materialise_symlinks_if_windows "$WT/tree"
 
 RESULT=$(run_fixture_in "$WT/tree" "$SIMPLE_BIN")
 case "$RESULT" in
