@@ -84,9 +84,13 @@ every independent attempt got it wrong the same way.
 - Gate: `scripts/check/check-parser-source-global-ratchet.shs` (+ baseline; push-tier, advisory)
 - Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (28),
   `test/01_unit/app/cli/query_source_mask_shared_lexer_spec.spl` (11),
+  `test/01_unit/app/check/check_sspec_guidance_shared_lexer_spec.spl` (7),
   `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6),
   `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (12)
-- Fixtures: `test/fixtures/source_facts/` (14)
+- Fixtures: `test/fixtures/source_facts/` (17)
+- Backlog (measured, classified): design doc § "Measured backlog" — 27 Simple-source
+  trackers remain; the `35.semantics/lint` family is BLOCKED by the 8 global-lexer
+  sites (re-entrancy), not merely deferred.
 
 ## Known open
 

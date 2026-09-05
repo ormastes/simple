@@ -1,0 +1,111 @@
+# `simple check`'s SSpec guidance reads string state from CoreLexer.
+#
+# `check_sspec_guidance` tells a user that an SSpec file must be run with
+# `bin/simple test <path> --mode=interpreter` when the file imports `std.spec`
+# and declares a top-level `describe`. It decided "am I inside a docstring?"
+# by counting triple quotes per line and toggling on an odd count — so a
+# COMMENT that merely mentions `"""` flipped it, and every following line was
+# skipped until the next triple quote. If the skipped window held the
+# `use std.spec` import or the first `describe`, the guidance was silently
+# never emitted.
+#
+# Replaying that tracker over every `*_spec.spl` on 2026-09-05, and splitting
+# by what caused the first bad toggle: **6 files** are hidden by a COMMENT
+# holding `"""` (the defect) — one pre-existing (multiline_string_spec.spl,
+# plus its frozen test/unit mirror) and four of this PR's own new specs, whose
+# header comments mention the delimiter. A further 287 files have
+# a `use std.spec` INSIDE their header docstring (a ```simple fence); old and
+# new code agree those are prose, so no behaviour changes there. An earlier
+# draft counted those as defects and said 230; that was a replay error.
+# No spec exercised this function before; every example here is new coverage.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use app.check.sspec_source.{check_sspec_guidance}
+use app.io.mod.{file_read_text}
+
+val FIXTURES: text = "test/fixtures/source_facts/"
+
+fn guidance_for(name: text) -> text:
+    val path = FIXTURES + name
+    check_sspec_guidance(file_read_text(path), path)
+
+describe "sspec guidance survives a triple quote in a comment":
+
+    it "emits guidance when a header comment mentions the docstring delimiter":
+        """The exact defect: one `\"\"\"` inside a `#` comment on line 1 put the
+        old tracker into docstring mode, and the import on line 2 vanished."""
+        step("Check a spec whose first line is a comment containing a triple quote")
+        val message = guidance_for("check_guidance_comment_triple_quote.spl")
+
+        step("The E-SSPEC-CHECK guidance is emitted")
+        expect(message).to_contain("E-SSPEC-CHECK")
+        expect(message).to_contain("--mode=interpreter")
+
+    it "still emits guidance for a plain spec with a real header docstring":
+        """Control: the behaviour the tracker got RIGHT must not regress."""
+        step("Check a spec with an ordinary header docstring")
+        expect(guidance_for("check_guidance_plain.spl")).to_contain("E-SSPEC-CHECK")
+
+    it "stays silent for a module that does not import std.spec":
+        """Negative control: the fix must not make the check credulous."""
+        step("Check an ordinary module")
+        expect(guidance_for("check_guidance_not_sspec.spl")).to_equal("")
+
+    it "stays silent when the import is genuinely inside a docstring":
+        """A `use std.spec` written INSIDE a docstring is prose, not a
+        statement, and must still not count."""
+        step("Check a module whose only std.spec mention is inside a docstring")
+        val tq = "\"" + "\"" + "\""
+        val source = tq + "\nuse std.spec.*\n" + tq + "\nfn f() -> i64:\n    1\n"
+        expect(check_sspec_guidance(source, "probe.spl")).to_equal("")
+
+    it "emits guidance for real spec files the old tracker was silent on":
+        """Corpus arm. multiline_string_spec.spl carries a triple quote in a
+        `#` comment on line 9 and imports std.spec at column 0 on line 11;
+        core_source_facts_spec.spl — this PR's own module spec — mentions the
+        delimiter in its header comment on line 10. Both were silent before."""
+        step("Check two committed spec files that carry the construct")
+        val a = "test/01_unit/compiler/lexer/multiline_string_spec.spl"
+        val b = "test/01_unit/compiler/frontend/core_source_facts_spec.spl"
+        expect(check_sspec_guidance(file_read_text(a), a)).to_contain("E-SSPEC-CHECK")
+        expect(check_sspec_guidance(file_read_text(b), b)).to_contain("E-SSPEC-CHECK")
+
+    it "stays silent for a real spec whose only import sits inside its header docstring":
+        """Corpus NEGATIVE control, and the case that exposed an overcount:
+        set_literal_spec.spl opens a docstring on line 1 and its
+        `use std.spec.step` on line 19 is inside a ```simple fence within it —
+        prose, not a statement. The lexer says so; the check must stay silent."""
+        step("Confirm independently that line 19 is inside the docstring opened on line 1")
+        val tq = "\"" + "\"" + "\""
+        val path = "test/03_system/feature/usage/set_literal_spec.spl"
+        val lines = file_read_text(path).split("\n")
+        expect(lines[0]).to_equal(tq)
+        var closers_before_import: i64 = 0
+        var i = 1
+        while i < 18:
+            if lines[i].contains(tq):
+                closers_before_import = closers_before_import + 1
+            i = i + 1
+        expect(closers_before_import).to_equal(0)
+        expect(lines[18]).to_equal("use std.spec.step")
+
+        step("The guidance is not emitted for it")
+        expect(check_sspec_guidance(file_read_text(path), path)).to_equal("")
+
+describe "sspec guidance sabotage arm":
+
+    it "confirms the fixtures really carry the construct under test":
+        step("The comment fixture really has a triple quote on line 1 and the import on line 2")
+        val tq = "\"" + "\"" + "\""
+        val lines = file_read_text(FIXTURES + "check_guidance_comment_triple_quote.spl").split("\n")
+        expect(lines[0].starts_with("#")).to_equal(true)
+        expect(lines[0]).to_contain(tq)
+        expect(lines[1]).to_equal("use std.spec.*")
+
+        step("The corpus file really has the comment on line 9 and a column-0 import on line 11")
+        val corpus = file_read_text("test/01_unit/compiler/lexer/multiline_string_spec.spl").split("\n")
+        expect(corpus[8].starts_with("#")).to_equal(true)
+        expect(corpus[8]).to_contain(tq)
+        expect(corpus[10].starts_with("use std.spec")).to_equal(true)

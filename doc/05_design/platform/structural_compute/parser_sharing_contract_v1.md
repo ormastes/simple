@@ -203,6 +203,63 @@ needs; `spipe_docgen` follows once Codex's lane unfreezes.
 
 ---
 
+### Seam 5 — `simple check`'s SSpec guidance — **LANDED**
+
+`src/app/check/sspec_source.spl` decides whether a file is an SSpec that must be
+run with `--mode=interpreter`. Its per-line triple-quote parity count treated a
+`#` comment mentioning `"""` as a docstring boundary and skipped everything to
+the next one — hiding the `use std.spec` import or the first `describe`, so the
+guidance was silently never emitted. It had **no spec at all**.
+
+Measured by replaying the tracker over every `*_spec.spl`, then splitting by
+what caused the first bad toggle: **6 files** are the defect (a comment holding
+the delimiter) — one pre-existing, `compiler/lexer/multiline_string_spec.spl`
+(plus its frozen `test/unit` mirror), and **four of this PR's own new specs**,
+whose header comments mention the delimiter. A further 287 files have the
+import *inside* their header docstring's ```simple fence; that is prose, both
+versions stay silent, and the new spec keeps `set_literal_spec.spl` as a corpus
+negative control for exactly that. An earlier draft of this record said 230;
+the replay had counted prose as statements.
+
+| Lane | Owner | Deliverable | Acceptance gate |
+|---|---|---|---|
+| Check guidance | app/check | parity tracker replaced by `simple_code_lines` + `simple_string_continuation_lines` | new spec 7/7; **5/7 at HEAD** — only the two positive arms red, every control green |
+
+### Measured backlog — remaining hand-rolled trackers
+
+Grepping for the *state variable* (`var in_docstring|in_triple|in_string|in_str`),
+not for `"""` mentions: **59 files** in `src/`. Classified by whether the
+tracker handles `"""` and lives near Simple-source tooling (heuristic; a few
+mislabels such as `encoding/toml.spl` are other-grammar):
+
+**27 parse Simple source** — candidates, each to be *measured* before touching:
+`app/check/concurrency_lint.spl`, `app/cli/query_diagnostics.spl`,
+`app/cli/query_tokens.spl`, `app/jupyter_kernel/main.spl`,
+`app/mcp/main_lazy_json.spl`, `app/svim/lsp_features.spl`,
+`app/test_runner_new/test_runner_execute.spl`, `app/tools/rt_migrate/rewrite.spl`,
+`compiler/15.blocks/blocks/builtin_blocks_shell.spl`,
+`compiler/90.tools/verify/{aorte_obligation_census_scan,backend_plugin_boundary_scan,checker,noalloc_manifest_scan}.spl`,
+`lib/nogc_sync_mut/test_runner/{mode_filter,test_result_wrapper,test_runner_execute}.spl`,
+`lib/nogc_sync_mut/tooling/easy_fix/rules_helpers.spl`, `lib/nogc_sync_mut/ui_test/parse.spl`.
+
+**Assessed and deliberately left:** `test_runner/mode_filter.spl` — its
+tracker is wrong (a one-line `"""doc"""` leaves it in docstring mode for the
+rest of the file) but its only consumer effect is dropping plain `#` comments
+while still collecting `# @…` directives, so mode detection survives the bug.
+No discriminating consumer fixture, no migration.
+
+**Blocked, not deferred — by Seam 1's debt:** every tracker under
+`src/compiler/35.semantics/lint/` (`lint_text.spl` and the eight lint passes
+that share it, `security_*`, `cow_alias_hotpath`, `module_init_literal`,
+`riscv_rtl_debuggability_lint`) and `10.frontend/core/_ParserDecls/fn_struct_decls.spl`
+run **inside the compiler**, where calling `lex_init` would reset the global
+CoreLexer under an in-progress parse. They cannot take the shared facts until
+the 8 `current_core_source_*` sites the ratchet freezes are gone and the lexer
+takes its source by value. That is the concrete cost of D1.
+
+**32 parse other grammars** (JSON, TOML, SDN, LSP transport, DAP, C helpers)
+and must never touch CoreLexer.
+
 ## Part 3 — What this lane shipped
 
 - `scripts/check/check-parser-source-global-ratchet.shs` — fail-closed gate,
@@ -230,6 +287,7 @@ uses. Findings therefore describe the seed, not a self-hosted compiler.
 |---|---|---|
 | `core_source_facts_spec.spl` | 28/28 | n/a (new) |
 | `app/cli/query_source_mask_shared_lexer_spec.spl` | 11/11 | **5/11 at HEAD** — the five green are exactly the controls |
+| `app/check/check_sspec_guidance_shared_lexer_spec.spl` | 7/7 | **5/7 at HEAD** — only the two positive arms red |
 | `sspec_maintain/shared_lexer_string_state_spec.spl` | 6/6 | 3/6 against the old tracker |
 | `spipe_docgen/shared_lexer_string_state_spec.spl` | 12/12 | 2/12 vs original walkers; 6/12 vs walker-fixed-only |
 | ten `app/cli` specs reaching the lint scanners | identical | 2/6, 1/2, 0-exec, 1/2, 0-exec, 0-exec, 0-exec, 11/11, 0-exec, 0-exec — same before and after |
