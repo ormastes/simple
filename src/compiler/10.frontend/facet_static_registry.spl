@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Per-compilation table of statically resolved facet routes for the closed-world
+(`static`) facet path described by
+doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md.
+Audience: the aspect/dynload lane owner implementing `.try_facet<F>()`, and
+`facet_static_binding.spl`, which is this table's only in-compiler consumer.
+
+## Operator workflow
+The table is compilation-scoped. Reset it at the start of every compilation,
+register each route the frontend resolves, then query it:
+
+    facet_static_begin_compilation()
+    facet_static_register_resolved_route(facet_key, target_key, route_id)
+    val n = facet_static_resolved_count(facet_key, target_key)
+
+## Compatibility and limitations
+Keys are `<module path>#<type name>` texts rather than SymbolIds so that the
+table survives the module boundary without holding a symbol-table reference.
+A query against a facet/target pair that was never registered answers 0 -- an
+absent route is a real answer here, not an error.
+
+TODO(aspect-dynload lane, REQ-APK-P04): this file is a PLACEHOLDER standing on
+a clobbered path. A real 396-line registry lived here and was deleted by
+`fcbec1c3b62` -- recover it with
+`git show fcbec1c3b62^:src/compiler/10.frontend/facet_static_registry.spl`.
+Restoring it must DELETE this file rather than merge with it. See
+doc/08_tracking/bug/aspect_dynload_facet_implementation_deleted_by_merge_restore_2026-09-05.md.
+Until then nothing populates this table: the frontend has no `.try_facet<F>()`
+grammar, so `facet_static_register_resolved_route` -- the table's write half --
+has no caller.
+"""
+
+# Compilation-scoped route table. Reset by facet_static_begin_compilation().
+var _facet_static_routes: Dict<text, i64> = {}
+
+# Reset the table. MUST be called once per compilation: routes resolved by a
+# previous compilation must not be visible to the next one.
+fn facet_static_begin_compilation():
+    _facet_static_routes = {}
+
+# Stable key for a facet or target type, scoped by its declaring module path.
+fn facet_static_key(module_path: text, type_name: text) -> text:
+    module_path + "#" + type_name
+
+# Key naming one resolved (facet, target) route pair.
+fn facet_static_resolved_route_key_for(facet_key: text, target_key: text) -> text:
+    facet_key + "->" + target_key
+
+# Record that `facet_key` resolves to one impl for `target_key`. Re-registering
+# the same pair increments its resolved count, which is how an ambiguous
+# (multi-impl) binding becomes observable to the validator.
+fn facet_static_register_resolved_route(facet_key: text, target_key: text):
+    val route_key = facet_static_resolved_route_key_for(facet_key, target_key)
+    _facet_static_routes[route_key] = (_facet_static_routes.get(route_key) ?? 0) + 1
+
+# How many impls satisfy this (facet, target) pair. 0 = unresolvable,
+# 1 = exactly one route, >1 = ambiguous.
+fn facet_static_resolved_count(facet_key: text, target_key: text) -> i64:
+    _facet_static_routes.get(facet_static_resolved_route_key_for(facet_key, target_key)) ?? 0

@@ -1,0 +1,212 @@
+# Descriptive GPU Kernel Lowering (plan W2.1)
+#
+# Lowers the DESCRIPTIVE kernel form
+#
+#     parallel fn k(i: idx, ...):
+#         <body>
+#
+# into the PRESCRIPTIVE form the existing GPU backends already accept: the
+# implicit linear index computation `i = block * dim + thread` plus an
+# explicit out-of-range bounds guard, per plan row W2.1 of
+# doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md
+# ("compiler injects `idx = block*dim+thread` + bounds guard").
+#
+# Bound convention: the plan row does not name where the extent comes from, so
+# this lowering appends one implicit extent parameter `n_<param>: i64` per
+# `idx`-typed parameter and guards against it. The prescriptive `<<<>>>` form
+# is untouched — a source with no `parallel fn` header is returned unchanged
+# and reports no lowering.
+#
+# This module deliberately recognises the `parallel fn` header itself instead
+# of adding a `parallel` keyword token to the lexer: W2.1's descriptive form is
+# a kernel-declaration surface, and the frontend lexer keyword table stays as
+# it is until the full surface-syntax slice lands.
+#
+# TODO(W2.1-frontend): route this lowering from the real parser/HIR path so
+# `parallel fn` is accepted in ordinary compilation units, not only through
+# this text entry point. The device-side lowering to MIR GpuGlobalId is still
+# owed by that slice.
+
+val DESCRIPTIVE_KERNEL_HEADER: text = "parallel fn "
+val DESCRIPTIVE_IDX_TYPE: text = "idx"
+
+struct DescriptiveKernelParam:
+    """One parameter of a descriptive kernel header, as parsed from source."""
+    name: text
+    type_name: text
+
+struct DescriptiveKernelLowering:
+    """
+    Result of lowering one descriptive kernel source.
+
+    `injects_bounds_guard` is COMPUTED by re-scanning `lowered_source` for the
+    guard lines this lowering actually produced — it is never asserted.
+    """
+    is_descriptive: bool
+    kernel_name: text
+    params: [DescriptiveKernelParam]
+    idx_params: [text]
+    extent_params: [text]
+    lowered_source: text
+    injected_index_exprs: i64
+    injected_bounds_guards: i64
+    injects_bounds_guard: bool
+    diagnostic: text
+
+fn descriptive_kernel_not_lowered(source: text, diagnostic: text) -> DescriptiveKernelLowering:
+    """Passthrough result: nothing was rewritten, so no guard was injected."""
+    DescriptiveKernelLowering(
+        is_descriptive: false,
+        kernel_name: "",
+        params: [],
+        idx_params: [],
+        extent_params: [],
+        lowered_source: source,
+        injected_index_exprs: 0,
+        injected_bounds_guards: 0,
+        injects_bounds_guard: false,
+        diagnostic: diagnostic
+    )
+
+fn descriptive_kernel_axis_name(dim: i64) -> text:
+    """Thread-axis suffix for the nth `idx` parameter."""
+    if dim == 0:
+        "x"
+    elif dim == 1:
+        "y"
+    else:
+        "z"
+
+fn descriptive_kernel_extent_name(param_name: text) -> text:
+    """Implicit extent parameter appended for an `idx` parameter."""
+    "n_" + param_name
+
+fn descriptive_kernel_parse_params(params_text: text) -> [DescriptiveKernelParam]:
+    """Split a header parameter list into name/type pairs; untyped entries get an empty type."""
+    var parsed: [DescriptiveKernelParam] = []
+    val trimmed_all = params_text.trim()
+    if trimmed_all.len() == 0:
+        return parsed
+    for raw in trimmed_all.split(","):
+        val entry = raw.trim()
+        if entry.len() == 0:
+            continue
+        val colon = entry.index_of(":")
+        if colon < 0:
+            parsed.push(DescriptiveKernelParam(name: entry, type_name: ""))
+        else:
+            val pname = entry.substring(0, colon).trim()
+            val ptype = entry.substring(colon + 1, entry.len()).trim()
+            parsed.push(DescriptiveKernelParam(name: pname, type_name: ptype))
+    parsed
+
+fn descriptive_kernel_guard_line(param_name: text, extent_name: text) -> text:
+    """The single bounds-guard condition line injected for one `idx` parameter."""
+    "    if " + param_name + " >= " + extent_name + ":"
+
+fn descriptive_kernel_count_guards(lowered_source: text, idx_params: [text]) -> i64:
+    """
+    Count the bounds guards actually PRESENT in the rewritten source.
+
+    This re-reads the emitted text rather than trusting the emitter's own
+    bookkeeping, so `injects_bounds_guard` cannot be true unless a real guard
+    line for a real parsed `idx` parameter is in the output.
+    """
+    var found = 0
+    for param_name in idx_params:
+        val expected = descriptive_kernel_guard_line(param_name, descriptive_kernel_extent_name(param_name))
+        if lowered_source.contains(expected):
+            found = found + 1
+    found
+
+fn parse_descriptive_gpu_kernel(source: text) -> DescriptiveKernelLowering:
+    """
+    Parse a descriptive `parallel fn` kernel and lower it to the prescriptive
+    form, injecting the implicit index computation and the bounds guard.
+
+    Returns a non-descriptive passthrough (guard count 0) when the source has
+    no `parallel fn` header or the header declares no `idx`-typed parameter.
+    """
+    val lines = source.split("\n")
+    var header_index = -1
+    var header_rest = ""
+    var line_no = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if header_index < 0 and trimmed.starts_with(DESCRIPTIVE_KERNEL_HEADER):
+            header_index = line_no
+            header_rest = trimmed.substring(DESCRIPTIVE_KERNEL_HEADER.len(), trimmed.len())
+        line_no = line_no + 1
+
+    if header_index < 0:
+        return descriptive_kernel_not_lowered(source, "no `parallel fn` descriptive kernel header")
+
+    val open_paren = header_rest.index_of("(")
+    val close_paren = header_rest.index_of(")")
+    if open_paren < 0 or close_paren < open_paren:
+        return descriptive_kernel_not_lowered(source, "malformed descriptive kernel parameter list")
+
+    val kernel_name = header_rest.substring(0, open_paren).trim()
+    if kernel_name.len() == 0:
+        return descriptive_kernel_not_lowered(source, "descriptive kernel header has no name")
+
+    val params = descriptive_kernel_parse_params(header_rest.substring(open_paren + 1, close_paren))
+
+    var idx_params: [text] = []
+    for p in params:
+        if p.type_name == DESCRIPTIVE_IDX_TYPE:
+            idx_params.push(p.name)
+
+    if idx_params.len() == 0:
+        return descriptive_kernel_not_lowered(source, "descriptive kernel `" + kernel_name + "` declares no `idx` parameter")
+
+    # Rewrite the signature: every `idx` parameter becomes a kernel-local
+    # induction variable, and gains an implicit extent parameter in its place.
+    var extent_params: [text] = []
+    var signature_parts: [text] = []
+    for p in params:
+        if p.type_name == DESCRIPTIVE_IDX_TYPE:
+            val extent_name = descriptive_kernel_extent_name(p.name)
+            extent_params.push(extent_name)
+            signature_parts.push(extent_name + ": i64")
+        else:
+            signature_parts.push(p.name + ": " + p.type_name)
+
+    var out_lines: [text] = []
+    out_lines.push("fn " + kernel_name + "(" + signature_parts.join(", ") + "):")
+
+    var emitted_index_exprs = 0
+    var dim = 0
+    for param_name in idx_params:
+        val axis = descriptive_kernel_axis_name(dim)
+        out_lines.push("    val " + param_name + " = block_idx_" + axis + "() * block_dim_" + axis + "() + thread_idx_" + axis + "()")
+        emitted_index_exprs = emitted_index_exprs + 1
+        out_lines.push(descriptive_kernel_guard_line(param_name, descriptive_kernel_extent_name(param_name)))
+        out_lines.push("        return")
+        dim = dim + 1
+
+    # Preserve the original body verbatim, below the injected preamble.
+    var body_line_no = 0
+    for line in lines:
+        if body_line_no > header_index:
+            out_lines.push(line)
+        body_line_no = body_line_no + 1
+
+    val lowered_source = out_lines.join("\n")
+    val guard_count = descriptive_kernel_count_guards(lowered_source, idx_params)
+
+    DescriptiveKernelLowering(
+        is_descriptive: true,
+        kernel_name: kernel_name,
+        params: params,
+        idx_params: idx_params,
+        extent_params: extent_params,
+        lowered_source: lowered_source,
+        injected_index_exprs: emitted_index_exprs,
+        injected_bounds_guards: guard_count,
+        injects_bounds_guard: guard_count > 0,
+        diagnostic: ""
+    )
+
+export DescriptiveKernelParam, DescriptiveKernelLowering
+export parse_descriptive_gpu_kernel

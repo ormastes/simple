@@ -30,6 +30,35 @@ No showcase entry is accepted in the installed SimpleOS launcher yet. A valid re
 
 For each ready surface: open the catalog, launch the app, snapshot the visible window, find a labeled control/section, act through the real input route, inspect event history, capture the post-action semantic state, and retain the same-run framebuffer/readback plus backend provenance. Blank frames, source-only assertions, synthetic GPU handles, and action logs without a changed frame/state fail verification.
 
+## Web standards 4K hardening (active, not accepted)
+
+The standalone web source now defaults to `3840x2160`, requests Vulkan unless
+`SIMPLE_GUI_BACKEND` overrides it, rejects backend mismatch/degraded output,
+and requires device readback plus positive backend/device identities. Its page
+has seven semantic tabs (`Overview`, `HTML`, `CSS Layout`, `CSS Paint`,
+`Forms & Media`, `Animation`, `Evidence`) with pointer and keyboard behavior.
+These source changes do **not** make the catalog readiness flag true: a PASS
+still needs an installed Stage-4 runner, physical Vulkan first-complete-frame
+`<=1000000us`, real Chrome evidence for the identical fixture/tab set, and
+per-tab capture comparison.
+
+The runner injects the typed `WebRenderableFeatureInventory` into the rendered
+document: 113 HTML rows and the current 131-property implemented CSS subset,
+each labeled renderable, partial, nonpaint, or unsupported with production
+owner and tab. This replaces “text occurred in a fixture” as the intended
+source of support truth, but executable pixel traceability is still required.
+The Chrome harness now makes real bounded 4K PNG captures for all seven tabs;
+until Chrome GPU backing and repeated warm samples are proven it emits
+`gpu_backend_status=unverified`, `warm_sample_count=0`, and
+`comparison_admitted=false`.
+
+Do not compile this entry from an implicit repo-wide source scan. Use explicit
+source roots, `--entry-closure`, `--low-memory`, one thread, isolated cache,
+and timeout/RSS guards. The admitted compiler currently retains the ordinary
+parse closure and has reached about 1.69 GiB without producing an artifact;
+that is tracked as a compiler parse/AST-retention blocker, not a 4K runtime
+framebuffer result.
+
 ## Spec wiring (landed, still RED — 2026-07-14)
 
 `test/03_system/os/showcase/showcase_apps_spec.spl`'s five wrapper helpers (`launch_showcase`, `require_installed_identity`, `require_owned_window`, `require_nonblank_frame`, `require_post_input_change`) now route through the production adapter — `common.ui.showcase_catalog` readiness flags gate every call, and `os.hosted.hosted_wm_evidence` (`host_wm_evidence_config_from_env`, `host_wm_evidence_parse_command`) supplies the evidence-config/capture/snapshot/input-FIFO checks — instead of a bare `fail()`. All nine app/surface cases still fail, now with a structured `app=... surface=... phase=... cause=surface-not-ready detail=...` message, because every readiness flag above is still `false`; they only flip once a surface has deployed proof.

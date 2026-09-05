@@ -1,20 +1,20 @@
 # Test Specification Index
 
-*Generated: 2026-08-21*
+*Generated: 2026-06-01*
 
 ## Quick Stats
 
-- **Total Features:** 6
-- **Complete Documentation:** 6 (100%)
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 11
-- **Warnings:** 6
+- **Total Lines:** 16
+- **Warnings:** 4
 
 ---
 
-## Other (6 features)
+## Testing infrastructure (1 features)
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Math Block Tensor Operations Specification](feature/usage/math_blocks_spec.md) | Implemented | 4/5 | 28 | 20% | 11 lines |
+| [Evidence Showcase Generation](test/03_system/app/testing/feature/evidence_showcase_spec.md) | Implemented | N/A | 2 | 20% | 16 lines |
 

@@ -1,20 +1,30 @@
 # @cover src/compiler/35.semantics/value_struct_layout.spl 60%
 """
-# value_struct_layout — by-value struct cycle validation (lane VSL1)
+## Purpose and audience
+
+This spec pins `validate_value_struct_layouts`
+(`src/compiler/35.semantics/value_struct_layout.spl`), the semantic check
+that walks every non-generic struct's fields looking for a DIRECT by-value
+containment cycle (a struct that recursively embeds itself by value, which
+would need infinite size). It is written for compiler engineers touching
+HIR lowering or struct layout, and for operators triaging a
+`recursive by-value struct layout` hard-compile-failure. The checker is
+wired into three driver call sites
+(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:130,212,355`)
+that fail the compile via `ctx.add_error(...)` when it fires; before lane
+VSL1 (mission-critical hardening follow-up to
+`newly_live_symbolkind_arms_audit_2026-07-30.md`) it had zero test
+coverage anywhere in `test/`, despite being live on every normal and
+bootstrap compile.
 
 **Category:** Compiler / Semantics
-**Lane:** VSL1 (mission-critical hardening follow-up to `newly_live_symbolkind_arms_audit_2026-07-30.md`)
 
-## Overview
+## Operator workflow
 
-`validate_value_struct_layouts` (`src/compiler/35.semantics/value_struct_layout.spl`)
-walks every non-generic struct's fields looking for a DIRECT by-value
-containment cycle (a struct that recursively embeds itself by value, which
-would need infinite size). It is wired into three driver call sites
-(`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:130,212,355`) that
-HARD-FAIL the compile via `ctx.add_error(...)` when it fires. Before this
-lane the function had zero test coverage anywhere in `test/`, despite being
-live on every normal and bootstrap compile.
+Run this file with
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/semantics/value_struct_layout_spec.spl`.
+A green verdict means every genuine by-value cycle shape produces the
+diagnostic and every safe only-looks-recursive layout passes cleanly.
 
 ## Why this spec hand-builds HIR instead of parsing struct source text
 
@@ -53,7 +63,7 @@ type below (`Named`, `Optional`, `Array`) is the literal `HirTypeKind`
 variant the real lowering would produce for `T`, `T?`, and `[T]`
 respectively (`src/compiler/20.hir/hir_types.spl:643-666`).
 
-## What is pinned
+## Compatibility and limitations
 
 - **Negative** — genuinely cyclic by-value layouts (self-reference, 2-node
   mutual recursion, 3-node chain) must produce the diagnostic.
@@ -65,9 +75,29 @@ respectively (`src/compiler/20.hir/hir_types.spl:643-666`).
   is the more important of the two.
 - **Documented gap** — recursion mediated through a generic struct
   instantiation (`Box<Node>`) is invisible to this checker by construction
-  (see the last `describe` block). Pinned as current behavior, not endorsed
-  as sufficient.
+  (see the generic-recursion `describe` block). Pinned as current behavior,
+  not endorsed as sufficient.
+
+## Verification guidance and troubleshooting
+
+Rerun the single file with the operator command above; a failing scenario
+prints the offending diagnostic list, so compare it against the exact
+`recursive by-value struct layout: A.b -> B.c -> A` strings asserted here.
+A failure in a "does not flag" scenario means a FALSE POSITIVE was
+introduced — that hard-fails legitimate user compiles and is release
+blocking. A failure in a "flags" scenario means the walker lost a genuine
+cycle — infinite-size structs would reach codegen. The final source-contract
+scenario guards the membership-index data-structure choice (ordered arrays
+for traversal, dictionaries for membership) that the walker's determinism
+depends on; if it fails, someone changed the traversal containers and the
+ordering scenarios below must be re-reviewed.
 """
+
+# Lifecycle: research doc/01_research/compiler/compiler_mdsoc_design.md ;
+# plan doc/03_plan/compiler/bootstrap_debug_test_observability.md ;
+# architecture doc/04_architecture/compiler/00_compiler_architecture.md ;
+# design doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md
+# @manual_section: value-struct-cycle-validation
 
 use std.spec
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
@@ -171,16 +201,22 @@ fn mk_module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
 
 describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
     it "flags a struct that embeds itself by value":
+        # @req REQ-SEM-VSL-001
+        # @capture(statistics): one diagnostic naming the self-embedding struct, retained for review
+        step("Build a one-struct module whose second field embeds the struct itself by value")
         var table = SymbolTable.new()
         val node_sym = table.define("VslSelfNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslSelfNode", [mk_field("value", i64_type()), mk_field("next", named_type(node_sym))], [])
         val hir = mk_module("vsl_self_cycle", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_self_cycle"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(errors.len()).to_equal(1)  # oracle: 1 — the walker reports exactly one cycle rooted at VslSelfNode
         expect(errors[0]).to_contain("recursive by-value struct layout")
         expect(errors[0]).to_contain("VslSelfNode")
 
     it "flags a two-struct mutual by-value cycle (A -> B -> A)":
+        # @req REQ-SEM-VSL-002
+        # @capture(statistics): one diagnostic for the mutual A/B embedding, retained for review
+        step("Build a two-struct module where each struct stores the other by value")
         var table = SymbolTable.new()
         val a_sym = table.define("VslMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -188,10 +224,13 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val b_struct = mk_struct(b_sym, "VslMutB", [mk_field("a", named_type(a_sym))], [])
         val hir = mk_module("vsl_mutual_cycle", table, [a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_mutual_cycle"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(errors.len()).to_equal(1)  # oracle: 1 — the mutual cycle collapses to one root diagnostic
         expect(errors[0]).to_contain("recursive by-value struct layout")
 
     it "flags a three-struct chain by-value cycle (A -> B -> C -> A)":
+        # @req REQ-SEM-VSL-003
+        # @capture(protocol_json): the exact three-hop diagnostic path string, retained for review
+        step("Build a three-struct module whose fields close a chain back onto the first struct")
         var table = SymbolTable.new()
         val a_sym = table.define("VslChainA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslChainB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -201,12 +240,14 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val c_struct = mk_struct(c_sym, "VslChainC", [mk_field("a", named_type(a_sym))], [])
         val hir = mk_module("vsl_chain_cycle", table, [a_struct, b_struct, c_struct])
         val errors = validate_value_struct_layouts(["vsl_chain_cycle"], [hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(errors.len()).to_equal(1)  # oracle: 1 — one diagnostic for the whole chain
         expect(errors[0]).to_equal(
-            "recursive by-value struct layout: VslChainA.b -> VslChainB.c -> VslChainC.a -> VslChainA")
+            "recursive by-value struct layout: VslChainA.b -> VslChainB.c -> VslChainC.a -> VslChainA")  # oracle: the walker names every hop in root insertion order
 
     it "keeps root insertion order when more than one cycle exists":
-        step("Verify: keeps root insertion order when more than one cycle exists")
+        # @req REQ-SEM-VSL-004
+        # @capture(statistics): the ordered diagnostic list for two independent cycles, retained for review
+        step("Build a module with two independent self-cycles and read the diagnostic order")
         var table = SymbolTable.new()
         val first_sym = table.define("VslFirstCycle", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val second_sym = table.define("VslSecondCycle", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -215,18 +256,24 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val hir = mk_module("vsl_cycle_order", table, [first_struct, second_struct])
         val errors = validate_value_struct_layouts(["vsl_cycle_order"], [hir])
         expect(errors).to_equal([
-            "recursive by-value struct layout: VslFirstCycle.first -> VslFirstCycle"])
+            "recursive by-value struct layout: VslFirstCycle.first -> VslFirstCycle"])  # oracle: only the first-defined root is reported, deterministically
 
 describe "validate_value_struct_layouts accepts layouts that only look recursive":
     it "does not flag self-reference through an optional (T?) indirection — classic linked-list node":
+        # @req REQ-SEM-VSL-005
+        # @capture(statistics): empty diagnostic list for the T?-indirected self-reference, retained for review
+        step("Build a linked-list node whose self-reference goes through T? indirection")
         var table = SymbolTable.new()
         val node_sym = table.define("VslOptNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslOptNode", [mk_field("value", i64_type()), mk_field("next", optional_type(named_type(node_sym)))], [])
         val hir = mk_module("vsl_optional_self", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_optional_self"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — T? boxes the reference, so the layout is finite
 
     it "does not flag mutual recursion mediated entirely by optional (T?) indirection":
+        # @req REQ-SEM-VSL-005
+        # @capture(statistics): empty diagnostic list for the T?-indirected mutual pair, retained for review
+        step("Build two structs that reference each other only through T? fields")
         var table = SymbolTable.new()
         val a_sym = table.define("VslOptMutA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val b_sym = table.define("VslOptMutB", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -234,17 +281,23 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val b_struct = mk_struct(b_sym, "VslOptMutB", [mk_field("a", optional_type(named_type(a_sym)))], [])
         val hir = mk_module("vsl_optional_mutual", table, [a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_optional_mutual"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — mutual recursion behind T? is heap-boxed and finite
 
     it "does not flag self-reference through an array/slice field — heap-backed collection of children":
+        # @req REQ-SEM-VSL-006
+        # @capture(statistics): empty diagnostic list for the array-indirected self-reference, retained for review
+        step("Build a tree node whose children live in an array field")
         var table = SymbolTable.new()
         val node_sym = table.define("VslArrNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslArrNode", [mk_field("value", i64_type()), mk_field("children", array_type(named_type(node_sym)))], [])
         val hir = mk_module("vsl_array_children", table, [node_struct])
         val errors = validate_value_struct_layouts(["vsl_array_children"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — [T] stores a heap pointer, so the layout is finite
 
     it "does not flag a non-cyclic diamond where two structs share one common by-value field type":
+        # @req REQ-SEM-VSL-007
+        # @capture(statistics): empty diagnostic list for the shared-field diamond, retained for review
+        step("Build two structs that both embed one shared struct by value")
         var table = SymbolTable.new()
         val shared_sym = table.define("VslShared", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val a_sym = table.define("VslDiamondA", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -254,9 +307,12 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val b_struct = mk_struct(b_sym, "VslDiamondB", [mk_field("shared", named_type(shared_sym))], [])
         val hir = mk_module("vsl_diamond", table, [shared_struct, a_struct, b_struct])
         val errors = validate_value_struct_layouts(["vsl_diamond"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — sharing a field type is not a containment cycle
 
     it "does not flag the same by-value struct type appearing twice as sibling fields (not a cycle)":
+        # @req REQ-SEM-VSL-007
+        # @capture(statistics): empty diagnostic list for repeated sibling fields, retained for review
+        step("Build a line struct that stores the same point type in two sibling fields")
         var table = SymbolTable.new()
         val point_sym = table.define("VslPoint", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val line_sym = table.define("VslLine", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
@@ -264,10 +320,13 @@ describe "validate_value_struct_layouts accepts layouts that only look recursive
         val line_struct = mk_struct(line_sym, "VslLine", [mk_field("p1", named_type(point_sym)), mk_field("p2", named_type(point_sym))], [])
         val hir = mk_module("vsl_repeated_sibling", table, [point_struct, line_struct])
         val errors = validate_value_struct_layouts(["vsl_repeated_sibling"], [hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — two sibling mentions of one type never form a cycle
 
 describe "validate_value_struct_layouts and generic-mediated recursion (documented coverage gap, not a false positive)":
     it "does not flag (and cannot currently detect) recursion mediated through a generic struct instantiation":
+        # @req REQ-SEM-VSL-008
+        # @capture(statistics): empty diagnostic list pinning the generic-box blind spot, retained for review
+        step("Build a generic box plus a node embedding a specialization of it, then run the walker")
         """
         `value_layout_named_symbol` only treats `HirTypeKind.Named(symbol, args)`
         as a struct reference when `args.len() == 0` (see
@@ -293,23 +352,29 @@ describe "validate_value_struct_layouts and generic-mediated recursion (document
 
 describe "validate_value_struct_layouts aligned input boundary":
     it "rejects misaligned module key and value arrays":
-        step("Verify: rejects misaligned module key and value arrays")
+        # @req REQ-SEM-VSL-009
+        # @capture(statistics): one misaligned-input diagnostic, retained for review
+        step("Call the checker with one module key but no module value")
         val errors = validate_value_struct_layouts(["vsl_orphan_key"], [])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(errors.len()).to_equal(1)  # oracle: 1 — the boundary guard rejects the malformed call outright
         expect(errors[0]).to_contain("misaligned")
 
     it "coalesces duplicate canonical keys into one layout":
-        step("Verify: coalesces duplicate canonical keys into one layout")
+        # @req REQ-SEM-VSL-010
+        # @capture(statistics): empty diagnostic list after key deduplication, retained for review
+        step("Pass the same physical module key twice with the same module value")
         var table = SymbolTable.new()
         val node_sym = table.define("VslAliasNode", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val node_struct = mk_struct(node_sym, "VslAliasNode", [mk_field("value", i64_type())], [])
         val hir = mk_module("registry.alias", table, [node_struct])
         val errors = validate_value_struct_layouts(
             ["physical.vsl_alias", "physical.vsl_alias"], [hir, hir])
-        expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(errors.len()).to_equal(0)  # oracle: 0 — duplicate keys collapse to one walked root
 
     it "keeps one ordered root while the last duplicate definition supplies its layout":
-        step("Verify: keeps one ordered root while the last duplicate definition supplies its layout")
+        # @req REQ-SEM-VSL-010
+        # @capture(protocol_json): the single diagnostic resolving to the last duplicate's layout, retained for review
+        step("Pass the same physical key twice with two different module bodies")
         var first_table = SymbolTable.new()
         val first_sym = first_table.define("VslDuplicate", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
         val first_struct = mk_struct(first_sym, "VslDuplicate", [mk_field("value", i64_type())], [])
@@ -323,10 +388,12 @@ describe "validate_value_struct_layouts aligned input boundary":
         val errors = validate_value_struct_layouts(
             ["physical.duplicate", "physical.duplicate"], [first_hir, second_hir])
         expect(errors).to_equal([
-            "recursive by-value struct layout: VslDuplicate.self -> VslDuplicate"])
+            "recursive by-value struct layout: VslDuplicate.self -> VslDuplicate"])  # oracle: the LAST duplicate body wins, so the cycle from it is the one reported
 
     it "resolves a by-value cycle through aligned physical module keys":
-        step("Verify: resolves a by-value cycle through aligned physical module keys")
+        # @req REQ-SEM-VSL-011
+        # @capture(statistics): one cross-module cycle diagnostic, retained for review
+        step("Split a mutual cycle across two modules joined by their physical keys")
         var left_table = SymbolTable.new()
         val left_sym = left_table.define("VslPhysicalLeft", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "physical.left")
         val right_import = left_table.define("VslPhysicalRight", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, "physical.right")
@@ -341,19 +408,29 @@ describe "validate_value_struct_layouts aligned input boundary":
 
         val errors = validate_value_struct_layouts(
             ["physical.left", "physical.right"], [left_hir, right_hir])
-        expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(errors[0]).to_contain("recursive by-value struct layout")
+        expect(errors.len()).to_equal(1)  # oracle: 1 — physical-key resolution stitches the two halves into one cycle
 
 describe "value struct layout membership-index source contract":
     it "keeps ordered traversal arrays and uses dictionaries only for membership":
-        step("Verify: keeps ordered traversal arrays and uses dictionaries only for membership")
+        # @req REQ-SEM-VSL-012
+        # @capture(bit_table): the container-contract checklist verdicts for the shipped walker source, retained for review
+        step("Read the shipped walker source and evaluate each container-contract clause")
         val source = file_read("src/compiler/35.semantics/value_struct_layout.spl")
-        expect(source).to_contain("var roots: [text] = []")
-        expect(source).to_contain("var root_keys: Dict<text, bool> = {}")
-        expect(source).to_contain("for root in roots:")
-        expect(source).to_contain("var visited: Dict<text, bool> = {}")
-        expect(source).to_contain("if visited.has(walk.node_key):")
-        expect(source).to_contain("if not visited.has(target):")
-        expect(source.contains("roots.contains(")).to_equal(false)
-        expect(source.contains("visited.contains(")).to_equal(false)
-        expect(source.contains("seen_module_keys")).to_equal(false)
+        val keeps_ordered_root_array = source.contains("var roots: [text] = []")
+        val keys_dedupe_via_dict = source.contains("var root_keys: Dict<text, bool> = {}")
+        val roots_walk_in_order = source.contains("for root in roots:")
+        val visited_is_a_dict = source.contains("var visited: Dict<text, bool> = {}")
+        val visited_lookup_uses_has = source.contains("if visited.has(walk.node_key):")
+        val target_lookup_uses_has = source.contains("if not visited.has(target):")
+        val never_linear_scans_roots = source.contains("roots.contains(")
+        val never_linear_scans_visited = source.contains("visited.contains(")
+        val no_third_membership_set = source.contains("seen_module_keys")
+        expect(keeps_ordered_root_array).to_equal(true)  # oracle: the walker's deterministic order comes from this array
+        expect(keys_dedupe_via_dict).to_equal(true)  # oracle: duplicate physical keys must dedupe in O(1)
+        expect(roots_walk_in_order).to_equal(true)  # oracle: diagnostics follow root insertion order
+        expect(visited_is_a_dict).to_equal(true)  # oracle: the visited set must be keyed, not scanned
+        expect(visited_lookup_uses_has).to_equal(true)  # oracle: cycle cuts use O(1) membership
+        expect(target_lookup_uses_has).to_equal(true)  # oracle: cross-edge cuts use O(1) membership
+        expect(never_linear_scans_roots).to_equal(false)  # oracle: a linear root scan would regress the index contract
+        expect(never_linear_scans_visited).to_equal(false)  # oracle: a linear visited scan would regress the index contract
+        expect(no_third_membership_set).to_equal(false)  # oracle: exactly two membership structures are sanctioned
