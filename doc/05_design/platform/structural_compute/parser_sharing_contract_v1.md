@@ -111,21 +111,57 @@ itself while Tree-sitter is blocked. Cheapest candidate: the raw-brace
 extraction lane the agent-task doc already assigns to CoreLexer, whose adapters
 are new files by construction.
 
-### Seam 3 — bring `spipe_docgen` inside the sharing perimeter
+### Seam 3 — publish the code-vs-text fact and give it a real consumer — **LANDED**
 
 | Lane | Owner | Deliverable | Acceptance gate |
 |---|---|---|---|
-| Docgen source facts | spipe_docgen | `parse_spipe_file` obtains indentation, docstring and declaration boundaries from a shared lexical result rather than per-line text scans | docgen output byte-identical on the existing corpus before/after; no new grammar claim |
+| Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 16/16 module spec; a no-op implementation must turn it red |
+| First consumer | sspec_maintain | `_mask_strings_and_comment` deleted; `_is_pending` reads the shared fact | consumer suite equals its HEAD baseline example-for-example |
 
-Scoped deliberately narrow. `spipe_docgen` needs *lexical* facts — indent
-depth, docstring extent, string literal boundaries — not a grammar. That is
-exactly what the CoreLexer tape publishes, which makes docgen a better first
-tape consumer than Tree-sitter: it has an existing byte-comparable output
-oracle (generated manuals) and no interpreter method-dispatch blocker.
+`spipe_docgen/parser.spl` was the original candidate and is **deferred**: it is
+in Codex's dirty set, so this lane cannot touch it. `sspec_maintain/source_facts.spl`
+is clean, hand-rolls the same scanner, and became the consumer instead.
 
-**Recommended order: 1 → 3 → 2.** Seam 3 supplies the consumer that Seam 2
-needs, and unlike Tree-sitter it is not blocked on
-`doc/08_tracking/bug/treesitter_interpreter_method_dispatch_2026-09-05.md`.
+**What shipped**
+
+`src/compiler/10.frontend/core/source_facts.spl` publishes what CoreLexer
+already knows and every app-side scanner re-derives: for each line, which text
+is code and which is merely inside a string or a comment. It is a lexical fact,
+not a grammar — the lane's non-claim stands unchanged.
+
+Two hand-rolled heuristics in `sspec_maintain/source_facts.spl` are provably
+wrong on inputs the shared fact reads correctly, and both are pinned by
+fixtures that run the legacy code and the shared fact over the same bytes:
+
+| Heuristic | Input it gets wrong | Why |
+|---|---|---|
+| `_mask_strings_and_comment` | a docstring CONTINUATION line mentioning `skip(` | the line carries no quote of its own, so a per-line walk returns the prose verbatim and a downstream scan fires on it |
+| `in_triple_string` (`count % 2`) | a triple quote written inside a COMMENT | the parity flips, the scanner enters docstring mode, and the rest of the file is discarded |
+
+The question is not answerable one line at a time, which is why every
+independent attempt at it has been wrong in the same way.
+
+**What the consumer wiring bought, concretely.** An off-by-one in the module's
+column padding — an exact-fit token treated as an overrun and given a separator,
+rewriting `skip(` as `skip (` — passed the module's own 14 examples and was
+caught within minutes of wiring a real consumer (`pending_detection_spec`
+5/5 → 4/5). Fixed, with two regression examples. This is the practical case
+against Seam 2's status quo: a foundation with no consumer has nothing pressing
+on it.
+
+**Explicitly NOT migrated.** The `in_triple_string` tracker in
+`extract_sspec_source_facts` still runs. Replacing it changes which lines reach
+fact extraction at all — docstring lines currently `continue` past everything,
+including `# @req` scanning — and that is a behavior change beyond this seam.
+It is the next reviewed step, not an oversight.
+
+**Boundary that must stay.** Comments are DROPPED by the shared fact. Any
+consumer whose fact lives in a comment (`# @req REQ-1`, `# @step: ...`) keeps
+reading the raw line. Mixing the two is what made the hand-rolled scanners
+ambiguous to begin with.
+
+**Recommended remaining order: 1 → 2.** Seam 3 now supplies the pattern Seam 2
+needs; `spipe_docgen` follows once Codex's lane unfreezes.
 
 ---
 
@@ -133,11 +169,40 @@ needs, and unlike Tree-sitter it is not blocked on
 
 - `scripts/check/check-parser-source-global-ratchet.shs` — fail-closed gate,
   `--selftest` fatal, verdict as last stdout line, baseline in
-  `scripts/check/parser_source_global_baseline.txt` (8).
+  `scripts/check/parser_source_global_baseline.txt` (8). Measured after the
+  code change: `PASS — 16225 file(s) scanned, parser-source globals=8`.
+- `src/compiler/10.frontend/core/source_facts.spl` — the shared lexical fact.
+- `src/app/sspec_maintain/source_facts.spl` — first production consumer; the
+  hand-rolled masker deleted.
+- `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (16 examples) and
+  nine fixture files under `test/fixtures/source_facts/`.
 - This document.
 
-Nothing else. No `.spl` file was touched: every one that matters is in another
-lane's dirty set.
+No file in Codex's dirty set was edited. `source_facts.spl` is clean at HEAD;
+`core/source_facts.spl` is a new file beside dirty siblings, and it is imported
+by module path so `core/__init__.spl` (dirty) needed no edit.
+
+### Evidence
+
+All runs on the aarch64 Rust **seed** at `bin/release/aarch64-unknown-linux-gnu/simple`
+(154,560,904 bytes), copied into the worktree — the same binary `main` currently
+uses. Findings therefore describe the seed, not a self-hosted compiler.
+
+| spec | wired | HEAD baseline |
+|---|---|---|
+| `core_source_facts_spec.spl` | 16/16 | n/a (new) |
+| `sspec_maintain/pending_detection_spec.spl` | 5/5 | 5/5 |
+| `sspec_maintain/scoring_spec.spl` | 18/20 | 18/20 |
+| `sspec_maintain/rule_coverage_spec.spl` | 3/5 | 3/5 |
+| `sspec_maintain/cache_spec.spl` | 6/6 | — |
+| `sspec_maintain/report_multi_render_spec.spl` | 3/3 | — |
+
+Four examples are red. All four are red at HEAD without this change, with
+identical names; none is touched by this lane and none is hidden.
+
+Sabotage (`simple_code_lines` replaced by a no-op passthrough):
+**14/14 green → 8/14 sabotaged → 14/14 reverted**, before the two later
+regression examples were added.
 
 ## Explicit non-claims
 
