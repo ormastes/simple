@@ -14,6 +14,7 @@
 
 use std.spec.*
 use compiler.frontend.core.source_facts.{simple_code_lines, source_facts_line_count}
+use compiler.frontend.core.source_facts.{simple_string_continuation_lines}
 use app.io.mod.{file_read_text}
 
 val FIXTURES: text = "test/fixtures/source_facts/"
@@ -255,6 +256,69 @@ describe "Shared Simple source lexical facts":
         for form in forms:
             val code = simple_code_lines("val x = " + form + "\"r\")\n")
             expect(code[0]).to_contain(form)
+
+describe "Which lines continue a string opened earlier":
+
+    it "marks a docstring's continuation lines but not its opening line":
+        """A consumer skipping docstring interiors needs the opener to stay
+        visible — that is the line carrying the code that opened it."""
+        step("Flag continuation lines across the docstring fixture")
+        val flags = simple_string_continuation_lines(fixture("docstring_mentions.spl"))
+        expect(flags.len()).to_equal(8)
+
+        step("The declaration and the opening line are not continuations")
+        expect(flags[0]).to_equal(false)
+        expect(flags[1]).to_equal(false)
+
+        step("The interior and the closing line are")
+        expect(flags[2]).to_equal(true)
+        expect(flags[3]).to_equal(true)
+        expect(flags[4]).to_equal(true)
+
+        step("Code after the docstring is free again")
+        expect(flags[5]).to_equal(false)
+        expect(flags[6]).to_equal(false)
+
+    it "does not enter a string because a comment names the delimiter":
+        """The exact defect: a triple quote inside a comment flipped the legacy
+        parity count and swallowed the rest of the file."""
+        step("Flag continuation lines for a comment containing a triple quote")
+        val flags = simple_string_continuation_lines(fixture("triple_quote_inside_comment.spl"))
+
+        step("Confirm the legacy parity heuristic WOULD have entered a string")
+        val first = fixture("triple_quote_inside_comment.spl").split("\n")[0]
+        expect(legacy_enters_triple_string(first)).to_equal(true)
+
+        step("The lexer-derived fact marks nothing")
+        for flag in flags:
+            expect(flag).to_equal(false)
+
+    it "marks nothing in a file with no multi-line string":
+        step("Flag continuation lines for ordinary nested code")
+        for flag in simple_string_continuation_lines(fixture("indent_preserved.spl")):
+            expect(flag).to_equal(false)
+
+    it "reports one flag per source line, like the other fact":
+        """Consumers index both arrays beside `source.split(...)`."""
+        step("Compare lengths across every fixture")
+        val names = ["docstring_mentions.spl", "triple_quote_inside_comment.spl",
+            "escaped_quote.spl", "comment_mentions.spl", "indent_preserved.spl",
+            "adjacent_tokens.spl", "empty.spl", "no_trailing_newline.spl"]
+        for name in names:
+            val raw = fixture(name)
+            expect(simple_string_continuation_lines(raw).len()).to_equal(raw.split("\n").len())
+
+        step("And for the in-spec CRLF source")
+        expect(simple_string_continuation_lines(crlf_source()).len())
+            .to_equal(crlf_source().split("\n").len())
+
+    it "does not mark a single-line string as spanning anything":
+        """A `"" "" ""`-delimited docstring opened and closed on one line has no
+        continuation lines at all."""
+        step("A one-line docstring marks nothing")
+        val src = "fn f():\n    " + triple_quote() + "one line" + triple_quote() + "\n    1\n"
+        for flag in simple_string_continuation_lines(src):
+            expect(flag).to_equal(false)
 
 describe "Shared lexical facts versus the hand-rolled scanners they replace":
 

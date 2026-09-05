@@ -3,7 +3,7 @@ use app.sspec_maintain.model.*
 use std.crypto.sha256.{sha256_text}
 # The code-vs-text question is CoreLexer's to answer, not this file's. See
 # doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md.
-use compiler.frontend.core.source_facts.{simple_code_lines}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 fn _quoted_name(line: text) -> text:
     val parts = line.split("\"")
@@ -261,6 +261,13 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     val lines = source.split("\n")
     # One lexical pass over the whole file. Element i pairs with lines[i].
     val code_lines = simple_code_lines(source)
+    # Which lines continue a string opened earlier. Replaces a per-line
+    # `count('\"\"\"') % 2` parity tracker that is correct only for
+    # well-formed docstrings: a triple quote inside a COMMENT flipped it and
+    # discarded every following line. Measured 2026-09-05: 31 *_spec.spl files
+    # in this tree trip that, two of them at line 3, so the whole file's
+    # scenario facts were lost.
+    val string_continuation = simple_string_continuation_lines(source)
     val lower = source.lower()
     val asserting_helper_names = _asserting_helper_names(lines)
     var scenarios: [SspecScenarioFacts] = []
@@ -300,18 +307,14 @@ fn extract_sspec_source_facts(path: text, source: text) -> SspecSourceFacts:
     # Triple-quoted fixture strings often contain column-0 lines; without
     # string-state tracking those lines END the current scenario early and
     # every assertion after the fixture lands outside any scenario (2026-08-22).
-    var in_triple_string = false
+    # The state is now CoreLexer's, not a parity count of this file's own.
     for raw in lines:
         line_number = line_number + 1
-        if in_triple_string:
-            if _count_sub(raw, "\"\"\"") > 0:
-                in_triple_string = false
+        if string_continuation[line_number - 1]:
             continue
         val line = raw.trim()
         val line_lower = line.lower()
         val indent = _indent_width(raw)
-        if _count_sub(raw, "\"\"\"") % 2 == 1:
-            in_triple_string = true
         if current_line > 0 and line != "" and indent <= current_indent:
             scenarios.push(_finish_scenario(current_name, current_line,
                 line_number - 1, scenario_steps, scenario_assertions,
