@@ -83,8 +83,8 @@ every independent attempt got it wrong the same way.
 - Gate: `scripts/check/check-parser-source-global-ratchet.shs` (+ baseline; push-tier, advisory)
 - Specs: `test/01_unit/compiler/frontend/core_source_facts_spec.spl` (21),
   `test/01_unit/app/sspec_maintain/shared_lexer_string_state_spec.spl` (6),
-  `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (6)
-- Fixtures: `test/fixtures/source_facts/` (11)
+  `test/01_unit/app/spipe_docgen/shared_lexer_string_state_spec.spl` (9)
+- Fixtures: `test/fixtures/source_facts/` (12)
 
 ## Known open
 
@@ -96,5 +96,10 @@ every independent attempt got it wrong the same way.
   docstring walkers (`parse_spipe_file` doc-block collection and
   `extract_test_structure_with_default`). Its remaining ~250 text-scan sites are
   per-line *grammar* recognition (`describe `, `it `, `step(`), not string state —
-  leave them. `find_scenario_body_end` is still indent-only and not string-aware; a
-  fixture's column-0 lines end a scenario body early. Measure before migrating.
+  leave them. `find_scenario_body_end` now takes the continuation fact as a parameter
+  (threaded through its 7-function chain rather than a module global) and never
+  ends a body on a line inside a string — 11 spec files had bodies cut at a
+  fixture's column-0 interior.
+- `src/app/cli/query_source_mask.spl` (four `query`/`check` consumers) cannot see
+  `'…'` strings; 20 `src/` files trip it. Measured, filed, NOT migrated — it needs a
+  byte-vs-char column decision first. See the bug record before touching it.

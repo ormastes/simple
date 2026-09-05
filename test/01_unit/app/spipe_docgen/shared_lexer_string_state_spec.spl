@@ -25,6 +25,16 @@ use app.io.mod.{file_read_text}
 
 val FIXTURE: text = "test/fixtures/source_facts/docgen_fixture_string_then_scenario.spl"
 val PLAIN: text = "test/fixtures/source_facts/docgen_plain_spec.spl"
+val COLUMN0: text = "test/fixtures/source_facts/docgen_fixture_column0_in_body.spl"
+
+fn heading_lines_mentioning(md: text, needle: text) -> i64:
+    """Count markdown HEADING lines that mention `needle` — a heading is
+    structure; the same text inside a code fence is a scenario's own source."""
+    var n: i64 = 0
+    for line in md.split("\n"):
+        if line.starts_with("#") and line.contains(needle):
+            n = n + 1
+    n
 
 fn structure() -> text:
     extract_test_structure(file_read_text(FIXTURE))
@@ -47,8 +57,35 @@ describe "docgen structure extraction survives a fixture string":
         val md = structure()
 
         step("Nothing from inside the fixture string became a heading")
-        expect(md.contains("NOT A SCENARIO")).to_equal(false)
-        expect(md.contains("NOT AN IT")).to_equal(false)
+        expect(heading_lines_mentioning(md, "NOT A SCENARIO")).to_equal(0)
+        expect(heading_lines_mentioning(md, "NOT AN IT")).to_equal(0)
+
+        step("It is still present as the scenario's own source, inside its body")
+        expect(md).to_contain("NOT A SCENARIO")
+
+    it "keeps every body line after a fixture whose interior sits at column zero":
+        """find_scenario_body_end used to end a body at the first non-blank line
+        whose indent was at or left of the scenario's. A fixture string's
+        interior routinely sits at column 0, so everything after the fixture
+        fell out of the manual — 11 spec files in this tree."""
+        step("Render a scenario whose fixture string holds column-zero lines")
+        val md = extract_test_structure(file_read_text(COLUMN0))
+
+        step("The fixture interior is part of the body")
+        expect(md).to_contain("print(73)")
+
+        step("So is every line after the fixture closes")
+        expect(md).to_contain("after_fixture_marker")
+
+    it "keeps the post-fixture assertions of a committed spec with a column-zero golden":
+        """Corpus arm: resource_wrapper_gen_spec.spl holds a golden string whose
+        interior starts at column 0 (line 61) inside an `it` (line 56); the
+        real assertions follow the golden's close at line 82."""
+        step("Render the real spec's structure")
+        val md = extract_test_structure(file_read_text("test/01_unit/compiler/resource/resource_wrapper_gen_spec.spl"))
+
+        step("An assertion written AFTER the golden block is in the rendered body")
+        expect(md).to_contain("assert_contains(golden")
 
     it "renders the docstring of the describe that follows the fixture":
         """Under the old walker this describe was consumed inside bogus

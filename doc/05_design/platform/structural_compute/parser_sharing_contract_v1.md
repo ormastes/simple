@@ -129,6 +129,7 @@ are new files by construction.
 | Simple source lexical facts | CoreLexer | `simple_code_lines(source)` — per-line code with string CONTENT blanked and comments removed, columns preserved | 16/16 module spec; a no-op implementation must turn it red |
 | First consumer | sspec_maintain | `_mask_strings_and_comment` deleted; `_is_pending` reads the shared fact | consumer suite equals its HEAD baseline example-for-example |
 | String state | sspec_maintain | `in_triple_string` parity tracker deleted; replaced by `simple_string_continuation_lines` | new spec red against the old tracker, green after; corpus arm checked against an independent `it "` count |
+| Docgen body end | spipe_docgen | `find_scenario_body_end` no longer ends a scenario body on a string-continuation line; the fact is threaded as a parameter through its 7-function chain (no module global) | 3 new examples red at the walker-fixed HEAD (6/9), green after (9/9); corpus arm on `resource_wrapper_gen_spec.spl` (golden at col 0 from line 61, assertions after line 82) |
 | Docgen walkers | spipe_docgen | `in_docstring` per-line flag deleted from `extract_test_structure_with_default`; `parse_spipe_file`'s doc-block opener guarded by the same fact | new spec 6/6, **2/6 against the old walkers** (only the control and sabotage arm green); its three pre-existing baselines byte-identical (37/65, 5/5, 0-executed) |
 
 **The docgen walkers were misreading 38 real files.** Both decided "am I in a
@@ -371,6 +372,20 @@ merge owner: the ~105-line uncommitted `spipe_docgen` change that makes
 `spipe-docgen` unrunnable from committed content
 (`doc/08_tracking/bug/spipe_docgen_unrunnable_from_committed_content_2026-09-05.md`),
 and therefore the `doc/06_spec` mirrors that change blocks.
+
+### Measured and NOT migrated — `query_source_mask`
+
+`src/app/cli/query_source_mask.spl` feeds four `simple query`/`check` scanners.
+Its byte-level tracker is actually *correct* on the two cases that broke the
+others, but it cannot see single-quoted `'…'` strings, which CoreLexer lexes as
+ordinary `StringLit`s. `trimmed.starts_with('"""')` therefore flips its
+triple-string mode and the rest of the file is skipped for lint scanning.
+**20 `src/` files** carry that shape; two (`aorte_obligation_census_scan.spl`,
+`flight_rule_census_scan.spl`) are the file-swallowing form. Not migrated
+because it is not a drop-in: the scanner reports byte columns and the shared
+fact preserves char columns, and one consumer masks an already-trimmed single
+line. Filed with the decision needed:
+`doc/08_tracking/bug/query_source_mask_ignores_single_quoted_strings_2026-09-05.md`.
 
 ## Explicit non-claims
 
