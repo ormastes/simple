@@ -22,6 +22,24 @@ Current state (2026-05-30):
 - `rt_bigint_mod_exp` extern declared in `signature_sffi.spl` but not implemented
 - `src/lib/common/math/bignum/` directory does NOT exist
 
+Refreshed state (2026-09-05, verified by `/usr/bin/grep`):
+- `src/lib/common/math/bignum/` now EXISTS (`limb.spl`, `bignat.spl`,
+  `fixed.spl`) with unit specs under `test/01_unit/lib/math/bignum/`.
+  `fixed.spl:313 pub fn mod_exp_ct` is a constant-shape square-and-multiply,
+  NOT a Montgomery/Barrett reducer, and its only crypto consumer is
+  `src/os/crypto/ecdsa_p521.spl` — the RSA files are not migrated.
+- `src/os/crypto/rsa_pss.spl:164 fn _pss_bi_mod` and
+  `src/os/crypto/rsa_fallback.spl:241 fn _bi_mod` are still the schoolbook
+  shifted-modulus reducer; no `montgomery`/`barrett` symbol exists in either file.
+- `rt_bigint_mod_exp` is no longer declared anywhere under `src/lib/common/crypto`
+  (the `signature_sffi.spl` declaration this plan cites is gone).
+- The planned `src/lib/common/math/bigint.spl` was never created; the shared
+  module that did land is `bignum/bignat.spl` + `bignum/fixed.spl` (box below
+  rewritten to say so).
+- `test/01_unit/lib/crypto/rsa_pkcs1_v15_spec.spl:13-18` still documents the
+  HostedReference backend (PureSimple needs `rt_tls13_sha256`, unregistered in
+  interpreter mode).
+
 The remaining fix requires either a Montgomery or Barrett modular reducer that
 reduces the per-multiplication cost from O(n) shift-subtract to O(n) multiply,
 bringing total modexp from O(n^3) to O(n^2 * log(e)).
@@ -154,7 +172,14 @@ PureSimple backend)
 - [ ] `test/01_unit/lib/crypto/rsa_pkcs1_v15_spec.spl` passes via PureSimple
       backend in interpreter mode (not HostedReference)
 - [ ] No new dependency on `rt_embedded_host_rsa_component`
-- [ ] Shared `src/lib/common/math/bigint.spl` with full test coverage
+- [ ] Shared bigint module with full test coverage — PARTIAL: shipped as
+      `src/lib/common/math/bignum/{limb,bignat,fixed}.spl` (specs
+      `test/01_unit/lib/math/bignum/{limb_spike,bignat,fixed}_spec.spl`), not
+      as `src/lib/common/math/bigint.spl`; still open because neither
+      `src/os/crypto/rsa_pss.spl` nor `rsa_fallback.spl` imports it (0 hits for
+      `math.bignum` in `src/os/crypto/rsa_*.spl`, 2026-09-05)
+  - divergence: planned one `bigint.spl`; shipped a `bignum/` package split into
+    variable-length `bignat` and constant-shape `fixed` layers
 - [ ] Montgomery multiply round-trips correctly for random inputs
 - [ ] All existing RSA/crypto specs pass without regression
 
@@ -181,3 +206,9 @@ PureSimple backend)
   must have zero runtime/GC/IO dependencies. If any dependency creeps in, revert
   to duplicating Montgomery code in both `rsa_pss.spl` and `rsa_fallback.spl`
   independently
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/rsa_modexp_montgomery_barrett_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

@@ -223,7 +223,8 @@ This detached worktree is replacement lane A. The following paragraph records
 a historical lane-B attempt; it is not the identity of this worktree. That
 historical candidate did not reach performance admission: its strict Stage 2 bootstrap
 ended after about 52 minutes with 61 HIR field-inference failures (mostly
-`struct 'ANY' field ...`), including `src/compiler/99.loader/module_loader.spl`.
+`struct 'ANY' field ...`), including `src/compiler/99.loader/module_loader.spl` (that file now lives at
+`src/compiler/99.loader/loader/module_loader.spl`).
 Consequently there is no admissible self-hosted failed-probe, latency, or RSS
 receipt from that attempt. Rust-seed measurements remain diagnostic only.
 
@@ -561,3 +562,12 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
   `aef64fb1951136fbb98521ce1a67643207752a26`, integrated through the lane lock,
   and reachable from refreshed `origin/main`. Final bookkeeping and the WARN
   marker follow the same locked sequence; unrelated GUI reports are excluded.
+
+## Acceptance
+
+The `## Acceptance matrix` section above is a different, pre-existing section
+(REQ/NFR traceability table); this section is the plan-refresh acceptance link.
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/compiler_loader_script_crosslang_perf_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

@@ -308,18 +308,35 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
   `a663c1145b1` (dynsmf); SDN + env config loading: `281d8adde3b`.
 - [x] DONE — optimizer dynload hardening: nil PassKind fails closed
   `25a48297651`; entry_symbol registry routing `e985aceeacf`.
-- [ ] NOT-STARTED — planned `src/lib/common/structural/component/`
-  (`ComponentDescriptorV1`, `resolve_component`) does not exist; the landed
-  implementation lives on the dynsmf path instead. Fold-static-on-full-
-  rebuild (placement=auto) bootstrap proof not evidenced.
+- [x] DONE-DIFFERENTLY — component-descriptor contract now exists at
+  `src/lib/common/structural/component/descriptor.spl` (`ComponentDescriptorV1`
+  :184, `resolve_component` :276, re-exported from `component/__init__.spl:16,20`)
+  and is consumed by the dynsmf path (`src/app/startup/component_resolver.spl:7`,
+  `component_dynsmf_wiring.spl:10`, `dynsmf_component_bridge.spl:15`); spec
+  `test/01_unit/lib/structural/component_resolver_kernel_spec.spl` — verified
+  src/lib/common/structural/component/descriptor.spl:276 `resolve_component`
+  - divergence: planned as a standalone contract module; shipped as the contract
+    module PLUS dynsmf consumers under `src/app/startup/`. Fold-static-on-full-
+    rebuild (placement=auto) bootstrap proof still not asserted by any
+    `scripts/check/*.shs` gate (see remaining item 4).
 
 ### Phase C — dynamic CLI args without core rebuild
 - [x] DONE — SCI option-route records + `--x<ns>-<key>[=<val>]` grammar:
   `131721fb924` (`composition/cli_option_route.spl`).
 - [x] DONE — SDN config-driven `--x` extension-namespace registry:
   `0927c2e6ec7` (`cli_extension_config.spl`).
-- [ ] REMAINING — C4 help/completion generator from SCI + migration report
-  of hardcoded options; zero-rebuild sha256 proof not recorded here.
+- [x] DONE-DIFFERENTLY — C4 help/completion generator + migration report live in
+  `src/app/cli/help_surface_report.spl` over the `CliSurfaceSnapshotV1` registry
+  snapshot (`cli_surface_generated_help_text_v1` :93,
+  `cli_surface_completion_candidates_v1` :143,
+  `cli_surface_migration_report_markdown_v1` :51); spec
+  `test/01_unit/app/cli/help_surface_report_spec.spl` — verified
+  src/app/cli/help_surface_report.spl:93 `cli_surface_generated_help_text_v1`
+  - divergence: planned to generate from SCI option-route records; shipped over
+    the `CliSurfaceSnapshotV1` snapshot (`src/app/cli/help_surface_inventory.spl:35`).
+    Generator + spec exist but are not yet called from the `--help`/completion
+    dispatch path (only caller outside its spec: `src/app/test_audit/aspect_dynload_plan.spl`).
+    Zero-rebuild sha256 proof still not recorded (remaining item 5).
 
 ### Phase D — compiler/loader/interpreter optimization
 - [x] DONE — lazy JIT engine creation `9840ded67e5`; lazy loader services /
@@ -372,9 +389,16 @@ complete; NOT-STARTED = no tree/log evidence. Commit refs are `git log
    first callers landed at `1310d879046` (see Phase D row above).
 3. `test/05_perf/startup/` perf-lane harness + admission discipline
    (dir now seeded; admission reports open — same tracking doc).
-4. Phase B fold-on-full-rebuild bootstrap proof; component-descriptor
-   contract as specced (or plan amendment blessing the dynsmf-path shape).
+4. Phase B fold-on-full-rebuild bootstrap proof (the component-descriptor
+   contract itself now exists — see the Phase B row above).
    Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
-5. Phase C help/completion generation + hardcoded-option migration report.
+5. Phase C zero-rebuild sha256 proof (help/completion generation + migration
+   report now exist — see the Phase C row above).
    Tracked: `doc/08_tracking/todo/startup_perf_open_items_2026-08-18.md`.
 6. Per-phase E re-measure snapshots with a growth-band spec.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/startup_perf_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

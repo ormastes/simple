@@ -3,14 +3,15 @@
 > Status: Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/03_system/feature/scilib/.
 
 **Area:** `std.ndarray`  
-**Target files:** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  
+**Target files (as planned):** `src/lib/nogc_sync_mut/ndarray/` (new dir), `src/lib/nogc_sync_mut/src/tensor.spl` (migration), `src/lib/nogc_sync_mut/src/tensor/` subtree (migration)  
+**Shipped files (2026-09-05, grep-verified):** `src/lib/common/science_math/ndarray.spl` (`DType` :45, `Device` :58), `src/lib/nogc_sync_mut/ndarray/rt_alloc.spl`, `src/lib/nogc_async_mut/linalg/torch_ndarray.spl`; the planned `types.spl`/`ops.spl`/`backend.spl`/`libtorch_backend.spl` and `src/tensor.spl` do not exist.  
 **Namespace:** `use std.ndarray`  
 **Phase:** v1 = NDArray core + migration; v1.1 = I/O + alias removal + fancy/boolean indexing; v2 = pure-Simple backend slot  
 **Architecture lock:** Path B, OQ-A..F resolved. See `doc/05_design/scilib_port_architecture.md`.  
 **Hard gate:** T-PERFSUGAR-01 (`rt_f64_array_alloc`) must be `fixed` before ANY ctor impl begins.  
 **Sibling scopes — DO NOT TOUCH:**  
-- `T-BLAS-*` → `src/lib/common/linalg/ffi_blas.spl`  
-- `T-LAPACK-*` → `src/lib/common/linalg/ffi_lapack.spl`  
+- `T-BLAS-*` → `src/lib/common/science_math/blas.spl` (planned `common/linalg/ffi_blas.spl` never created)  
+- `T-LAPACK-*` → `src/lib/common/science_math/lapack.spl` (planned `common/linalg/ffi_lapack.spl` never created)  
 - `T-CUDA-*` → `src/runtime/scilib/{cublas,openblas,mock}_shim.c`  
 - `T-MATHBLOCK-*` → `src/compiler_rust/compiler/src/codegen/*/math_block*`  
 - `T-DF-*` → `src/lib/nogc_sync_mut/df/`  
@@ -806,10 +807,10 @@ Pure-Simple Backend Slot" contract is satisfied.
 | T-NDARRAY-24 | T-PERFSUGAR-05 | StridedView extern must be fixed |
 
 **Anti-pattern checklist (verify before each task is closed):**
-- [ ] No `nvfortran` dependency added
-- [ ] No DataFrame ops or `Symbol` intern added (df scope)
-- [ ] No acceptance criterion written as "passes `--mode=native`"
-- [ ] No `skip()` in any spec file
+- [x] No `nvfortran` dependency added — verified: `/usr/bin/grep -rn nvfortran src/lib/common/science_math/ src/lib/nogc_sync_mut/linalg/ src/lib/nogc_sync_mut/ndarray/ src/runtime/scilib/` → 0 hits (shipped ndarray = `src/lib/common/science_math/ndarray.spl`)
+- [x] No DataFrame ops or `Symbol` intern added (df scope) — verified: `/usr/bin/grep -c "groupby\|Symbol\|DataFrame" src/lib/common/science_math/ndarray.spl` → 0; df lives separately in `src/lib/nogc_sync_mut/df/mod.spl`
+- [x] No acceptance criterion written as "passes `--mode=native`" — verified: `/usr/bin/grep -rn "mode=native" doc/03_plan/lib/scilib/ports/scilib_port_ndarray.md test/03_system/feature/scilib/ndarray_*_spec.spl` → only negated mentions ("no `--mode=native`", plan :20), 0 positive criteria
+- [x] No `skip()` in any spec file — verified: `/usr/bin/grep -rn "skip()" test/03_system/feature/scilib/ndarray_*_spec.spl` → 0 call sites across 16 files (every hit is a "no skip()" docstring line)
 - [ ] No TODO converted to NOTE
 - [ ] No primitive type (`f64`, `i64`, `f32`, `i32`, `u64`) in any public `fn` signature or exported `struct` field
 - [ ] All specs run under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode
@@ -830,3 +831,9 @@ Pure-Simple Backend Slot" contract is satisfied.
 - M (1d): T-NDARRAY-03, 07, 08, 09, 10, 16, 18, 21, 23, 25, 27 = 11 × 1d = 11d
 - L (2d): T-NDARRAY-04, 05, 14, 15, 17, 24, 26 = 7 × 2d = 14d
 - **Total: ~30 person-days**
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_ndarray_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

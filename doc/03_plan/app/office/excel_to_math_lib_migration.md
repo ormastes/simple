@@ -148,8 +148,9 @@ Replace implementations in `formula.spl` _dispatch_function:
 # Ensure all existing formula tests pass
 bin/simple test test/01_unit/app/office/sheets/formula_*.spl
 
-# Add migration verification tests
-# Create: test/01_unit/app/office/sheets/formula_math_lib_migration_spec.spl
+# Migration verification tests (shipped as the math_bridge_*_spec.spl family, 9 files,
+# not the single formula_math_lib_migration_spec.spl planned here):
+# test/01_unit/app/office/sheets/math_bridge_spec.spl, math_bridge_stats_spec.spl, ...
 ```
 
 ### 2. Add Math Bridge Module
@@ -185,9 +186,11 @@ Replace internal `_sin_f64` calls with `math_bridge::excel_sin` etc.
 
 ### 4. Remove Duplicated Implementations
 Delete unused helper functions:
-- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib)
-- `_ln_f64`, `_exp_f64`, `_sqrt_f64` (now use special.spl)
-- `_PI` constant (now use MATH_PI)
+- `_sin_f64`, `_cos_f64`, `_atan_f64` (now use math lib) — still present in
+  `formula.spl` as of 2026-09-05 (`fn _sin_f64` :3671, `_cos_f64` :3688, `_atan_f64` :3691)
+- `_sqrt_f64` (now use special.spl) — still present (`fn _sqrt_f64` :8593) and still
+  called by the `"SQRT"` case; `_ln_f64` / `_exp_f64` no longer exist (already removed)
+- `_PI` constant (now use MATH_PI) — still present (`val _PI` :3669), used by `"SQRTPI"`
 
 ### 5. Update SPipe Tests
 - Ensure all formula specs pass after migration
@@ -216,6 +219,8 @@ Delete unused helper functions:
 - [ ] Excel functions documented as using stdlib math
 - [ ] Code size reduced by ~500-1000 lines (duplicated implementations)
 - [ ] User-facing guide updated (doc/07_guide/app/office/excel_formulas.md)
+  - status 2026-09-05: that guide file does not exist; the only office guide is
+    `doc/07_guide/app/office/writing_calc_functions.md`, which does not mention `math_bridge`.
 
 ## Timeline Estimate
 
@@ -241,3 +246,11 @@ Delete unused helper functions:
 - Test specs: `test/01_unit/app/office/sheets/formula_*.spl`
 - Statistics functions: `src/lib/common/math/statistics.spl`
 - Financial functions: `src/lib/common/math/financial.spl`
+- Bridge module (shipped): `src/app/office/sheets/math_bridge.spl` (`excel_sin` .. `excel_ceiling`),
+  imported by `formula.spl:19`
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/excel_to_math_lib_migration_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

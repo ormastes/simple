@@ -79,7 +79,35 @@ Runtime externs needed (Rust seed additions → require `scripts/bootstrap/boots
 - [x] W4.3 Error model — `GpuQueue.wait_result() -> Result<i64, text>`, first-failure capture, no aborts
 - [x] W2.6 Vec types — gpu_vec4/vec2_load/store_f32 intrinsics; OpenCL `vload4/vstore4/vload2/vstore2` (float4/float2) + PTX `ld/st.global.v4/v2.f32`; 22/22 (`vec_types_contract_spec.spl`); G11 closed
 - [ ] W2.1 descriptive kernel lowering — pending (compiler frontend; library `parallel_for`+CPU executor cover the productivity gap meanwhile)
-- [ ] W3.4 board flow, G4 shared/managed seed externs, W3.2 frontend decorator wiring — follow-ups
+- [ ] W3.4 board flow and G4 shared/managed seed externs — follow-ups
+      (2026-09-05: no `--board=`/`--gpu-target=vhdl` flag under `src/app/cli`
+      or `src/app/build`; `rt_cuda_malloc_managed`/`rt_cuda_host_alloc` defined
+      nowhere under `src/runtime` or `src/compiler_rust/runtime/src` — only the
+      TODO at `src/lib/nogc_sync_mut/gpu/usm.spl:15-16`; KV260 board evidence
+      stays a board claim, no `scripts/check/*.shs` asserts it)
+- [x] W3.2 frontend decorator wiring — verified parser
+      `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl:25`
+      imports `decl_set_unroll_factor/pipeline_ii/memory_banks`
+      (`_Ast/decl_nodes.spl:1260-1278`), carried on MIR
+      `src/compiler/50.mir/mir_instruction_graph.spl:246 unroll_factor`, consumed
+      by `src/compiler/70.backend/backend/vhdl/vhdl_design_catalog.spl:301`;
+      spec `test/01_unit/compiler/codegen/vhdl_kernel_attrs_contract_spec.spl`
+  - divergence: was bundled with W3.4/G4 in one box; split out because it landed
+    independently
 - Found during W1: `grid` named-arg parser bug (P2) — `doc/08_tracking/bug/grid_identifier_named_arg_parse_failure_2026-06-13.md`; API uses grid_dim/block_dim until fixed
-- [ ] W3.x — pending (headline)
-- [ ] W4.x — pending
+- [ ] W3.x — pending (headline). 2026-09-05: W3.2/W3.3 ticked above; W3.1
+      kernel→VHDL bridge exists only as the entity emitter
+      `src/compiler/70.backend/backend/vhdl/vhdl_kernel_entity.spl` (no other
+      VHDL file references `gpu_thread_id`/`gpu_kernel`); W3.4 open
+- [ ] W4.x — pending. 2026-09-05: W4.1/W4.3 ticked above; W4.2 host path
+      ticked, device timers still open — the runtime extern exists
+      (`src/runtime/runtime_dynload.c:323 rt_cuda_event_elapsed_ms`,
+      `src/compiler_rust/runtime/src/cuda_runtime.rs:236 cuEventElapsedTime`)
+      but `src/lib/nogc_sync_mut/gpu/queue.spl:32-38 GpuEvent.elapsed_nanos`
+      is still wall-clock only (0 references to `rt_cuda_event` in queue.spl)
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/sycl_parity_unified_kernel_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

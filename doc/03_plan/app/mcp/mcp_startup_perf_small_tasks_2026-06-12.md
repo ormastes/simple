@@ -8,41 +8,48 @@ Model levels: **haiku** = mechanical/measurement, **sonnet** = scoped implementa
 
 ## Lane A — Measurement (parallel-safe, read-only + this file)
 
-- [ ] A1 (haiku): run `sh scripts/check/check-mcp-native-smoke.shs`; record elapsed for
-      full MCP and LSP MCP under "Baseline" below.
-- [ ] A2 (sonnet): `bin/simple deps fast|normal|deep src/app/mcp/main.spl` (+
+- [x] A1 (haiku): run `sh scripts/check/check-mcp-native-smoke.shs`; record elapsed for
+      full MCP and LSP MCP under "Baseline" below. — verified doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md:66 `A1 — Smoke timing`
+- [x] A2 (sonnet): `bin/simple deps fast|normal|deep src/app/mcp/main.spl` (+
       `SIMPLE_LOADER_TRACE=1` / `SIMPLE_PROFILE=1` variants); record closure size, top
-      exclusive-cost imports, hub `export use *` offenders.
-- [ ] A3 (sonnet): split timings start→initialize, start→tools/list, start→first
-      tools/call; record which phase dominates.
+      exclusive-cost imports, hub `export use *` offenders. — verified doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md:77 `A2 — Dependency closure`
+- [x] A3 (sonnet): split timings start→initialize, start→tools/list, start→first
+      tools/call; record which phase dominates. — verified doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md:103 `A3 — Phase timing`
 
 ## Lane B — Server (`src/app/mcp/**` only)
 
-- [ ] B1 (sonnet): add `--probe` CLI flag to `main.spl`: prints version, build id, tool
-      count, tool-manifest hash; exits 0. No MCP framing, no handler imports.
-- [ ] B2 (sonnet): make first `tools/list` cheap — cache-once stays, but build the
+- [x] B1 (sonnet): `--probe` CLI flag in `main.spl` prints `simple-mcp probe ok version=<v>
+      tools=<n> tool_set=<auto|core|all>` and exits 0, before any MCP framing or
+      `tools/list` JSON construction. — verified src/app/mcp/main.spl:336 `--probe`
+  - divergence: planned version + build id + tool count + tool-manifest hash; shipped version + tool count + active tool set. The djb2 manifest-hash helper exists (`src/app/mcp/main_static_tools.spl:406`) but is deliberately kept OFF the probe path so the probe does no native hash/count formatting; a build id was never added.
+- [x] B2 (sonnet): make first `tools/list` cheap — cache-once stays, but build the
       response as a single literal/precomputed table instead of repeated string concat
-      via `_mcp_static_tools_result()` schema generation.
+      via `_mcp_static_tools_result()` schema generation. — verified src/app/mcp/main_static_tools.spl:441 `_mcp_static_tools_result` (single descriptor table -> parts array -> one `join`, commented "to avoid O(n^2) string growth") and :455 `_mcp_static_tools_result_cached` (process-lifetime cache)
 - [ ] B3 (opus): cut top-level handler imports from `main.spl` / `main_dispatch.spl`
       startup path; dispatcher table tool_name → handler module, loaded on first
       `tools/call`. Startup path = stdio framing + initialize + manifest only.
-- [ ] B4 (opus, later): `tool_set = core|all` config split (core ~15–25 tools default,
-      full opt-in); optional `tools/list` pagination.
+- [x] B4 (opus, later): `tool_set = auto|core|all` split, selected by the `SIMPLE_MCP_TOOL_SET`
+      env var or the `--tool-set=<set>` argv flag (argv wins); default `auto` serves the
+      19-tool core list on the first `tools/list`, then emits `notifications/tools/list_changed`
+      and serves the full 151-tool list on the second. — verified src/app/mcp/main.spl:151 `_mcp_init_tool_set`, src/app/mcp/main_static_tools.spl:462 `_mcp_core_tool_names`, src/app/mcp/main_static_tools.spl:494 `_mcp_tools_list_json_for_set`
+  - divergence: planned a static `core|all` config with core as the default; shipped a tri-state whose default is `auto` (core first, auto-upgrade to full), so the full surface is opt-OUT rather than opt-in. The optional `tools/list` pagination was not built — no `nextCursor` anywhere under `src/app/mcp/`.
 
 ## Lane C — Wrapper/scripts (`scripts/setup/setup.shs`, wrapper templates only)
 
 - [ ] C1 (sonnet): wrapper probe uses `candidate --probe` when supported (fallback to the
       existing full-handshake grep when `--probe` unsupported) — removes one full server
       boot from cold/stale starts.
-- [ ] C2 (haiku): keep full handshake probe in CI smoke
-      (`scripts/check/check-mcp-native-smoke.shs`) — verify unchanged, no sleeps.
+- [x] C2 (haiku): keep full handshake probe in CI smoke
+      (`scripts/check/check-mcp-native-smoke.shs`) — verify unchanged, no sleeps. — verified scripts/check/check-mcp-native-smoke.shs:100 `mcp_init` (full initialize / notifications/initialized / tools/list / tools/call framing; zero `sleep` in the script)
 - [ ] C3 (haiku): note in docs: never benchmark via
       `test/03_system/tools/mcp/mcp_startup_test_system.shs` (sleep 1 × 3) or via npx.
 
 ## Lane D — Dependency cut (`src/lib/nogc_sync_mut/mcp_sdk/**` only)
 
-- [ ] D1 (sonnet): `bin/simple deps` over mcp_sdk; identify hub modules / `export use *`
-      pulling wide closures into the server boot path.
+- [x] D1 (sonnet): `bin/simple deps` over mcp_sdk; identify hub modules / `export use *`
+      pulling wide closures into the server boot path. Result: no star re-exports exist in
+      `mcp_sdk`; the widest boot-path cluster is `mcp_sdk/server/app.spl` (9 transitive,
+      7 exclusive), recorded under A2 below. — verified src/lib/nogc_sync_mut/mcp_sdk/server/app.spl:14 `use std.mcp_sdk.core.json.{LB, RB, jp, js, jo3, escape_json}` (all six imports symbol-specific)
 - [ ] D2 (sonnet): narrow imports (symbol-specific `use`), split hub modules where a
       single symbol drags hundreds of files; re-measure closure delta.
 
@@ -91,7 +98,7 @@ Hub / `export use *` offenders in closure:
 - `mcp_sdk` `__init__.spl` files use explicit symbol lists only — no star exports. Clean.
 - `src/lib/sffi/cli.spl:3` has a known `export use *` lint warning (pre-existing, unrelated).
 
-`main_dispatch.spl` imports all 10 lazy handler modules at startup (22 transitive files). This is the primary B3 target for lazy loading.
+`main_dispatch.spl` still imports all 11 lazy handler modules plus `main_editor_tools` and `cli_passthrough` at startup (13 top-level `use` lines, `src/app/mcp/main_dispatch.spl:1-13`), and `main.spl:42` imports `main_dispatch` unconditionally — so the whole handler closure remains on the startup path. This is the primary B3 target for lazy loading. A 34-line `src/app/mcp/main_dispatch_core.spl` (`dispatch_tool_core`, 2 core tools) exists as the intended cheap dispatcher but has zero callers anywhere in the tree — the only other reference is a lexical import-shape assertion in `test/01_unit/app/mcp_unit/mcp_argv_query_contract_spec.spl:79`, which does not invoke it.
 
 ### A3 — Phase timing
 
@@ -137,3 +144,9 @@ Implications (no arch/interface change needed):
 ### Summary for Lane B/D
 
 The bottleneck is entirely in start→initialize: ~1460 ms. Cutting handler imports on the startup path (B3) is the highest-leverage change. `mcp_sdk/server/app.spl` has the largest exclusive closure (7 files) and is a candidate for narrower imports (D1/D2). `main_dispatch.spl` importing all lazy modules eagerly is the structural root cause.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/mcp_startup_perf_small_tasks_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

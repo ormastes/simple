@@ -98,15 +98,28 @@ real failed expectation. Silent no-op helpers, `pass_todo`, and
 
 ## Handoff Checklist
 
-- [ ] Phase-3 build produces a standalone Office artifact without a full CLI bootstrap.
+- [x] Phase-3 build produces a standalone Office artifact without a full CLI bootstrap. — verified scripts/check/build-office-standalone-target.shs:5 `never invokes bootstrap` (requires `SIMPLE_TARGET_PHASE3`, :46) building src/app/office_cli/main.spl:25 `fn main`
 - [ ] `office` owns Calc arguments; optional `simple office` only delegates to its cache.
+  - status 2026-09-05: standalone half done (`src/app/office_cli/main.spl:25` routes `calc` to `run_calc_cli`); `simple office calc --tui` still runs `run_calc_session_host` / `run_calc_access_server` in-process (`src/app/office/mod.spl:880-883`), no cached-artifact delegation.
 - [ ] Preferred and compatibility routes use one Calc model.
-- [ ] All 20x30 cells are live semantic targets.
+  - status 2026-09-05: standalone route uses `CalcTuiState` (`calc_tui_host.spl:11 calc_tui_new`); `simple office` route uses `calc_session_host.spl`, which does not reference `calc_tui` — still two models.
+- [x] All 20x30 cells are live semantic targets. — verified src/app/office/sheets/sheets_app.spl:41 `visible_rows: 30` / :42 `visible_cols: 20`; src/app/office/sheets/access_controller.spl:700 `calc_cell_view_items` (full visible grid); gate asserts `main#cell_T30` at scripts/check/check-office-cli-tui-ui-access.spl:516-520
 - [ ] Formula multiplication and AVG pass through deployed UI actions.
 - [ ] Independent post-state and correlated history pass live.
 - [ ] Current actual PTY ANSI/text/protocol evidence is retained.
 - [ ] N1 startup/query/action/RSS/history bounds pass on `OFFICE_BINARY`.
 - [ ] Production closure excludes compiler, unified CLI, SGTTI, and raw-source fallback.
-- [ ] Focused SSpec invokes the gate before docgen.
+- [x] Focused SSpec invokes the gate before docgen. — verified test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:196 `setup_office_cli_tui_ui_access` (`process_run(gate_binary, ["--scenario", "all", "--run-id", run_id])`, fails closed on missing `OFFICE_GATE_BINARY`) and :234 `check_office_gate`
 - [ ] Generated manual reports `0 stubs` and requirement-specific evidence.
 - [ ] UI evidence uses the canonical manual path.
+
+Gate script (pure Simple, not `.shs`): `scripts/check/check-office-cli-tui-ui-access.spl`
+(`OFFICE_BINARY` :56, RSS bound :31/:274, startup bound :339, history correlation :424-480,
+PTY capture `tui/calc-after.ansi` :228). The runtime-outcome boxes above ("pass live",
+"pass on `OFFICE_BINARY`", evidence retained) stay open until a gate run is recorded.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/office_cli_tui_ui_access_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

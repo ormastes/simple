@@ -82,3 +82,9 @@ acceptance substitute.
 Commands to resume, subject to the staged runtime's supported-command
 inventory, are recorded in
 `doc/03_plan/sys_test/parent_authoritative_actor_process.md`.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/parent_authoritative_actor_process_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

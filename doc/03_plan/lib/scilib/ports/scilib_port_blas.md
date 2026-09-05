@@ -1,8 +1,9 @@
 # scilib-port BLAS — `std.linalg` BLAS-Level Bindings
 
 **Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/03_system/feature/scilib/.  
+**Shipped files (2026-09-05, grep-verified):** `src/lib/common/science_math/blas.spl` (`BlasHandle` :46, `blas_*_f64` :201-237), `blas_provider.spl`, `blas_level1_spec.spl`, `fortran_abi.spl`; `src/lib/nogc_sync_mut/linalg/{blas_cpu,blas_openblas,cuda_blas,fortran_wrapper}.spl`; `src/runtime/scilib/{mock,openblas,cublas}_shim.c`; specs `test/03_system/feature/scilib/blas_{axpy,gemm}_spec.spl`, `linalg_norm_spec.spl`. Per-task `**Files:**` entries below were directory-corrected from `common/linalg/` to `common/science_math/` on 2026-09-05; the basenames `mod.spl`, `types.spl`, `ffi_blas.spl`, `axpy_spec.spl`, `gemv_spec.spl` they name were never created.  
 **Area:** blas  
-**Output path:** `src/lib/common/linalg/`  
+**Output path:** `src/lib/common/science_math/`  
 **Import:** `use std.linalg`  
 **Date:** 2026-04-27
 
@@ -69,7 +70,7 @@ This file covers the **BLAS-level public API** for `std.linalg`:
 **Effort:** ≤ 1 day  
 **Depends on:** T-NDARRAY-03 (Index, DType)  
 **Blocks:** T-BLAS-02 through T-BLAS-16  
-**Files:** `src/lib/common/linalg/types.spl`
+**Files:** `src/lib/common/science_math/types.spl`
 
 Define in `types.spl` (no primitives in public signatures):
 
@@ -94,7 +95,7 @@ Define in `types.spl` (no primitives in public signatures):
 **Effort:** ≤ 1 day  
 **Depends on:** T-BLAS-01, T-NDARRAY-03  
 **Blocks:** T-BLAS-03, T-BLAS-05, T-BLAS-07, T-BLAS-09, T-BLAS-11  
-**Files:** `src/lib/common/linalg/ffi_blas.spl`
+**Files:** `src/lib/common/science_math/ffi_blas.spl`
 
 Declare all Layer A `extern fn` signatures. Layer A is **primitive-only** (i64/f64): this is the correct layer for raw types. All names use `rt_blas_` prefix matching the symbol naming convention from architecture §6.
 
@@ -134,7 +135,7 @@ extern fn rt_blas_dgemm(handle: i64, transa: i64, transb: i64, m: i64, n: i64, k
 **Effort:** ≤ 1 day  
 **Depends on:** T-BLAS-02, T-NDARRAY-03, T-NDARRAY-06  
 **Blocks:** T-BLAS-04 (Layer C axpy)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 Implement `blas_axpy_f64` in `blas.spl` (internal, not exported from `mod.spl`):
 
@@ -159,7 +160,7 @@ Implement `blas_axpy_f64` in `blas.spl` (internal, not exported from `mod.spl`):
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-03  
 **Blocks:** T-BLAS-17 (axpy spec)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export from `mod.spl`:
 
@@ -180,7 +181,7 @@ Acquires the module-level `BlasHandle` singleton, delegates to `blas_axpy_f64`. 
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-02, T-NDARRAY-03, T-NDARRAY-06  
 **Blocks:** T-BLAS-06 (Layer C scal)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 Implement `blas_scal_f64(handle, alpha: Float64, x: Vector<Float64>) -> Result<Vector<Float64>, LinalgError>`.
 
@@ -197,7 +198,7 @@ Implement `blas_scal_f64(handle, alpha: Float64, x: Vector<Float64>) -> Result<V
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-05  
 **Blocks:** T-BLAS-17 (scal spec)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export:
 ```
@@ -213,7 +214,7 @@ DType guard for non-F64. Document: `scal` mutates `x` in-place.
 **Effort:** ≤ 1 day  
 **Depends on:** T-BLAS-02, T-NDARRAY-03, T-NDARRAY-06  
 **Blocks:** T-BLAS-08 (Layer C dot)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 Implement `blas_dot_f64(handle, x: Vector<Float64>, y: Vector<Float64>) -> Result<Float64, LinalgError>`.
 
@@ -235,7 +236,7 @@ Implement `blas_dot_f64(handle, x: Vector<Float64>, y: Vector<Float64>) -> Resul
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-07  
 **Blocks:** T-BLAS-17 (dot spec)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export:
 ```
@@ -251,7 +252,7 @@ Return type is `Float64` (no-primitive rule; the wrapper is zero-cost once PERF-
 **Effort:** ≤ 1.5 days  
 **Depends on:** T-BLAS-01 (NormOrd), T-BLAS-02, T-NDARRAY-03, T-NDARRAY-06  
 **Blocks:** T-BLAS-10 (Layer C norm)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 `norm` dispatches to **three different cuBLAS kernels** — this is not a single function. Each is a separate internal sub-function:
 
@@ -282,7 +283,7 @@ Public-facing `blas_norm_f64(handle, x, ord: NormOrd)` matches and delegates to 
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-09  
 **Blocks:** T-BLAS-17 (norm spec)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export:
 ```
@@ -298,7 +299,7 @@ fn norm(x: NDArray<Float64>, ord: NormOrd) -> Result<Float64, LinalgError>
 **Effort:** ≤ 1.5 days  
 **Depends on:** T-BLAS-02, T-NDARRAY-03, T-NDARRAY-05, T-NDARRAY-06  
 **Blocks:** T-BLAS-12 (Layer C gemv)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 Implement `blas_dgemv_f64(handle, alpha: Float64, a: Matrix<Float64>, x: Vector<Float64>, beta: Float64, y: Vector<Float64>) -> Result<Vector<Float64>, LinalgError>`.
 
@@ -328,7 +329,7 @@ Dimension checks:
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-11  
 **Blocks:** T-BLAS-18 (gemv spec)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export (matches architecture §5):
 ```
@@ -344,7 +345,7 @@ No primitives. DType guard for F64.
 **Effort:** ≤ 2 days  
 **Depends on:** T-BLAS-02, T-NDARRAY-03, T-NDARRAY-05, T-NDARRAY-08  
 **Blocks:** T-BLAS-14 (Layer C gemm)  
-**Files:** `src/lib/common/linalg/blas.spl`
+**Files:** `src/lib/common/science_math/blas.spl`
 
 Implement `blas_dgemm_f64(handle, alpha: Float64, a: Matrix<Float64>, b: Matrix<Float64>, beta: Float64, c: Matrix<Float64>) -> Result<Matrix<Float64>, LinalgError>`.
 
@@ -376,7 +377,7 @@ Dimension checks:
 **Effort:** ≤ 0.5 day  
 **Depends on:** T-BLAS-13  
 **Blocks:** T-BLAS-18 (gemm spec), math_block area (consumes this)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 Export (matches architecture §5):
 ```
@@ -425,7 +426,7 @@ All pointer args are `intptr_t` (cast from `i64`). The mock reads/writes host me
 **Effort:** ≤ 1 day  
 **Depends on:** T-BLAS-04, T-BLAS-06, T-BLAS-08, T-BLAS-10, T-BLAS-12, T-BLAS-14  
 **Blocks:** none (quality task)  
-**Files:** `src/lib/common/linalg/mod.spl`
+**Files:** `src/lib/common/science_math/mod.spl`
 
 In interpreter mode, generic `<T>` dispatch is erased/boxed (PERF-SUGAR-003, status: `anticipated`, P0). Until the compiler delivers monomorphization, generic facades calling into typed specializations would degrade interp performance. v1 strategy: all public functions are **non-generic** and typed as `Float64` at Layer C. Generic `<T>` variants are added in v1.1 once PERF-SUGAR-003 is `observed` with a concrete mitigation plan.
 
@@ -447,7 +448,7 @@ This task:
 **Effort:** ≤ 2 days  
 **Depends on:** T-BLAS-04, T-BLAS-06, T-BLAS-08, T-BLAS-10, T-BLAS-15  
 **Blocks:** T-BLAS-19 (spec sweep)  
-**Files:** `src/lib/common/linalg/axpy_spec.spl`, `scal_spec.spl`, `dot_spec.spl`, `norm_spec.spl`
+**Files:** `src/lib/common/science_math/axpy_spec.spl`, `scal_spec.spl`, `dot_spec.spl`, `norm_spec.spl`
 
 Each spec file runs under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode. No `skip()`. No `--mode=native`.
 
@@ -486,7 +487,7 @@ Each spec file runs under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode. No `sk
 **Effort:** ≤ 2 days  
 **Depends on:** T-BLAS-12, T-BLAS-14, T-BLAS-15  
 **Blocks:** T-BLAS-19 (spec sweep)  
-**Files:** `src/lib/common/linalg/gemv_spec.spl`, `gemm_spec.spl`
+**Files:** `src/lib/common/science_math/gemv_spec.spl`, `gemm_spec.spl`
 
 `gemv_spec.spl`:
 - Happy path: 2×2 matrix, 2-vector input:
@@ -524,19 +525,22 @@ Each spec file runs under `SIMPLE_BLAS_BACKEND=mock` in interpreter mode. No `sk
 
 Run:
 ```
-bin/simple build lint src/lib/common/linalg/
-bin/simple test src/lib/common/linalg/ SIMPLE_BLAS_BACKEND=mock
+bin/simple build lint src/lib/common/science_math/
+bin/simple test src/lib/common/science_math/ SIMPLE_BLAS_BACKEND=mock
 ```
 
 Audit checklist:
-- [ ] Zero `skip()` in any spec.
+- [x] Zero `skip()` in any spec — verified: `/usr/bin/grep -rn "skip()" src/lib/common/science_math/blas_level1_spec.spl test/03_system/feature/scilib/blas_*_spec.spl` → 0 call sites (only "no skip()" docstrings, e.g. src/lib/common/science_math/blas_level1_spec.spl:5)
 - [ ] Zero TODO→NOTE conversions.
 - [ ] Zero primitive type (`f64`, `i64`, `i32`, `bool`) in any Layer C public signature.
-- [ ] Zero Fortran mangled names (`dgemm_`, `daxpy_`, etc.) anywhere in `ffi_blas.spl`.
+- [x] Zero Fortran mangled names (`dgemm_`, `daxpy_`, etc.) in the shipped Layer A files (`src/lib/nogc_sync_mut/linalg/blas_openblas.spl`, `cuda_blas.spl`, `fortran_wrapper.spl`) — verified: `/usr/bin/grep -rn "dgemm_\|daxpy_\|dgesv_" src/lib/common/science_math/ src/lib/nogc_sync_mut/linalg/` → only two negative doc-comment mentions (src/lib/common/science_math/fortran_abi.spl:16, src/lib/nogc_sync_mut/linalg/fortran_wrapper.spl:20 "NOT dgemm_"); call sites use `rt_blas_*` (src/lib/nogc_sync_mut/linalg/cuda_blas.spl:28 `_scilib_call0("rt_blas_handle_create")`)
+  - divergence: planned a static `ffi_blas.spl` extern layer; shipped as dynamic `_scilib_call*` lookups of `rt_blas_*` symbols in `cuda_blas.spl` (no `extern fn` declarations, `/usr/bin/grep -rn "extern.*rt_blas_" src/lib` → 0)
 - [ ] Every Layer A `extern fn` has a cuBLAS C API symbol citation comment.
-- [ ] PERF-SUGAR-003 workaround comment in `mod.spl`.
-- [ ] Thread-safety policy comment in `types.spl`.
-- [ ] gemv vs gemm operand-swap distinction comment in `blas.spl`.
+- [x] PERF-SUGAR-003 workaround comment in `blas.spl` (no `mod.spl` exists) — verified src/lib/common/science_math/blas.spl:15 `# PERF-SUGAR-003: generic <T> variants deferred to v1.1`, :195; src/lib/common/science_math/blas_provider.spl:38
+  - divergence: planned file `mod.spl`; shipped flat `src/lib/common/science_math/blas.spl`
+- [x] Thread-safety policy comment in `blas.spl` (no `types.spl` exists) — verified src/lib/common/science_math/blas.spl:12 `# THREAD-SAFETY: one handle per process in v1; actor boundary crossing forbidden.` (also src/lib/nogc_sync_mut/linalg/blas_openblas.spl:23, blas_cpu.spl:10)
+  - divergence: planned file `types.spl`; shipped in `blas.spl` next to `pub class BlasHandle` (:46)
+- [x] gemv vs gemm operand-swap distinction comment in `blas.spl` — verified src/lib/common/science_math/blas.spl:143 `# gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.`, :166 `# Operand-swap (AB)^T = B^T A^T is applied at Layer A when calling cuBLAS.`
 - [ ] `idamax` 1-based → 0-based correction comment in `blas.spl`.
 
 Promote perf-sugar entries:
@@ -545,7 +549,7 @@ Promote perf-sugar entries:
 
 **Acceptance criteria:**
 - All checklist items green.
-- `bin/simple test src/lib/common/linalg/` exits 0 with `SIMPLE_BLAS_BACKEND=mock`.
+- `bin/simple test src/lib/common/science_math/` exits 0 with `SIMPLE_BLAS_BACKEND=mock`.
 - PERF-SUGAR-003 and PERF-SUGAR-011 status updated in `scilib_perf_sugar.md`.
 
 ---
@@ -587,12 +591,21 @@ Parallel-safe with `lapack` area: `ffi_blas.spl` vs `ffi_lapack.spl` are disjoin
 
 ## v1 Acceptance Gate Checklist (contributes to arch §12 v1→v1.1)
 
-- [ ] `bin/simple test src/lib/common/linalg/` passes; zero `skip()` with `SIMPLE_BLAS_BACKEND=mock`.
-- [ ] `linalg.axpy`, `linalg.scal`, `linalg.dot`, `linalg.norm`, `linalg.gemv`, `linalg.gemm` Layer C APIs public in `mod.spl`.
+- [ ] `bin/simple test src/lib/common/science_math/` passes; zero `skip()` with `SIMPLE_BLAS_BACKEND=mock`.
+- [x] Layer C APIs public as `blas_axpy_f64`, `blas_scal_f64`, `blas_dot_f64`, `blas_nrm2_f64`, `blas_gemv_f64`, `blas_gemm_f64` in `src/lib/common/science_math/blas.spl` — verified src/lib/common/science_math/blas.spl:201 `pub fn blas_axpy_f64`, :207 `blas_scal_f64`, :211 `blas_dot_f64`, :217 `blas_nrm2_f64`, :225 `blas_gemv_f64`, :229 `blas_gemm_f64`
+  - divergence: planned `linalg.axpy`/`scal`/`dot`/`norm`/`gemv`/`gemm` in a `mod.spl`; shipped as `blas_*_f64` free functions on `[f64]` buffers (no `mod.spl`, `norm` is `nrm2`)
 - [ ] Zero primitive type in any public Layer C signature (audited in T-BLAS-19).
-- [ ] Zero Fortran mangled names in `ffi_blas.spl` (audited in T-BLAS-19).
-- [ ] Mock shim behavioral contract (T-BLAS-15) delivered to cuda_fortran area (T-CUDA-01).
-- [ ] PERF-SUGAR-003 workaround documented; status updated to `observed`.
-- [ ] `BlasHandle` thread-safety policy documented in `types.spl`.
-- [ ] gemv vs gemm operand-swap distinction documented in `blas.spl`.
+- [x] Zero Fortran mangled names in the shipped Layer A files (audited in T-BLAS-19) — same evidence as the audit-checklist item above: `/usr/bin/grep -rn "dgemm_\|daxpy_\|dgesv_" src/lib/common/science_math/ src/lib/nogc_sync_mut/linalg/` → only negative doc mentions (fortran_abi.spl:16, fortran_wrapper.spl:20)
+  - divergence: no `ffi_blas.spl` exists; Layer A = `src/lib/nogc_sync_mut/linalg/cuda_blas.spl` dynamic `_scilib_call*` of `rt_blas_*`
+- [x] Mock shim behavioral contract (T-BLAS-15) delivered to cuda_fortran area (T-CUDA-01) — verified src/runtime/scilib/mock_shim.c:243 `int64_t rt_blas_idamax(...)` (7 `rt_blas_*` + 7 `rt_lapack_*` + 4 `rt_cuda_*` definitions), header src/runtime/scilib/scilib_shim.h:23; Simple-side mock provider src/lib/common/science_math/blas.spl:63-66 "T-BLAS-15: mock shim symbol stubs with CORRECT small-N values"
+- [x] PERF-SUGAR-003 workaround documented; status updated to `observed` — verified src/lib/common/science_math/blas.spl:15 workaround comment; doc/08_tracking/feature/scilib_perf_sugar.md:105 `Status: fixed 2026-05-30` (supersedes `observed`)
+- [x] `BlasHandle` thread-safety policy documented in `blas.spl` (no `types.spl` exists) — verified src/lib/common/science_math/blas.spl:12 `# THREAD-SAFETY: one handle per process in v1`, :46 `pub class BlasHandle`
+  - divergence: planned `types.spl`; shipped in `blas.spl`
+- [x] gemv vs gemm operand-swap distinction documented in `blas.spl` — verified src/lib/common/science_math/blas.spl:143, :166
 - [ ] `idamax` 1-based off-by-one conversion documented and covered by a norm-Inf test with non-zero max index.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_blas_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

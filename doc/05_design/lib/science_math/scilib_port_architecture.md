@@ -141,7 +141,26 @@ Unsupported dtype + operation combinations return `Result.Err(UnsupportedDType)`
 
 ## 5. `std.linalg` Public API
 
-Physical location: `src/lib/common/linalg/` (renamed from `common/linear_algebra/`).  
+> **As-built refresh (2026-09-05, verified by `/usr/bin/grep`/`ls`).** The
+> layout below was the plan; what shipped is a flat one-file-per-area package
+> at `src/lib/common/science_math/` (`blas.spl`, `blas_provider.spl`,
+> `cuda_provider.spl`, `fortran_abi.spl`, `lapack.spl`, `lapack_provider.spl`,
+> `linalg.spl`, `math_block.spl`, `math_block_ops.spl`, `ndarray.spl`,
+> `ml_linear.spl`, `ml_metrics.spl`, `numerical.spl`, `statistics.spl`).
+> `src/lib/common/linalg/` does not exist, and no `mod.spl`/`types.spl`/
+> `ffi_blas.spl`/`ffi_lapack.spl` was ever created. Layer A (§6) is not a set
+> of static `extern fn` declarations: symbols are resolved dynamically through
+> `_scilib_call*` helpers in `src/lib/nogc_sync_mut/linalg/{cuda_blas,
+> fortran_wrapper,lapack_lapacke}.spl`; Layer C is the `pub fn blas_*_f64`
+> free functions in `science_math/blas.spl:201-229`, not `linalg.gemm(...)`.
+> `Workspace` in `science_math/lapack.spl` is non-generic and `pub`. The
+> `math{}` slice AST (§7) shipped as per-dimension
+> `MathExpr::Slice { start, end }` under `Subscript`
+> (`src/compiler_rust/compiler/src/blocks/math/ast.rs:53-54`), not
+> `Slice { base, ranges: [SliceRange] }`. The port plans under
+> `doc/03_plan/lib/scilib/ports/` carry the per-box status against this layout.
+
+Physical location (planned): `src/lib/common/linalg/` (renamed from `common/linear_algebra/`).  
 Import: `use std.linalg`.  
 Tier: `common/` — pure math, no async, no GC.
 

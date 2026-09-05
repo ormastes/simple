@@ -16,9 +16,27 @@
 
 ---
 
+## Status 2026-09-05 (code as it is today)
+
+- `src/app/office/sheets/math_bridge.spl` exists (`excel_sin` .. `excel_ceiling`, ~40 wrappers)
+  and `formula.spl:19-24` imports it.
+- Phase 2 routing: 13 of 15 cases call the bridge (SIN :4252, COS :4256, TAN :4260,
+  ATAN :4267, ASIN :4271, ACOS :4275, SINH :4279, COSH :4283, TANH :4287, LOG :4294/4297,
+  EXP :4359, LN :4363, LOG10 :4367). **SQRT** (:6288, still `_sqrt_f64`) and **SQRTPI**
+  (:4355, still `sqrt_f64(x * _PI)`) are NOT migrated.
+- Phase 3 routing: 0 of 7 — SUM/AVERAGE/COUNT/MIN/MAX/PRODUCT (:4236-4247) call the
+  formula-local `eval_sum`/`eval_average`/`eval_count`/`eval_min`/`eval_max`/`eval_product`
+  (:8482-8519); SUMSQ (:4377) is an inline loop. `excel_sum`/`excel_average` etc. exist in
+  the bridge but are unused by `formula.spl`.
+- Dispatch line numbers in the tables below are stale (measured when SIN was at 4503; it is
+  at 4252 now). `formula.spl` is 9606 lines. `src/lib/nogc_async_mut/math/` (step 0.3)
+  does not exist. The `/tmp/` research artifacts listed next are gone.
+- Tests: `test/01_unit/app/office/sheets/math_bridge_*_spec.spl` (9 files) plus
+  `formula_trig_spec.spl`, `formula_math_spec.spl`.
+
 ## Research Artifacts
 
-All research outputs available in `/tmp/`:
+All research outputs were written to `/tmp/` (no longer present on disk):
 
 | Artifact | Size | Content |
 |----------|------|---------|
@@ -330,3 +348,9 @@ bin/simple test test/01_unit/app/office/sheets/formula_*.spl > baseline.log
 3. **Create feature branch** (per jj rules, work on main directly)
 4. **Begin Phase 0** (foundation)
 5. **Track progress** with `/loop` or manual checkpoints
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/excel_to_math_synthesis_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

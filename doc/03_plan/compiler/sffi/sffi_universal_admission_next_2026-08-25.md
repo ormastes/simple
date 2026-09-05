@@ -798,3 +798,9 @@ runtime arity defect.  Do not promote this checkpoint to whole-runtime PASS.
 - [ ] Replace legacy mmap/hash non-null text and raw integer mapping handles
   with typed nullable/status/owned-resource contracts; register each contract
   in every execution lane and require signed provider admission.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/sffi_universal_admission_next_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

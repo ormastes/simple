@@ -5,6 +5,7 @@
 **Owner:** scilib-lapack agent  
 **Date:** 2026-04-27  
 **Status:** Implemented — committed a7e0cd9c2b (2026-05-18). Source in src/lib/common/science_math/ + src/lib/nogc_sync_mut/linalg/. Test specs in test/03_system/feature/scilib/.
+**Shipped files (2026-09-05, grep-verified):** `src/lib/common/science_math/lapack.spl` (types :38-102, `MockLapackProvider` :153), `lapack_provider.spl`, `src/lib/nogc_sync_mut/linalg/lapack_cpu.spl` (`gesv` :51, `getrf` :125, `inv` :171, `det` :198), `lapack_lapacke.spl`; specs `test/03_system/feature/scilib/lapack_{gesv,inv,det}_spec.spl`. Per-task `**Files:**` entries below were directory-corrected from `common/linalg/` to `common/science_math/` on 2026-09-05; the basenames `types.spl`, `mod.spl`, `ffi_lapack.spl`, `*_spec.spl` they name were never created — the flat `lapack.spl` holds all of it.
 
 ---
 
@@ -96,7 +97,7 @@ Interp-mode AC-7 compliance via mock backend (OQ-D).
 ### T-LAPACK-01 — Define `LinalgError` enum and `LapackInfo` typed decoder
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/types.spl`  
+**Files:** `src/lib/common/science_math/types.spl`  
 **Deps:** T-NDARRAY-01 (`Index` wrapper available)
 
 Define `LinalgError` and `LapackInfo` as typed enums. No `i64` INFO integer ever reaches Layer C.
@@ -123,7 +124,7 @@ AC: `LinalgError` has no `i64`/primitive fields in any public variant. `LapackIn
 ### T-LAPACK-02 — Define `Pivot` typed wrapper (hides 1-based indexing + device/host residency)
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/types.spl`  
+**Files:** `src/lib/common/science_math/types.spl`  
 **Deps:** T-LAPACK-01, T-NDARRAY-01 (`Index`, `Device`)
 
 `Pivot` wraps the IPIV permutation array returned by `getrf`/`gesv`. Fortran/cuSOLVER use 1-based indices; LAPACKE uses the same 1-based convention. The wrapper must:
@@ -149,7 +150,7 @@ AC: No `[i64]`, `[i32]`, or raw integer arrays appear in any Layer C signature. 
 ### T-LAPACK-03 — Define `Workspace<T>` typed wrapper (bufferSize query lifecycle)
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/types.spl`  
+**Files:** `src/lib/common/science_math/types.spl`  
 **Deps:** T-PERFSUGAR-01 (typed buffer ctor), T-NDARRAY-01 (`Index`, `Device`)
 
 cuSOLVER requires an explicit two-call pattern: first query the required workspace size (`*_bufferSize`), then allocate and pass the buffer to the compute call. LAPACKE auto-allocates internally (pass `lwork = -1` to query or use `LAPACK_WORK_MEMORY_ERROR`). `Workspace<T>` unifies both:
@@ -172,7 +173,7 @@ AC: Layer C functions have no `lwork` parameter. Workspace is allocated in Layer
 ### T-LAPACK-04 — Layer A: cuSOLVER handle init + all `rt_lapack_*` extern decls
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/ffi_lapack.spl`  
+**Files:** `src/lib/common/science_math/ffi_lapack.spl`  
 **Deps:** T-BLAS-01 (BlasHandle structure reference), T-LAPACK-01..03
 
 Declare all Layer A `extern fn` bindings. Each LAPACK kernel has two externs: a `_buffersize` query and a compute call.  All pointer arguments are `i64` (opaque pointer-as-integer). All dimension arguments are `i64` (64-bit, matching cuSOLVER `_64` API where available).
@@ -275,7 +276,7 @@ AC: All `rt_lapack_*` symbols present in mock shim. `SIMPLE_BLAS_BACKEND=mock` c
 ### T-LAPACK-06 — Layer B: `getrf` wrapper (LU factorization)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-02 (Pivot), T-LAPACK-03 (Workspace), T-LAPACK-04 (externs), T-LAPACK-05 (mock)
 
 Layer B internal function (not exported at Layer C):
@@ -301,7 +302,7 @@ AC: `Pivot._data` is 1-based raw from the extern; `Pivot.at()` corrects to 0-bas
 ### T-LAPACK-07 — Layer B: `gesv` wrapper (linear solve AX=B, hides Pivot)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-06 (getrf internally reusable), T-LAPACK-04 (rt_lapack_dgesv)
 
 Layer B internal function:
@@ -331,7 +332,7 @@ AC: `Pivot` never returned to caller. `lwork` never visible at Layer C. Dimensio
 ### T-LAPACK-08 — Layer B: `getri` wrapper (matrix inverse from LU)
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-06 (getrf to get LU + Pivot before calling getri)
 
 Layer B internal function:
@@ -358,7 +359,7 @@ AC: `Pivot._data` accessed only inside this Layer B function. No pivot indexing 
 ### T-LAPACK-09 — Layer B: `geqrf` wrapper (QR factorization)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-04 (geqrf + orgqr externs), T-LAPACK-03 (Workspace)
 
 Layer B internal function:
@@ -385,7 +386,7 @@ AC: tau buffer is `Vector<Float64>` at Layer C (no raw `[f64]`). Workspace dropp
 ### T-LAPACK-10 — Layer B: `syevd` wrapper (symmetric eigenvalue decomposition)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-04 (syevd externs), T-LAPACK-03 (Workspace)
 
 Layer B internal function:
@@ -415,7 +416,7 @@ AC: `LinalgError.NotConverged` raised when info > 0 (convergence failure). `uplo
 ### T-LAPACK-11 — Layer B: `gesvd` wrapper (SVD)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/lapack.spl`  
+**Files:** `src/lib/common/science_math/lapack.spl`  
 **Deps:** T-LAPACK-04 (gesvd externs), T-LAPACK-03 (Workspace)
 
 Layer B internal function:
@@ -445,7 +446,7 @@ AC: Singular values in `s` are non-negative (LAPACK guarantees). If spec asserts
 ### T-LAPACK-12 — Layer C: public API for `gesv`, `getrf`, `inv`, `solve`
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/mod.spl`  
+**Files:** `src/lib/common/science_math/mod.spl`  
 **Deps:** T-LAPACK-07 (gesv Layer B), T-LAPACK-08 (getri Layer B), T-LAPACK-06 (getrf Layer B)
 
 Public Layer C functions (no primitives anywhere):
@@ -475,7 +476,7 @@ AC: All four functions are primitive-free. `LinalgError` is the only error type.
 ### T-LAPACK-13 — Layer C: public API for `geqrf`
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/mod.spl`  
+**Files:** `src/lib/common/science_math/mod.spl`  
 **Deps:** T-LAPACK-09 (geqrf Layer B)
 
 ```
@@ -492,7 +493,7 @@ AC: No `lwork`, no `i64` tau buffer. `tau` is `Vector<Float64>`.
 ### T-LAPACK-14 — Layer C: public API for `syevd` and `gesvd`
 
 **Effort:** ≤ 1 day  
-**Files:** `src/lib/common/linalg/mod.spl`  
+**Files:** `src/lib/common/science_math/mod.spl`  
 **Deps:** T-LAPACK-10 (syevd Layer B), T-LAPACK-11 (gesvd Layer B)
 
 ```
@@ -512,7 +513,7 @@ AC: Both functions primitive-free. `LinalgError.NotConverged` is the only failur
 ### T-LAPACK-15 — Specs: `gesv` and `solve` (interpreter mode, mock backend)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/gesv_spec.spl`, `src/lib/common/linalg/solve_spec.spl`  
+**Files:** `src/lib/common/science_math/gesv_spec.spl`, `src/lib/common/science_math/solve_spec.spl`  
 **Deps:** T-LAPACK-12 (Layer C available), T-LAPACK-05 (mock green)  
 **Test mode:** `bin/simple test` (interpreter mode); `SIMPLE_BLAS_BACKEND=mock`
 
@@ -535,7 +536,7 @@ AC: All spec cases pass under `bin/simple test` with `SIMPLE_BLAS_BACKEND=mock`.
 ### T-LAPACK-16 — Specs: `getrf` and `inv` (interpreter mode, mock backend)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/getrf_spec.spl`, `src/lib/common/linalg/inv_spec.spl`  
+**Files:** `src/lib/common/science_math/getrf_spec.spl`, `src/lib/common/science_math/inv_spec.spl`  
 **Deps:** T-LAPACK-12 (Layer C), T-LAPACK-05 (mock)
 
 Spec cases for `getrf`:
@@ -555,7 +556,7 @@ AC: `Pivot.at()` returns `Index` not `i64`. `inv` dim-check fires without FFI ca
 ### T-LAPACK-17 — Specs: `geqrf`, `syevd`, `gesvd` with mock invariant assertions
 
 **Effort:** ≤ 2 days  
-**Files:** `src/lib/common/linalg/geqrf_spec.spl`, `src/lib/common/linalg/syevd_spec.spl`, `src/lib/common/linalg/gesvd_spec.spl`  
+**Files:** `src/lib/common/science_math/geqrf_spec.spl`, `src/lib/common/science_math/syevd_spec.spl`, `src/lib/common/science_math/gesvd_spec.spl`  
 **Deps:** T-LAPACK-13, T-LAPACK-14 (Layer C), T-LAPACK-05 (mock)
 
 **geqrf specs:**
@@ -599,7 +600,7 @@ AC: `SIMPLE_BLAS_BACKEND=openblas` runs all v1 spec cases (identity systems, piv
 ### T-LAPACK-19 — cuSOLVER backend integration (real GPU path, #[gpu_only] specs)
 
 **Effort:** ≤ 2 days  
-**Files:** `src/runtime/scilib/cublas_shim.c` (coordinate with T-CUDA-NN), `src/lib/common/linalg/gesv_gpu_spec.spl`  
+**Files:** `src/runtime/scilib/cublas_shim.c` (coordinate with T-CUDA-NN), `src/lib/common/science_math/gesv_gpu_spec.spl`  
 **Deps:** T-LAPACK-18 (openblas path green first), T-CUDA-NN (cuSOLVER shim crate)
 
 Add cuSOLVER implementations for `rt_lapack_dgesv`, `rt_lapack_dgetrf`, `rt_lapack_dgetri`, `rt_lapack_dgeqrf`, `rt_lapack_dsyevd`, `rt_lapack_dgesvd` inside `libspl_cublas.so`.
@@ -623,7 +624,8 @@ AC: `SIMPLE_BLAS_BACKEND=cublas` passes GPU specs. `bin/simple test` never runs 
 
 - [ ] All `rt_lapack_*` externs declared in `ffi_lapack.spl` (Layer A); no primitive-typed params at Layer B/C boundary
 - [ ] `LinalgError`, `LapackInfo`, `Pivot`, `Workspace<T>` defined; `LapackInfo` and `Workspace<T>` not exported from `mod.spl`
-- [ ] `Pivot.at()` returns 0-based `Index`; `Pivot._data` (1-based raw) never exposed
+  - note (2026-09-05): all four are defined — src/lib/common/science_math/lapack.spl:38 `pub enum LinalgError`, :56 `pub class LapackInfo`, :79 `pub class Pivot`, :102 `pub class Workspace` (non-generic) — but there is no `mod.spl`/re-export layer and `LapackInfo`/`Workspace` are `pub`, so the hiding half of this box is not met.
+- [x] `Pivot.at()` returns 0-based `Index`; `Pivot._data` (1-based raw) never exposed — verified src/lib/common/science_math/lapack.spl:87-90 `fn at(self, i: Index) -> Index` (`Index.new(raw - 1)`, comment "Convert from 1-based Fortran to 0-based Simple")
 - [ ] `Workspace<T>` allocated after bufferSize query; dropped after compute call; never visible at Layer C
 - [ ] Seven Layer C functions (`gesv`, `getrf`, `geqrf`, `syevd`, `gesvd`, `inv`, `solve`) in `mod.spl` with zero primitive types in signatures
 - [ ] All specs (T-LAPACK-15, 16, 17) pass under `bin/simple test` with `SIMPLE_BLAS_BACKEND=mock`; zero `skip()`; zero `TODO→NOTE` conversions
@@ -654,3 +656,9 @@ AC: `SIMPLE_BLAS_BACKEND=cublas` passes GPU specs. `bin/simple test` never runs 
 | PERF-SUGAR-003 | `fn gesv<T>` generics erased in interp — workaround: `Float64`-specialized non-generic v1 signatures | `observed` + workaround plan |
 | PERF-SUGAR-011 | `Float64(x)` wrapper-ctor overhead for eigenvalue/SVD output wrapping | `observed` + measurement |
 | PERF-SUGAR-004 | Per-LAPACK-call FFI overhead — acceptable for matrix-level ops (BLAS level-3 equivalent); no batching needed in v1 | `anticipated` — do not over-optimize in v1 |
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/scilib_port_lapack_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).
