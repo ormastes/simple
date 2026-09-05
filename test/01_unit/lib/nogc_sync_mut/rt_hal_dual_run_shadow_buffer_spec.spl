@@ -1,15 +1,39 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+Dual-run shadow buffer and shadow-state specification
+
+## Purpose and audience
+Executable specification of dual-run features (1)-(5) — typed argument
+transport, per-target shadow buffers, typed comparators, commit-on-match /
+trap-on-mismatch, and the value / shadow-buffer / shadow-state modes —
+written for the rt(hal) dual-run team and the migration soak reviewers.
+
+## Operator workflow
+Run `./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/lib/nogc_sync_mut/rt_hal_dual_run_shadow_buffer_spec.spl` from
+the repository root; every scenario writes its ledger under
+`build/dual_run/spec_tmp/` and never touches the default ledger.
+
+## Compatibility and limitations
+Every runner here writes to a TEMP ledger because the deliberate-mismatch
+fixtures below would otherwise redden the fail-closed soak gate. Providers
+are Simple twins by construction; the C counterparts run in the separate
+record-compare/replay lane (see the record-compare spec header).
+
+## Verification guidance and troubleshooting
+A commit-count failure means commit-on-match fired more or less than once;
+a receipt-repr failure means the mismatch message contract drifted. The
+receipt's `ref_repr`/`cand_repr` name the first diverging field or byte, so
+read them before changing comparator semantics.
+"""
+# Lifecycle: doc/01_research/domain/mcdc_rt_hal_hardening.md ;
+# doc/03_plan/agent_tasks/mcdc_rt_hal_hardening.md ;
+# doc/04_architecture/mcdc_rt_hal_hardening.md ;
+# doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md
+# @manual_section: dual run shadow buffer and state
 # @req REQ-SSPEC-LIB
-# design: doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md (Part B) ;
-# plan: doc/03_plan/os/hal/asm_to_simple_migration_plan.md (1.8)
-#
-# Dual-run contract, features (1)-(5): typed argument transport, per-target
-# shadow buffers, typed comparators, commit-on-match / trap-on-mismatch, and
-# the value / shadow-buffer / shadow-state modes. Every runner here writes to a
-# TEMP ledger (never the default one) because the deliberate-mismatch fixtures
-# below would otherwise redden the fail-closed gate.
 
 use std.spec
+use std.spec.step
 use std.io_runtime.{mkdir_p, read_file, remove_file_if_exists}
 use std.nogc_sync_mut.rt_hal.dual_runner.*
 use std.nogc_sync_mut.rt_hal.dual_run_ledger.{dual_ledger_load}
@@ -85,35 +109,47 @@ fn fresh_real() -> [u8]:
 
 describe "dual-run (1) typed argument transport":
     it "transports i64/f64/bool/text/bytes by value to both providers":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): decoded value of each typed argument slot and its repr
+        step("Pack five typed arguments and decode every slot back")
         val a = dual_args([arg_i64(-7), arg_f64(2.5), arg_bool(true), arg_text("héllo"), arg_bytes([1, 2, 255])])
-        expect(args_i64(a, 0)).to_equal(-7)
-        expect(args_f64(a, 1)).to_equal(2.5)
+        expect(args_i64(a, 0)).to_equal(-7)  # oracle: a negative i64 proves sign survives the by-value transport packing
+        expect(args_f64(a, 1)).to_equal(2.5)  # oracle: 2.5 has an exact binary representation, so any packing truncation would show
         expect(args_bool(a, 2)).to_equal(true)
         expect(args_text(a, 3)).to_equal("héllo")
-        expect(args_bytes(a, 4).len()).to_equal(3)
-        expect(args_bytes(a, 4)[2]).to_equal(255)
+        expect(args_bytes(a, 4).len()).to_equal(3)  # oracle: the byte payload was packed with three elements and must keep its length
+        expect(args_bytes(a, 4)[2]).to_equal(255)  # oracle: 255 is the full u8 range maximum, proving no byte is clipped to a sign bit
         expect(dual_args_repr(a)).to_contain("i64:-7")
         expect(dual_args_repr(a)).to_contain("bytes[3]")
 
     it "an out-of-range or wrong-kind access is a typed default, never a crash":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): typed defaults returned for out-of-range and wrong-kind reads
+        step("Read missing and wrong-kind argument slots and expect typed defaults")
         val a = dual_args([arg_text("x")])
-        expect(args_i64(a, 0)).to_equal(0)
-        expect(args_i64(a, 9)).to_equal(0)
+        expect(args_i64(a, 0)).to_equal(0)  # oracle: reading a text slot as i64 yields the typed zero default instead of trapping
+        expect(args_i64(a, 9)).to_equal(0)  # oracle: slot 9 is past the packed end, so the default answer is again typed zero
         expect(args_text(a, 9)).to_equal("")
 
 describe "dual-run (5) value mode + (4) commit/trap":
     it "commits the agreed i64 from the reference provider and records a clean case":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): receipt verdict, committed value, and runner case counters
+        step("Run an agreeing value-mode pair and inspect the committed result")
         var r = DualRunner.create("add_len", "value", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("value_ok"))
         val out = dual_run_i64(r, dual_args([arg_i64(40), arg_text("ab")]), ref_add_len, cand_add_len)
         expect(out.receipt.agree).to_equal(true)
         expect(out.receipt.committed).to_equal(true)
         expect(out.receipt.committed_from).to_equal("ref")
-        expect(out.value).to_equal(42)
-        expect(r.cases).to_equal(1)
-        expect(r.mismatches).to_equal(0)
+        expect(out.value).to_equal(42)  # oracle: 40 + len("ab") is 42; commit-on-match must publish the reference's answer
+        expect(r.cases).to_equal(1)  # oracle: one dual-run call records exactly one comparison case
+        expect(r.mismatches).to_equal(0)  # oracle: a fully agreeing dual-run call records zero mismatched words
 
     it "a deliberate mismatch traps: nothing committed, receipt names BOTH values":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): trapped receipt with both rendered values and mismatch counters
+        step("Run a candidate that computes one too many and read the trap receipt")
         var r = DualRunner.create("add_len_wrong", "value", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("value_bad"))
         val out = dual_run_i64(r, dual_args([arg_i64(40), arg_text("ab")]), ref_add_len, cand_add_len_wrong)
@@ -125,27 +161,36 @@ describe "dual-run (5) value mode + (4) commit/trap":
         expect(out.receipt.message).to_contain("ref=42")
         expect(out.receipt.message).to_contain("cand=43")
         expect(out.receipt.message).to_contain("add_len_wrong")
-        expect(r.mismatches).to_equal(1)
+        expect(r.mismatches).to_equal(1)  # oracle: exactly one mismatching case was observed, so the counter is one
         expect(r.first_mismatch_repr).to_contain("cand=43")
 
     it "UseRef policy falls back to the reference value and still records the mismatch":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): UseRef receipt verdict and the reference fallback value
+        step("Run the mismatching pair under the UseRef policy and check the fallback")
         var r = DualRunner.create("add_len_useref", "value", MismatchPolicy.UseRef)
         r.set_ledger(tmp_ledger("value_useref"))
         val out = dual_run_i64(r, dual_args([arg_i64(1), arg_text("")]), ref_add_len, cand_add_len_wrong)
         expect(out.receipt.agree).to_equal(false)
         expect(out.receipt.committed).to_equal(true)
         expect(out.receipt.committed_from).to_equal("ref")
-        expect(out.value).to_equal(1)
-        expect(r.mismatches).to_equal(1)
+        expect(out.value).to_equal(1)  # oracle: 1 + len("") is 1; UseRef must publish the reference value despite the mismatch
+        expect(r.mismatches).to_equal(1)  # oracle: exactly one divergent word pair exists between reference and candidate here
 
     it "f64 comparator is NaN-aware and bit-exact on request":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): bit-exact f64 agreement receipt for the halving pair
+        step("Run the halving pair with bit-exact f64 comparison enabled")
         var r = DualRunner.create("half", "value", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("value_f64"))
         val out = dual_run_f64(r, dual_args([arg_f64(9.0)]), ref_half, cand_half, true)
         expect(out.receipt.agree).to_equal(true)
-        expect(out.value).to_equal(4.5)
+        expect(out.value).to_equal(4.5)  # oracle: 9.0 halved is exactly 4.5 in binary, so bit-exact comparison must agree
 
     it "flushes one ledger row per runner with cases/mismatches/first_mismatch_repr":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): flushed ledger row fields for the mixed clean/mismatch runner
+        step("Run one clean and one mismatching case, flush, and reload the ledger row")
         val path = tmp_ledger("value_ledger")
         var r = DualRunner.create("add_len_ledger", "value", MismatchPolicy.Trap)
         r.set_ledger(path)
@@ -153,24 +198,30 @@ describe "dual-run (5) value mode + (4) commit/trap":
         dual_run_i64(r, dual_args([arg_i64(1), arg_text("a")]), ref_add_len, cand_add_len_wrong)
         expect(r.flush_ledger()).to_equal(true)
         val rows = dual_ledger_load(path)
-        expect(rows.len()).to_equal(1)
+        expect(rows.len()).to_equal(1)  # oracle: one runner flushes exactly one aggregate row, not one per case
         expect(rows[0].pair).to_equal("add_len_ledger")
         expect(rows[0].mode).to_equal("value")
-        expect(rows[0].cases).to_equal(2)
-        expect(rows[0].mismatches).to_equal(1)
+        expect(rows[0].cases).to_equal(2)  # oracle: two dual_run_i64 calls were made, so the aggregate row counts two cases
+        expect(rows[0].mismatches).to_equal(1)  # oracle: exactly one of the two cases mismatched
         expect(rows[0].first_mismatch_repr).to_contain("cand=3")
 
 describe "dual-run (2)(3) shadow buffers + byte comparator":
     it "allocates two shadows initialised from the real target, real untouched until commit":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): shadow-vs-real byte comparisons and the pre-commit counter
+        step("Fork shadows from a real 16-byte target and compare before any commit")
         val real = fresh_real()
         var shadow = ShadowSet.from_real("patch", real)
-        expect(shadow.ref_copy.len()).to_equal(16)
-        expect(shadow.cand_copy.len()).to_equal(16)
+        expect(shadow.ref_copy.len()).to_equal(16)  # oracle: from_real duplicates the full 16-byte target for the reference side
+        expect(shadow.cand_copy.len()).to_equal(16)  # oracle: the candidate shadow is the same full-length copy
         expect(compare_bytes(shadow.ref_copy, real).agree).to_equal(true)
         expect(compare_bytes(shadow.cand_copy, real).agree).to_equal(true)
-        expect(shadow.commit_count).to_equal(0)
+        expect(shadow.commit_count).to_equal(0)  # oracle: forking shadows alone must not touch the real target's commit counter
 
     it "commits ONE agreed copy into the real target exactly once on match":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): post-commit real bytes and the single commit counter
+        step("Run an agreeing patch pair and verify the single committed copy")
         var r = DualRunner.create("patch_ok", "shadow-buffer", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("shadow_ok"))
         val real = fresh_real()
@@ -178,14 +229,17 @@ describe "dual-run (2)(3) shadow buffers + byte comparator":
         val receipt = dual_run_shadow_buffer(r, dual_args([arg_bytes([0xAA, 0xBB]), arg_i64(4)]), shadow, ref_patch, cand_patch)
         expect(receipt.agree).to_equal(true)
         expect(receipt.committed).to_equal(true)
-        expect(shadow.commit_count).to_equal(1)
+        expect(shadow.commit_count).to_equal(1)  # oracle: commit-on-match fires exactly once per agreeing run, never per byte
         expect(shadow.real[4]).to_equal(0xAA)
         expect(shadow.real[5]).to_equal(0xBB)
-        expect(shadow.real[6]).to_equal(18)
+        expect(shadow.real[6]).to_equal(18)  # oracle: offset 6 is untouched by the 2-byte patch, so it keeps fresh_real's i*3 value 18
         # the shadows are NOT the real target
-        expect(shadow.real.len()).to_equal(16)
+        expect(shadow.real.len()).to_equal(16)  # oracle: the real target keeps its original 16-byte extent after commit
 
     it "a candidate wrong in byte 7 traps: real target byte-identical to before, receipt names the byte":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): trap receipt naming byte 7 and the untouched real bytes
+        step("Run the byte-7-corrupted candidate and verify the real target is untouched")
         var r = DualRunner.create("patch_byte7", "shadow-buffer", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("shadow_bad"))
         val real = fresh_real()
@@ -194,24 +248,30 @@ describe "dual-run (2)(3) shadow buffers + byte comparator":
         expect(receipt.agree).to_equal(false)
         expect(receipt.committed).to_equal(false)
         expect(receipt.trapped).to_equal(true)
-        expect(shadow.commit_count).to_equal(0)
+        expect(shadow.commit_count).to_equal(0)  # oracle: a trapped mismatch must not commit, so the counter stays at zero
         expect(compare_bytes(shadow.real, real).agree).to_equal(true)
-        expect(shadow.real[4]).to_equal(12)
+        expect(shadow.real[4]).to_equal(12)  # oracle: offset 4 keeps fresh_real's i*3 value 12 because nothing was committed
         expect(receipt.message).to_contain("byte 7")
         expect(receipt.ref_repr).to_contain("15")
         expect(receipt.cand_repr).to_contain("ee")
-        expect(r.mismatches).to_equal(1)
+        expect(r.mismatches).to_equal(1)  # oracle: the f64 payload is 8 bytes, so a single differing word yields exactly one mismatch
 
     it "byte comparator reports the first differing index and length mismatch":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): first-divergence indices for content and length mismatches
+        step("Compare byte arrays that differ mid-content and in length")
         val c = compare_bytes([1, 2, 3], [1, 9, 3])
         expect(c.agree).to_equal(false)
-        expect(c.first_diff_index).to_equal(1)
+        expect(c.first_diff_index).to_equal(1)  # oracle: only byte 1 differs (2 vs 9), so the first divergence is reported at index 1
         val d = compare_bytes([1, 2], [1, 2, 3])
         expect(d.agree).to_equal(false)
-        expect(d.first_diff_index).to_equal(2)
+        expect(d.first_diff_index).to_equal(2)  # oracle: the shorter side has no index 2, so the length mismatch is reported at the first missing index
         expect(compare_bytes([], []).agree).to_equal(true)
 
     it "a candidate that writes an input is a mismatch by construction (post-hash on the input)":
+        # @req REQ-SSPEC-LIB
+        # @capture(statistics): argument repr hash before and after the shadow-buffer run
+        step("Run a patch pair and prove the packed arguments were not mutated")
         var r = DualRunner.create("patch_input", "shadow-buffer", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("shadow_input"))
         val args = dual_args([arg_bytes([1, 2]), arg_i64(0)])
@@ -222,6 +282,9 @@ describe "dual-run (2)(3) shadow buffers + byte comparator":
 
 describe "dual-run (5) shadow-state mode + struct comparator":
     it "compares snapshots field-wise, honouring the ignore list, and keeps the agreed state":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): agreed snapshot fields after the allocator-like run
+        step("Run the agreeing allocator pair and read the committed snapshot fields")
         var r = DualRunner.create("alloc_ok", "shadow-state", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("state_ok"))
         var s = StateSnapshot(names: [], values: [])
@@ -231,11 +294,14 @@ describe "dual-run (5) shadow-state mode + struct comparator":
         val out = dual_run_shadow_state(r, dual_args([arg_i64(28)]), s, ref_alloc, cand_alloc, ["stamp"])
         expect(out.receipt.agree).to_equal(true)
         expect(out.receipt.committed).to_equal(true)
-        expect(snapshot_get_i64(out.state, "allocated")).to_equal(128)
-        expect(snapshot_get_i64(out.state, "count")).to_equal(4)
+        expect(snapshot_get_i64(out.state, "allocated")).to_equal(128)  # oracle: 100 pre-allocated plus the 28-byte request is 128 after commit
+        expect(snapshot_get_i64(out.state, "count")).to_equal(4)  # oracle: the allocation count increments from 3 to exactly 4
         expect(snapshot_get(out.state, "stamp")).to_equal("ref-ts")
 
     it "a mismatching field traps and the pre-op state is what survives":
+        # @req REQ-SSPEC-LIB
+        # @capture(bit_table): trap receipt naming the diverging counter and the surviving state
+        step("Run the over-counting allocator and verify the pre-op state survives")
         var r = DualRunner.create("alloc_bad", "shadow-state", MismatchPolicy.Trap)
         r.set_ledger(tmp_ledger("state_bad"))
         var s = StateSnapshot(names: [], values: [])
@@ -244,8 +310,8 @@ describe "dual-run (5) shadow-state mode + struct comparator":
         val out = dual_run_shadow_state(r, dual_args([arg_i64(28)]), s, ref_alloc, cand_alloc_wrong, ["stamp"])
         expect(out.receipt.agree).to_equal(false)
         expect(out.receipt.committed).to_equal(false)
-        expect(snapshot_get_i64(out.state, "count")).to_equal(3)
-        expect(snapshot_get_i64(out.state, "allocated")).to_equal(100)
+        expect(snapshot_get_i64(out.state, "count")).to_equal(3)  # oracle: the pre-op count of 3 survives because a trapped mismatch commits nothing
+        expect(snapshot_get_i64(out.state, "allocated")).to_equal(100)  # oracle: the fixture reserves a 100-slot arena up front, and a trapped op must not shrink it
         expect(out.receipt.message).to_contain("count")
         expect(out.receipt.ref_repr).to_contain("count=4")
         expect(out.receipt.cand_repr).to_contain("count=5")
