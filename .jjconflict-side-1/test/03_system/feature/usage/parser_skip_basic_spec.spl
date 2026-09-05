@@ -1,83 +1,116 @@
 """
-# Skip Keyword - Basic Functionality
-
-**Feature ID:** #PARSER-002
-**Category:** Syntax
-**Status:** Active
-
-## Overview
-
-Tests basic parsing and runtime behavior of the `skip` keyword as a standalone
-statement. Verifies that skip can be used in various contexts (if blocks,
-function bodies, loops), that it does not prevent subsequent code execution,
-does not affect return values, and does not alter variable scope.
-
-## Syntax
-
-```simple
-skip
-use std.spec.step
-
-fn test_function():
-skip
-return "completed"
-```
+## Purpose and audience
+Exercises the `skip` keyword as a standalone statement for the language team
+and spec reviewers: skip must parse in statement position, inside `if` blocks,
+inside function bodies, and inside loops, and it must not terminate the
+enclosing block, alter a return value, or disturb variable scope.
+## Operator workflow
+Run the file with the seed binary:
+src/compiler_rust/target/bootstrap/simple run test/03_system/feature/usage/parser_skip_basic_spec.spl
+## Compatibility and limitations
+Authored and verified against the 2026-09-05 seed binary. Scenarios embed the
+constructs inline, so a lexer or parser regression fails the whole file at
+load time rather than at one scenario; the `test` daemon path is not covered.
+## Verification guidance and troubleshooting
+A failing scenario names the skip context that broke. If the file fails to
+load at all, the skip grammar itself stopped parsing and every scenario in
+this file is the reproduction.
 """
+# Lifecycle: doc/01_research/domain/parser_framework.md ;
+# doc/03_plan/agent_tasks/parser_framework.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/parser_framework.md
+# @manual_section: skip-statement-basics
+
 describe "Skip keyword - basic functionality":
-    # @manual scenario evidence
     it "parses skip as standalone statement":
+        # @req REQ-PARSER-SKIP-BASIC-001
+        # @capture(bit_table): statement order around a standalone skip
+        step("Execute a standalone skip and confirm earlier bindings survive")
         var executed = true
         skip
-        expect(executed).to_equal(true)
+        expect(executed == true).to_equal(true)  # oracle: skip must leave prior bindings untouched
 
     it "parses skip with pass":
-        skip
-        pass
-        assert_true(true)
+        # @req REQ-PARSER-SKIP-BASIC-002
+        # @capture(bit_table): control flow across skip followed by pass
+        step("Run a function whose body is skip, then pass, then a return")
+        fn continues_past_both():
+            skip
+            pass
+            return "reached"
+        expect(continues_past_both()).to_equal("reached")  # oracle: control must reach the post-skip return
 
     it "parses skip in if block":
-        val condition = true
-        if condition:
+        # @req REQ-PARSER-SKIP-BASIC-003
+        # @capture(bit_table): branch body executes after an in-block skip
+        step("Skip inside a taken if branch and observe the rest of the branch run")
+        var branch_body_ran = 0
+        if true:
             skip
-        assert_true(true)
+            branch_body_ran = 1
+        expect(branch_body_ran).to_equal(1)  # oracle: skip does not end the enclosing block
 
     it "parses skip in function body":
+        # @req REQ-PARSER-SKIP-BASIC-004
+        # @capture(bit_table): return value produced after a leading skip
+        step("Call a function that skips before returning")
         fn test_function():
             skip
             return "completed"
-        expect(test_function()).to_equal("completed")
+        expect(test_function()).to_equal("completed")  # oracle: the post-skip return value
 
     it "parses multiple skip statements":
+        # @req REQ-PARSER-SKIP-BASIC-005
+        # @capture(bit_table): three consecutive skips then a counter update
+        step("Chain three skips and then update a counter")
+        var statements_executed = 0
         skip
         skip
         skip
-        assert_true(true)
+        statements_executed = 3
+        expect(statements_executed).to_equal(3)  # oracle: three skips parsed and control continued
 
     it "parses skip before expression":
+        # @req REQ-PARSER-SKIP-BASIC-006
+        # @capture(bit_table): expression evaluated after a preceding skip
+        step("Skip, then evaluate an arithmetic expression")
         skip
         val result = 2 + 2
-        expect(result).to_equal(4)
+        expect(result).to_equal(4)  # oracle: 2+2 evaluates after the skip
 
     it "parses skip in loop":
+        # @req REQ-PARSER-SKIP-BASIC-007
+        # @capture(bit_table): loop counter across one skip per iteration
+        step("Skip once per loop iteration and count the iterations")
         var count = 0
         for i in 0..3:
             skip
             count = count + 1
-        expect(count).to_equal(3)
+        expect(count).to_equal(3)  # oracle: one iteration per 0..3 range element
 
     it "skip does not prevent execution":
+        # @req REQ-PARSER-SKIP-BASIC-008
+        # @capture(bit_table): assignment after skip is observed
+        step("Skip, then assign a flag and read it back")
         var executed = false
         skip
         executed = true
-        expect(executed).to_equal(true)
+        expect(executed).to_equal(true)  # oracle: the post-skip assignment is the observed state
 
     it "skip does not affect return value":
+        # @req REQ-PARSER-SKIP-BASIC-009
+        # @capture(bit_table): returned text produced after a leading skip
+        step("Call a function that skips before returning a value")
         fn returns_with_skip():
             skip
             return "value"
-        expect(returns_with_skip()).to_equal("value")
+        expect(returns_with_skip()).to_equal("value")  # oracle: the post-skip return value
 
     it "skip does not affect variable scope":
+        # @req REQ-PARSER-SKIP-BASIC-010
+        # @capture(bit_table): binding created after skip stays readable
+        step("Skip, then bind and read a fresh local")
         skip
-        val scoped = 100
-        expect(scoped).to_equal(100)
+        val scoped = 6 * 7
+        expect(scoped).to_equal(42)  # oracle: 6*7 = 42, binding unaffected by the preceding skip
