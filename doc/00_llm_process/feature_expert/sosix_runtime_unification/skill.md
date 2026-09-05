@@ -20,8 +20,10 @@ typed `std.nogc_async_mut.io` aliases), perf spec + H2 report
 Exact POSIX leg: `rt_fd_pread`/`rt_fd_pwrite` landed in the seed source
 (Rust runtime + interpreter wrappers + registry + security + C twin) with real
 interpreter `rt_file_open`/`rt_file_close`; `posix.spl` + `posix_spec` 3/3 on a
-privately built seed (`~/dev/.sosix-seed-lane/release/simple`), 0/3 on the
-deployed seed by design. Deploying that seed is the user's decision.
+privately built seed, then the seed was rebuilt with the deployed feature set
+(`llvm,oauth`) and deployed 2026-09-05 20:07 on the user's "go" (backup
+`simple.pre-sosix-2026-09-05` beside it); `posix_spec` 3/3 on `bin/simple`.
+Lane committed as `09d2e2fd210` (not pushed).
 Blocked (owner + resume in `doc/08_tracking/todo/sosix_unification_blocked_rows_2026-09-05.md`): exact POSIX leg (runtime externs),
 Linux io_uring / macOS / Windows providers, GPU G1 proxy, SimpleOS device
 queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
@@ -32,7 +34,7 @@ queues, QEMU serial-bytes-observed row (needs pure-Simple deploy).
 |---|---|
 | Lifecycle, completions, waits, descriptors, IDs, errors | `src/lib/common/contracts/sosix/{operation,completion,wait,file_operation,service_ids,error}_v1.spl` |
 | SimpleOS shims | `src/os/sosix/core/*.spl`, `src/os/sosix/fs/operation_adapter.spl` |
-| Hosted capsule | `src/lib/nogc_async_mut/sosix/{__init__,host_facade,fs,sync,time,file_driver,posix}.spl` (`posix` not re-exported until a deployed binary backs it) |
+| Hosted capsule | `src/lib/nogc_async_mut/sosix/{__init__,host_facade,fs,sync,time,file_driver,posix}.spl` (`posix` re-exported since the 2026-09-05 deploy) |
 | Seed externs | `src/compiler_rust/runtime/src/value/sffi/file_io/descriptor.rs`, `compiler/src/interpreter_extern/{file_io,mod}.rs`, `common/src/runtime_symbols.rs`, `runtime/src/security_runtime.rs`; C twin `src/runtime/runtime_native.c`; typed aliases `src/lib/nogc_sync_mut/sffi/fs.spl` |
 | Perf spec | `test/05_perf/lib/sosix_hosted_fs_perf_spec.spl` (mechanism assertions; prints ns/op) |
 | Specs | `test/01_unit/lib/common/contracts/sosix/*_spec.spl`, `test/01_unit/lib/nogc_async_mut/sosix/*_spec.spl`, `test/01_unit/os/sosix/operation_core_spec.spl` |

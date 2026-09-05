@@ -68,15 +68,15 @@ read costs about 38× a direct positioned read — interpreter tax on ~40 calls,
 one ring hop, no allocation on the hot path. Report:
 `doc/10_metrics/runtime/sosix_unification_perf_report_2026-09-05.md`.
 
-## Exact POSIX leg (needs a seed that backs the externs)
+## Exact POSIX leg (backed by the seed deployed 2026-09-05)
 
 `std.nogc_async_mut.sosix.posix` — `sosix_posix_open/close/pread/pwrite`,
 `@always_inline` over the sffi aliases. `pread`/`pwrite` take a caller-owned
 buffer address (`rt_alloc` family) and return bytes transferred or `-errno`.
 The externs `rt_fd_pread`/`rt_fd_pwrite` exist in the seed source as of
-2026-09-05; on a deployed binary older than that they return nil and
-`posix_spec` is red. The module is deliberately not re-exported from the
-capsule `__init__` until a deployed binary backs the pair.
+2026-09-05 and the binary deployed on this host that evening backs them
+(`posix_spec` 3/3 on `bin/simple`); on an older binary they return nil and the
+spec is red. The surface is re-exported from the capsule `__init__`.
 
 ## Not available (do not advertise)
 
