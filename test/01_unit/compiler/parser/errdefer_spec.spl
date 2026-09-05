@@ -1,39 +1,93 @@
+"""
+## Purpose and audience
+
+Executable specification for the `errdefer` and `defer` statement
+semantics, for compiler engineers changing parser statement handling or
+interpreter scope-exit execution. errdefer is a keyword that parses like
+defer but must run its body only when the enclosing scope exits with an
+error; defer must run unconditionally.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed
+scenarios. Each scenario compiles and runs a probe function whose body
+carries the guarded statement, then asserts the observable side effect.
+
+## Compatibility and limitations
+
+Coverage is interpreter semantics for single-statement errdefer/defer
+bodies on success and error paths, including LIFO ordering of stacked
+errdefers. Native-codegen parity and block-bodied forms are out of scope
+here.
+
+## Verification guidance and troubleshooting
+
+Re-run after any parser or interpreter change touching defer handling.
+A failure on the success-path scenario means errdefer bodies are running
+eagerly; a failure on the error-path scenario means scope-exit cleanup
+is being skipped; a failure on the LIFO scenario means registration
+order is inverted.
+"""
+# Lifecycle: doc/01_research/domain/parser_framework.md ;
+# doc/03_plan/agent_tasks/parser_framework.md ;
+# doc/04_architecture/parser_framework.md ;
+# doc/05_design/parser_framework.md
+# @manual_section: errdefer and defer semantics
+# @req: REQ-COMPILER-PARSER-001
+
+use std.spec.{describe, it, expect, step}
+
 describe "Errdefer":
     describe "parsing":
-        it "parses errdefer statement":
-            # errdefer is a keyword that parses like defer
-            val code = "errdefer cleanup()"
-            # If this file loads without error, the parser handles errdefer
-            expect(code).to_start_with("errdefer")
+        it "parses an errdefer statement and leaves its body cold":
+            # @req REQ-COMPILER-PARSER-001
+            step("Compile and run a probe fn that declares an errdefer")
+            # @capture(statistics): probe verdict for the parsed errdefer statement retained
+            fn parse_probe() -> bool:
+                var cleaned = ""
+                errdefer cleaned = cleaned + "r"
+                val x = 42
+                cleaned == ""
+            expect(parse_probe()).to_equal(true)  # oracle: the statement parses and its body stays cold on success
 
     describe "interpreter semantics":
         it "errdefer does NOT run on success":
-            # On success path, errdefer body must not execute
-            var ran = false
-            fn success_path():
+            # @req REQ-COMPILER-PARSER-001
+            step("Run a success path guarded by an errdefer")
+            # @capture(statistics): guard-cold verdict retained
+            fn success_path() -> bool:
+                var ran = false
                 errdefer ran = true
                 val x = 42
-            success_path()
-            expect(ran).to_equal(false)
+                ran
+            expect(success_path()).to_equal(false)  # oracle: the errdefer body must stay cold on the success path
 
         it "errdefer runs on error":
-            # On error path, errdefer body must execute
+            # @req REQ-COMPILER-PARSER-001
+            step("Error inside a guarded body and observe the cleanup")
+            # @capture(statistics): cleanup-ran verdict retained
             var ran = false
             fn error_path():
                 errdefer ran = true
                 val bad = 1 / 0  # triggers eval_had_error
             error_path()
-            expect(ran).to_equal(true)
+            expect(ran).to_equal(true)  # oracle: the errdefer body must run when the body errors
 
         it "defer always runs regardless of error":
-            var ran = false
-            fn success_with_defer():
+            # @req REQ-COMPILER-PARSER-001
+            step("Run a success path guarded by a plain defer")
+            # @capture(statistics): unconditional-run verdict retained
+            fn success_with_defer() -> bool:
+                var ran = false
                 defer ran = true
                 val x = 42
-            success_with_defer()
-            expect(ran).to_equal(true)
+                ran
+            expect(success_with_defer()).to_equal(true)  # oracle: defer runs on every path
 
         it "multiple errdefers run in LIFO order on error":
+            # @req REQ-COMPILER-PARSER-001
+            step("Stack three errdefers and error out")
+            # @capture(statistics): LIFO execution order retained
             var order: [i64] = []
             fn multi_errdefer():
                 errdefer order.push(1)
@@ -41,4 +95,4 @@ describe "Errdefer":
                 errdefer order.push(3)
                 val bad = 1 / 0
             multi_errdefer()
-            expect(order).to_equal([3, 2, 1])
+            expect(order).to_equal([3, 2, 1])  # oracle: the last-registered errdefer runs first

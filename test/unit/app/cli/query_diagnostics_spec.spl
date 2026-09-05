@@ -1,6 +1,37 @@
+"""
+## Purpose and audience
+
+Executable specification for the query diagnostics surface — structured
+error splitting, CLOS001 collection state, MCP diagnostic JSON
+envelope assembly, ANSI normalization, and the dispatcher/lint
+orchestrator boundaries — for the CLI owners who change how
+`simple query` assembles and emits diagnostics.
+
+## Operator workflow
+
+Run this spec with the repo test runner and confirm zero failed
+scenarios. Each scenario names the requirement it traces to, starts with
+an imperative step, and asserts on values returned by the real
+diagnostics helpers.
+
+## Compatibility and limitations
+
+Boundary scenarios read the owning module sources at runtime to pin the
+orchestration contract (which module owns which helper); behavioral
+scenarios call the imported helpers directly. Compiler-side query
+dispatch and MCP transport are out of scope here.
+
+## Verification guidance and troubleshooting
+
+Re-run after any change to src/app/cli/query_diagnostics.spl,
+query_lint.spl, query_lint_checks.spl, query_check.spl, or query.spl.
+A boundary failure means a helper moved modules or a local fallback
+reappeared; an envelope failure means the MCP JSON shape drifted.
+"""
 # Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: query diagnostics helpers
 
 use std.spec.step
 
@@ -10,6 +41,9 @@ use app.cli.query_diagnostics.{_split_structured_error, _extract_error_code}
 
 describe "query diagnostics helpers":
     it "keeps structured lint collection state owned and nested-safe":
+        # @req REQ-SSPEC-APP
+        step("Read the lint orchestrator and pin its collection save/restore shape")
+        # @capture(statistics): save/restore marker presence per state variable retained
         val source = rt_file_read_text("src/app/cli/query_lint.spl") ?? ""
         expect(source).to_contain("val previous_mode = _DIAG_COLLECT_MODE")
         expect(source).to_contain("val previous_collected = _DIAG_COLLECTED")
@@ -32,7 +66,47 @@ describe "query diagnostics helpers":
         expect(source).to_contain("cfg.apply_file_attributes_lines(lines)")
         expect(source).not.to_contain("cfg.apply_file_attributes(source)")
 
+    it "preserves ordered duplicate CLOS001 diagnostics across sibling closures":
+        # @req REQ-SSPEC-APP
+        step("Collect two sibling closures that each capture twice")
+        # @capture(statistics): per-diagnostic line numbers in collection order retained
+        val lines = [
+            "fn outer():",
+            "    var x = 0",
+            "    var x = 1",
+            "    fn first():",
+            "        x = 2",
+            "    fn second():",
+            "        x += 1"
+        ]
+        _DIAG_COLLECT_MODE = true
+        _DIAG_COLLECTED = []
+        val count = _check_closure_capture_text(lines, "fixture.spl", "json")
+        expect(count).to_equal(4)  # oracle: two sibling closures each capture two outer variables
+        expect(_DIAG_COLLECTED.len()).to_equal(4)  # oracle: every collected diagnostic is retained in order
+        expect(_DIAG_COLLECTED[0]).to_contain("\"line\":5")
+        expect(_DIAG_COLLECTED[1]).to_contain("\"line\":5")
+        expect(_DIAG_COLLECTED[2]).to_contain("\"line\":7")
+        expect(_DIAG_COLLECTED[3]).to_contain("\"line\":7")
+        _DIAG_COLLECTED = []
+        _DIAG_COLLECT_MODE = false
+
+    it "uses one forward CLOS001 scope index instead of reverse walks":
+        # @req REQ-SSPEC-APP
+        step("Read the closure check module and pin the forward scope index")
+        # @capture(statistics): forward-index marker presence and reverse-walk absence retained
+        val source = rt_file_read_text("src/app/cli/query_lint_checks.spl") ?? ""
+        expect(source).to_contain("var boundary_tree: [i64] = []")
+        expect(source).to_contain("var group_scan_start: [i64] = []")
+        val keeps_reverse_helper = source.contains("_collect_outer_var_counts_clos")
+        val keeps_reverse_scan = source.contains("var si = fn_line - 1")
+        expect(keeps_reverse_helper).to_equal(false)  # oracle: the reverse-walk helper must stay deleted
+        expect(keeps_reverse_scan).to_equal(false)  # oracle: no reverse index scan may reappear
+
     it "assembles MCP diagnostic JSON once without changing its envelope":
+        # @req REQ-SSPEC-APP
+        step("Assemble the MCP envelope for zero, one, and two diagnostics")
+        # @capture(protocol_json): full envelope per diagnostic count retained
         expect(query_mcp_diagnostics_wrapper_json([])).to_equal(
             "{\"content\":[{\"type\":\"text\",\"text\":\"0 diagnostics found\"}],\"structuredContent\":{\"diagnostics\":[],\"count\":0},\"isError\":false}")
         expect(query_mcp_diagnostics_wrapper_json([""])).to_equal(
@@ -53,6 +127,9 @@ describe "query diagnostics helpers":
         expect(diagnostics_source).not.to_contain("val diags_array")
 
     it "extracts ordered duplicate diagnostic objects with one array byte scan":
+        # @req REQ-SSPEC-APP
+        step("Extract a duplicated diagnostic object from one wrapper JSON")
+        # @capture(statistics): extracted object identity and boundary rejections retained
         val diagnostic =
             "{\"severity\":1,\"message\":\"café } [ ] { \\\"quoted\\\"\"," +
             "\"meta\":{\"nested\":true}}"
@@ -60,7 +137,7 @@ describe "query diagnostics helpers":
             "{\"content\":[],\"structuredContent\":{\"diagnostics\":[" +
             diagnostic + "," + diagnostic + "],\"count\":2}}"
         val extracted = _extract_query_check_diagnostics(wrapper)
-        expect(extracted.len()).to_equal(2)
+        expect(extracted.len()).to_equal(2)  # oracle: the duplicate pair is extracted once per occurrence
         expect(extracted[0]).to_equal(diagnostic)
         expect(extracted[1]).to_equal(diagnostic)
         expect(_extract_query_check_diagnostics(
@@ -80,6 +157,9 @@ describe "query diagnostics helpers":
             diagnostic + "]}")[0]).to_equal(diagnostic)
 
     it "returns plain output unchanged and preserves legacy ANSI stripping":
+        # @req REQ-SSPEC-APP
+        step("Strip ANSI sequences from plain, colored, and unterminated output")
+        # @capture(statistics): per-input stripping verdict retained
         val plain = "error: café\nwarning: plain"
         expect(_strip_ansi("")).to_equal("")
         expect(_strip_ansi(plain)).to_equal(plain)
@@ -90,6 +170,9 @@ describe "query diagnostics helpers":
             "✓日本語 café")
 
     it "normalizes compiler output once for lint policy diagnostics and count":
+        # @req REQ-SSPEC-APP
+        step("Normalize colored check output and collect its diagnostics once")
+        # @capture(statistics): normalized output, diagnostic order, and counts retained
         val clean = _clean_check_output(
             "fixture.spl:2:3: \033[31merror: first\033[0m",
             "fixture.spl:4:5: warning: second")
@@ -99,11 +182,11 @@ describe "query diagnostics helpers":
         expect(_should_run_lint_after_clean_output(clean)).to_equal(true)
         val diagnostics = _collect_check_output_diagnostics_json_clean(
             "fixture.spl", clean)
-        expect(diagnostics.len()).to_equal(2)
+        expect(diagnostics.len()).to_equal(2)  # oracle: both cleaned lines carry lint diagnostics
         expect(diagnostics[0]).to_contain("first")
         expect(diagnostics[1]).to_contain("second")
         expect(_count_check_output_diagnostics_clean(
-            "fixture.spl", clean)).to_equal(2)
+            "fixture.spl", clean)).to_equal(2)  # oracle: two well-formed diagnostic lines survive cleaning
         expect(_should_run_lint_after_clean_output(
             "fixture.spl:1:1: ParseError: bad")).to_equal(false)
         expect(_clean_check_output("out\n", "err")).to_equal("out\n\nerr")
@@ -115,12 +198,15 @@ describe "query diagnostics helpers":
             "other.spl:1:1: error: excluded"
         val mixed_diagnostics = _collect_check_output_diagnostics_json_clean(
             "fixture.spl", mixed)
-        expect(mixed_diagnostics.len()).to_equal(3)
+        expect(mixed_diagnostics.len()).to_equal(3)  # oracle: the malformed banner line drops, duplicates stay
         expect(mixed_diagnostics[1]).to_equal(mixed_diagnostics[2])
         expect(_count_check_output_diagnostics_clean(
             "fixture.spl", mixed)).to_equal(mixed_diagnostics.len())
 
     it "keeps active check callers on the shared normalized output":
+        # @req REQ-SSPEC-APP
+        step("Read the diagnostics module and pin the shared normalization calls")
+        # @capture(statistics): shared-normalization call marker presence retained
         val source = rt_file_read_text("src/app/cli/query_diagnostics.spl") ?? ""
         expect(source).to_contain(
             "val clean_output = _clean_check_output(check_stdout, check_stderr)")
@@ -130,6 +216,9 @@ describe "query diagnostics helpers":
             "_count_check_output_diagnostics_clean(\n                        spl_file, clean_output)")
 
     it "skips diagnostic code scans when severity policy is empty":
+        # @req REQ-SSPEC-APP
+        step("Collect one diagnostic under empty, overriding, and buried severity policy")
+        # @capture(statistics): collected diagnostic per severity-policy case retained
         val diagnostic = "{\"severity\":2,\"code\":\"X\",\"message\":\"m\"}"
         _DIAG_COLLECT_MODE = true
         _DIAG_COLLECTED = []
@@ -147,46 +236,51 @@ describe "query diagnostics helpers":
         _DIAG_COLLECTED = []
         _DIAG_SEVERITY_OVERRIDE["X"] = -1
         _diag_emit_or_collect(diagnostic)
-        expect(_DIAG_COLLECTED.len()).to_equal(0)
+        expect(_DIAG_COLLECTED.len()).to_equal(0)  # oracle: a severity-buried diagnostic is suppressed entirely
         _DIAG_SEVERITY_OVERRIDE = {}
         _DIAG_SEVERITY_OVERRIDE_COUNT = 0
         _DIAG_COLLECTED = []
         _DIAG_COLLECT_MODE = false
 
     it "splits structured error metadata into core related and help":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("splits structured error metadata into core related and help")
+        # @capture(statistics): core message, RELATED frames, and HELP text retained
         val structured = _split_structured_error("10:4: variable not found|||RELATED:3:1:declared here|||HELP:did you mean `value`?")
         expect(structured.0).to_equal("10:4: variable not found")
-        expect(structured.1.len()).to_equal(1)
+        expect(structured.1.len()).to_equal(1)  # oracle: one RELATED frame accompanies the core message
         expect(structured.1[0]).to_equal("3:1:declared here")
         expect(structured.2).to_equal("did you mean `value`?")
 
     it "extracts explicit error code before fallback inference":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("extracts explicit error code before fallback inference")
+        # @capture(statistics): extracted code and fallback inference retained
         val code = _extract_error_code("error[E1234]: example failure", "TypeError")
         expect(code).to_equal("E1234")
 
     it "keeps lint json collection in the lint orchestrator":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("keeps lint json collection in the lint orchestrator")
+        # @capture(statistics): collector-entry and emit-call marker presence retained
         val content = rt_file_read_text("src/app/cli/query_lint.spl") ?? ""
         expect(content.contains("fn _collect_lint_diagnostics_json(file: text, source: text)")).to_equal(true)
         expect(content.contains("_emit_source_lint_diagnostics(file, source, \"json\")")).to_equal(true)
 
 describe "query dispatcher boundaries":
     it "dispatcher delegates diagnostics commands through query_rich imports":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("dispatcher delegates diagnostics commands through query_rich imports")
+        # @capture(statistics): delegation import and command marker presence retained
         val content = rt_file_read_text("src/app/cli/query.spl") ?? ""
         expect(content.contains("use app.cli.query_rich.{")).to_equal(true)
         expect(content.contains("query_check")).to_equal(true)
         expect(content.contains("query_workspace_diagnostics")).to_equal(true)
 
     it "dispatcher no longer defines local fallback diagnostics helpers":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("dispatcher no longer defines local fallback diagnostics helpers")
+        # @capture(statistics): per-helper absence verdicts retained
         val content = rt_file_read_text("src/app/cli/query.spl") ?? ""
         expect(not content.contains("fn _query_check_json(")).to_equal(true)
         expect(not content.contains("fn _query_diag(")).to_equal(true)
@@ -197,8 +291,9 @@ describe "query dispatcher boundaries":
         expect(not content.contains("fn query_workspace_diagnostics(")).to_equal(true)
 
     it "diagnostics module depends on lint orchestrator instead of low-level lint internals":
-        # @req REQ-SSPEC-UNIT
+        # @req REQ-SSPEC-APP
         step("diagnostics module depends on lint orchestrator instead of low-level lint internals")
+        # @capture(statistics): allowed and forbidden import marker presence retained
         val content = rt_file_read_text("src/app/cli/query_diagnostics.spl") ?? ""
         expect(content.contains("use app.cli.query_lint.{")).to_equal(true)
         expect(content.contains("use app.cli.query_lint_checks.{")).to_equal(false)
