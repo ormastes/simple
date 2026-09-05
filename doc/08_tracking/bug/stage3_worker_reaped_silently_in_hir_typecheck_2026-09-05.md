@@ -368,10 +368,10 @@ cleanly — but the backtrace is worthless:
 Backtrace stopped: previous frame inner to this frame (corrupt stack?)
 ```
 
-Both addresses resolve, via the report's own `ProcMaps`, into
-`rw-p ... [anon:mimalloc]` — the **heap**, with no execute permission, and the
-core has **zero** anonymous executable mappings, so this is not unsymbolized JIT
-code. The process branched to a data address:
+Both addresses resolved, via the report's own `ProcMaps` **as read at the time**,
+into `rw-p ... [anon:mimalloc]` — the heap, with no execute permission — and the
+core carried **zero** non-file-backed executable mappings, so this was not
+unsymbolized JIT code. The process branched to a data address:
 
 ```
 pc  0x4b4e03dbb24   memory at pc: 0000000000000000 0000000000000000
@@ -402,10 +402,35 @@ used as a raw pointer.
    If the Stage-3 crash shows the same signature — PC inside a `rw-p` mimalloc
    mapping, memory at PC all zeroes, `x0` an odd tagged value — it is the same
    root cause as this one, and no symbolized trace is needed to say so.
-3. **Lead, and it is a strong one:** that signature is exactly what
+3. **CAVEAT added on re-check — this core no longer exists, and the "strong
+   lead" below is weaker than first written.** apport names a report by
+   EXECUTABLE PATH, so a second crash of the same binary **overwrites** the
+   first. Three minutes later `bin/simple fmt m_nosep.spl` crashed again and
+   replaced the report; the surviving one is a SIGABRT through
+   `std::process::abort` (fully symbolized Rust frames), a different failure
+   entirely. The SIGSEGV registers and mapping above were read from the original
+   core and are recorded faithfully, but they can no longer be re-derived.
+   Mitigation now running: `build/segv-repro/crash/` snapshots every report by
+   content hash the moment its mtime changes, so the Stage-3 core cannot be lost
+   the same way.
+   **And the producer does not match.** The crashing binary was
+   `bin/release/aarch64-unknown-linux-gnu/simple`, which self-identifies as the
+   **Rust seed** ("this Rust-built Simple binary is a bootstrap seed only";
+   123 rustc/cargo path strings). No code emitted by Stage-2 runs in that
+   process, so the fmt SIGSEGV **cannot** be an instance of the Stage-2 codegen
+   defects, however similar the shape.
+4. **The lead survives for Stage 3, on a different footing:** that signature is exactly what
    `f0963796462 docs(bug): five silent wrong-value defects in Stage-2 aarch64
    codegen` describes — a value arriving with the wrong representation. A
    miscompiled tagged value used as a call target produces precisely this crash.
-   The `phase3:hir_typecheck` SIGSEGV and that codegen bug may be one defect.
+   Unlike the fmt binary, the Stage-3 victim IS a Simple-compiled compiler
+   (`stage2-admitted/simple`), so a codegen defect in whatever produced it can
+   reach it. Defect 1 there (a `fn(...)` parameter called indirectly returns
+   garbage — an unstable value, "consistent with a live pointer truncated to 32
+   bits") and defect 3 (calling a closure SEGVs outright) are the same mechanism
+   as a branch to a non-code address, and `phase3:hir_typecheck` is exactly the
+   kind of code that calls through function values. Sharp prediction to test:
+   if the Stage-3 core's PC is likewise a non-executable data address reached
+   via an indirect call, the two records are one defect.
    Confirm by comparing signatures once the Stage-3 core exists; do not merge the
    two records before that.
