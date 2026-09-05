@@ -246,3 +246,111 @@ gdb <stage2-admitted/simple> /tmp/u/CoreDump -batch -ex bt
 
 `test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl` is now
 10/10 green, up from 9/10 with the guard permanently broken.
+
+## UPDATE 3 (2026-09-05, midday): the SEGV is in the post-loop window, not in a module
+
+The crash point is now bounded to a few lines, from the stage3 log alone
+(`build/bootstrap/logs/aarch64-unknown-linux-gnu/stage3-native-build.log`,
+whose preserved tail carries the worker's last stdout lines):
+
+```
+[BOOTSTRAP-PHASE] +3766176ms phase3:hir:file:done src/compiler/driver/pipeline_fn.spl module=compiler.driver.pipeline_fn funcs=-1
+[build] hir 771/771 step 2/6 +3766176ms dt=446ms compiler.driver.pipeline_fn
+timeout: the monitored command dumped core
+```
+
+**`771/771`: the per-module HIR loop finished.** `pipeline_fn.spl` was the last
+module, not a culprit — the "lead" in UPDATE 2 about its re-export chase is
+withdrawn. The first marker the streaming path emits after its loop is
+`phase3:streaming_source_reclaim:done` (`driver_hir_pipeline_lowering.spl`,
+`lower_and_check_streaming_surfaces_impl`), and it never appeared, so the fault
+lies in the code between the two — a window that until this change had NO
+marker of its own:
+
+1. `hir_cache_summary()` (only if the HIR cache is enabled; it is not here),
+2. the `self.ctx.hir_modules / hir_module_count_value / bootstrap_entry_hir`
+   publish,
+3. `driver_validate_value_struct_layouts` — five full-closure sub-passes:
+   `validate_value_struct_layouts` (array view), then `validate_layer_eq_types`,
+   `validate_effect_contracts`, `validate_aspect_contracts` and
+   `weave_forward_advice`, all four of which index `Dict<text, HirModule>`,
+4. `ast_reset()`, `self.ctx.modules = {}`, `lexer_release_parse_source_globals()`,
+5. `reclaim_source_contents()` / `reclaim_streaming_source_contents_owner()`.
+
+Path identification: the lane exports `SIMPLE_STAGE3_STREAMING_SURFACES=1`
+(`bootstrap-from-scratch.sh:2496,2837`), which is the streaming gate in
+`driver_phase_gates.spl:50`; and every `file:done` line says `funcs=-1`, which
+is the streaming loop's `hir_module.functions.len()` — the non-streaming loop
+prints `keys().len()`, which cannot be -1.
+
+### Proven vs inferred
+
+Proven: SIGSEGV (four apport `signal 11` entries for the stage2 binary);
+loop complete at 771/771; crash before `streaming_source_reclaim:done`;
+**`Dict.len()` returns -1 in the seed-compiled Stage-2 binary on aarch64** —
+reproduced with a one-module probe through the same worker (`funcs=-1` for a
+module with one function; the legacy path prints `funcs=1` for the same file).
+The window runs to completion for a one-module closure (probe reached
+`phase4:monomorphize:done`), so whatever faults is closure-size dependent.
+
+Inferred (not yet observed): the fault is one of the four Dict-reading passes
+in step 3 dereferencing a `Dict<text, HirModule>` value that native bootstrap
+dropped under full-closure pressure. That failure mode is already documented in
+the tree — `validate_value_struct_layouts` was moved to an aligned array view
+for exactly this reason ("native bootstrap can retain a dictionary key while
+dropping its aggregate HIR value", `35.semantics/value_struct_layout.spl`), and
+`lower_and_check_impl` carries the same warning about reading the bootstrap
+entry back through the Dict. The other four consumers were never converted.
+
+### Changed (working tree, uncommitted)
+
+- `driver_hir_pipeline_lowering.spl`: `log_phase` receipts after the loop
+  (`hir:loop:done`), after the ctx publish (`hir:ctx_publish:done`), around
+  validation (`hir:validate:start/done`), after `ast_reset`
+  (`hir:ast_reset:done`), after the lexer release (`hir:lexer_release:done`)
+  and between the two reclaims, on BOTH the streaming and the legacy path. All
+  gated by the existing `SIMPLE_COMPILER_PHASE_PROFILE=1`, which the lane sets.
+  The streaming `file:done` now prints `driver_dict_entry_count(...)` instead
+  of the broken `.len()`.
+- `driver_hir_pipeline_support.spl`: a receipt around each of the five
+  sub-passes, plus a fail-closed census before the first Dict-reading pass:
+  every `hir_modules[key]` is tested with `rt_heap_ref_wellformed` (the C
+  function is a bit test; the `val module_value: HirModule = hir_modules[key]`
+  binding before it may itself copy the aggregate under native value
+  semantics, which is why the census is bracketed by its own
+  `dict_census:start/done` receipts); any dropped value is named on stderr
+  UNCONDITIONALLY (`[post-hir-validation-fatal] ... dropped HIR aggregate:
+  <module>`), an error is recorded, and the four Dict passes are skipped. If
+  the predicate rejects EVERY module it is treated as unreliable for this
+  value representation (`HirModule` is a `struct`; every existing
+  `rt_heap_ref_wellformed` caller passes a class or an array), a one-line
+  notice is printed and the validators run unguarded as before — the census
+  cannot turn a healthy build into a failure. If the hypothesis is right the
+  next Stage 3 fails loudly with module names instead of dumping core; if it
+  is wrong, the receipts name the step that does.
+
+The driver is compiled INTO Stage 2 (a marker added to source did not appear
+when the current stage2 binary ran the worker), so these edits take effect on
+the next Stage-2 rebuild, which the bootstrap performs anyway. Caveat: the
+binary that crashed (`stage2-admitted`) is gone and Stage 2 was rebuilt at
+08:06 with 2 modules recompiled, so the next run is not guaranteed to fault
+identically.
+
+### Probe recipe (seconds, does not disturb a running build)
+
+```sh
+cd /home/yoon/dev/simple
+SIMPLE_STAGE3_STREAMING_SURFACES=1 SIMPLE_NATIVE_BUILD_WORKER=1 \
+SIMPLE_EXECUTION_MODE=interpret SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE=segv-probe \
+SIMPLE_COMPILER_PHASE_PROFILE=1 \
+SIMPLE_RUNTIME_PATH=$PWD/build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage2-runtime-authority \
+build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple run src/app/cli/native_build_worker.spl \
+  --source $PWD/src/app/cli --source $PWD/src/lib --entry-closure \
+  --entry /tmp/probe.spl -o /tmp/probe.out 2> /tmp/probe.stderr
+grep -o 'phase3:[a-z_:]*' /tmp/probe.stderr | sort -u
+```
+
+Invoking the worker directly (not `native-build`) is what makes the driver's
+stderr visible: the orchestrator relays it only on failure. The link step of
+this direct form fails in this shell environment (`collect2`), which is after
+phase 4 and irrelevant to the window.

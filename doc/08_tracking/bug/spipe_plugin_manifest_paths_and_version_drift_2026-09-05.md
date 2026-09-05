@@ -78,7 +78,7 @@ even though `/home/yoon/dev/simple/bin/simple_mcp_server` existed (7,367 bytes,
 mtime 2026-09-04) before the session began. `.mcp.json` gives that command as
 the **relative** path `bin/simple_mcp_server` with `"cwd": "."`; a relative
 command containing a slash is resolved against the spawner's cwd, so the client
-evidently did not spawn from the repo root. `~/.codex/config.toml` uses the
+apparently did not spawn from the repo root. The shebang hypothesis was checked and eliminated: `head -1 bin/simple_mcp_server` is `#!/bin/sh` and the file is executable, so a missing interpreter is not the cause. `~/.codex/config.toml` uses the
 absolute form and is unaffected. Making `.mcp.json`'s commands absolute — or
 confirming the host honours `cwd` for `command` as well as for the child — would
 remove the ambiguity.

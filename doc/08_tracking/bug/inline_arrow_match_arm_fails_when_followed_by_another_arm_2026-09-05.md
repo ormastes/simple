@@ -110,3 +110,50 @@ exists so the choice is made deliberately.
 Where in the grammar the `|` alternation/or ambiguity is resolved. The defect is
 identical on the seed and on Stage-2, so it is in shared grammar rather than in
 either backend.
+
+## Usage census — the form is documented but never actually used
+
+```
+/usr/bin/grep -rn --include='*.spl' -E '^[[:space:]]+\| .+ -> [^[:space:]]' src/ \
+  | grep -vc compiler_rust
+0
+```
+
+**Zero** inline `| pattern -> body` match arms exist in owned Simple source
+(`src/**`, excluding the vendored `src/compiler_rust/` seed tree). That is
+consistent with the form having never worked: the codebase uses `case` arms and
+block-form `| ->` arms throughout. The 441-hit figure a first pass produced was
+an artifact of ugrep silently treating `--include=*.spl` as a path — it counted
+`.md`, `.lean` and markdown tables. The corrected count is 0.
+
+## Second, independent grammar gap found the same session: `=>` lambdas
+
+`doc/07_guide/quick_reference/syntax_quick_reference.md:348` documents
+`nums.flat_map(x => [x, x * 10])`, and the file uses `x => ...` as the explicit
+lambda form. It does not parse, on **either** compiler.
+
+Smallest reproducer (3 lines):
+
+```simple
+fn main():
+    val f = x => x + 1
+    print "{f(1)}"
+```
+
+Seed (`bin/simple run`):
+
+```
+error: compile failed: parse: Unexpected token: expected expression, found FatArrow
+```
+
+Stage-2 `native-build` gives the same `expected expression, found FatArrow` at
+the `=>` column.
+
+The backslash form parses on both and evaluates correctly on the seed
+(`val add_k = \x: x + k` -> `add_k(5)` == 15), so `\x:` is the working spelling
+today. It is recorded here rather than quietly substituted for the same reason
+as the match arms: the guide recommends the form that does not work.
+
+Note that `\x:` closures, while they parse and interpret correctly, **SEGV under
+Stage-2 native codegen** — that is a separate defect, tracked as Defect 3 in
+`stage2_native_codegen_silent_wrong_values_aarch64_2026-09-05.md`.

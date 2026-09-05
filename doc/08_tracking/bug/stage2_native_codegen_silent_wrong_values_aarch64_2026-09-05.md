@@ -144,3 +144,21 @@ whatever is in the return register.
 
 Sources are throwaway; each is reproduced verbatim above. Each builds in ~6-8s
 with the recipe at the top, so re-verification is cheap.
+
+## Defect 5 — corroboration that `Dict.size` really is undefined
+
+Checked after the fact so the "typos become wrong answers" claim is not resting
+on the seed's word alone:
+
+```
+/usr/bin/grep -rn --include='*.spl' -E 'fn size\(' src/lib/
+```
+
+returns `size()` methods on unrelated library types only —
+`src/lib/tooling/ds_utils.spl:40,86,155`,
+`src/lib/nogc_async_mut_noalloc/baremetal/riscv/dtb_gen.spl:115`,
+`src/lib/nogc_async_mut_noalloc/collections/fixed_array.spl:96` — and **none on
+a dict/map type**. Stage-2 compiles `src/lib` from source with the same
+`--source` roots used for the probe, so it had the same view the seed did and
+still returned a value. The claim stands: this is an unresolved method silently
+producing `3`, not a real method computing the wrong number.
