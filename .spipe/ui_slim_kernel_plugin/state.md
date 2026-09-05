@@ -36,7 +36,8 @@ plan-done (research, design, plan written 2026-09-05; implementation Wave 0 not 
 - [x] spec (Wave 1 RED-first) — screen_batching, tui_route_closure, composition_adapter specs
 - [x] implement (Wave 1) — 2026-09-05: A03 screen batching (40→1 row copies, 11/11), P08 shared_wm_route split (async_app closure 343→9, 2/2), A02 composition_adapter (6/6), A01 `check-ui-slim-closure.shs` (selftest 5/5). All evidence is SEED-LANE (diagnostic), not a certified pure-Simple PASS.
 - [ ] verify — needs deployed pure-Simple `ui`; the closure gate must run as a push-tier manifest row (`config/check/must_check_gates.sdn`) once green
-- [ ] Wave 2 (event wait/watch, Tiny after transfer, packs) · Wave 3 (measure, certify)
+- [~] Wave 2 — A06 landed 2026-09-05 (`event_wait.spl`, blocking recv, single file read; 9/9 seed lane, sabotage bites; commit `9b4bde48`). Gate hardened to ERROR on unresolved import edges (`cf7f3843`) and wired as advisory push row `push-ui-slim-closure` (`8cbc097d`). Open: Tiny (after transfer), packs, and the `simple ui tui` stub wiring decision.
+- [ ] Wave 3 (measure, certify)
 - [ ] ship
 
 ## Blockers ledger (2026-09-05)
