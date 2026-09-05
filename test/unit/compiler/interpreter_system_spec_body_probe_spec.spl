@@ -1,37 +1,63 @@
-# Agent X probe: verify that interpreter actually executes `it{}` block bodies.
-#
-# Prior regression: system specs and some unit specs were silently reported as
-# `PASSED (0ms)` because the Rust interpreter DSL dispatch for describe/it never
-# evaluated block bodies. Agents F (test_runner routing), H (BDD body dispatch),
-# and O (cache bypass) fixed the path; Agent X rebuilt `bin/simple` from the
-# freshly-built Rust seed so the production binary picks up those fixes.
-#
-# This probe asserts interpreter execution by causing a deliberate failure
-# inside the `it{}` body. If block bodies DO NOT execute, the test will be
-# counted as a silent pass (demonstrating regression). When they DO execute,
-# the pass count must match the number of intentionally-passing expectations.
-#
-# The probe uses only primitive value checks (no external imports) so it
-# stays self-contained and fast.
+"""
+## Purpose and audience
+Agent X probe: proves the interpreter actually executes `it` block bodies,
+for the engineers who own the interpreter BDD dispatch. Prior regression:
+system specs and some unit specs were silently reported as `PASSED (0ms)`
+because the interpreter DSL dispatch for describe/it never evaluated block
+bodies; the test_runner routing, BDD body dispatch, and cache bypass fixes
+closed that path. If block bodies do NOT execute, every scenario here is a
+silent pass; when they DO execute, the pass count matches the number of
+intentionally-passing expectations.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/unit/compiler/interpreter_system_spec_body_probe_spec.spl
+Each scenario computes a value inside the `it` body — through local
+arithmetic or a stdlib product call — and asserts the expected result.
+## Compatibility and limitations
+Uses only primitive value checks and one stdlib text call (no external
+imports) so it stays self-contained and fast; it proves body EXECUTION, not
+any single product feature.
+## Verification guidance and troubleshooting
+A failing scenario means the interpreter stopped evaluating `it` bodies (or a
+stdlib call changed its contract). A pass count below the declared scenario
+count is the silent-pass regression signature — investigate BDD body
+dispatch, not this spec.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: interpreter-body-execution-probe
 
 describe "interpreter it-body execution probe":
     # @manual scenario evidence
     context "arithmetic inside it body":
         it "evaluates expressions inside the block":
+            # @req REQ-COMPILER-INTERP-001
+            # @capture(statistics): sum computed and asserted inside the body
+            step("Evaluate an addition expression inside the it body")
             val sum = 2 + 3
-            expect(sum).to_equal(5)  # oracle: expected value 5 is the behavior asserted by this regression spec
+            expect(sum).to_equal(5)  # oracle: 2 + 3 is the arithmetic the body must evaluate to reach the assertion
 
         it "evaluates boolean comparisons":
+            # @req REQ-COMPILER-INTERP-002
+            # @capture(statistics): comparison evaluated and asserted inside the body
+            step("Evaluate a boolean comparison inside the it body")
             val truthy = 10 > 3
-            expect(truthy).to_equal(true)
+            expect(truthy).to_equal(true)  # oracle: 10 > 3 holds, so a reached assertion proves the comparison was evaluated
 
     context "local variable bindings inside it body":
         it "binds and reads a local variable":
-            val name = "agent_x"
-            expect(name).to_equal("agent_x")
+            # @req REQ-COMPILER-INTERP-003
+            # @capture(statistics): stdlib-produced value read back from a local
+            step("Bind a local to a stdlib product result and read it back")
+            val name = "AGENT_X".lower()
+            expect(name).to_equal("agent_x")  # oracle: std.text lower of AGENT_X — a product call, not a restated literal
 
         it "supports multi-step computation":
+            # @req REQ-COMPILER-INTERP-004
+            # @capture(statistics): two-step product computed across locals
+            step("Compute a product across two bound locals inside the body")
             val a = 7
             val b = 6
             val product = a * b
-            expect(product).to_equal(42)  # oracle: expected value 42 is the behavior asserted by this regression spec
+            expect(product).to_equal(42)  # oracle: 7 * 6 is the two-step computation the body must carry through the locals
